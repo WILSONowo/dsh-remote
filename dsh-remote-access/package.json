@@ -43,9 +43,7 @@
     "@deepseek-ai/dsh-tools": "^0.0.1-rc.1"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
-    "typescript": "^5.5.0",
-    "esbuild": "^0.28.2"
+
   },
   "license": "MIT"
 }
