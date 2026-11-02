@@ -1,414 +1,250 @@
-﻿// @ts-nocheck
-// dsh-remote-access v2.4.1 TypeScript source (migrated from lib).
-// Transitional: @ts-nocheck skips semantic checks; DSH ctx/webServer dynamic types added later.
-// Syntax is still checked. npm run build emits to lib/; npm test smoke-tests the build output.
+// @ts-nocheck
+import { en, zh, detailKey } from './client-copy.js';
+import { settingsCss } from './client-style.js';
 
 window.__ModuleLoader__.load({
-  id: "dsh-remote-access",
-  factory: function (require) {
-    var module = { exports: {} };
-    var exports = module.exports;
-    var react = require("react");
-    var h = react.createElement;
-    var useState = react.useState;
-    var useEffect = react.useEffect;
-    var useRef = react.useRef;
-
-    var S = {
-      root: { display: "flex", flexDirection: "column", gap: "12px", padding: "4px 0" },
-      card: {
-        border: "1px solid var(--dsw-alias-border-l1)", borderRadius: "10px",
-        background: "var(--dsw-alias-bg-layer-1)", padding: "14px",
-      },
-      row: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
-      title: { fontSize: 13, fontWeight: 600, color: "var(--dsw-alias-label-primary)" },
-      label: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", lineHeight: 1.6 },
-      sub: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", lineHeight: 1.7 },
-      mono: { fontFamily: "ui-monospace, monospace", fontSize: 12, color: "var(--dsw-alias-label-secondary)", wordBreak: "break-all" },
-      input: {
-        border: "1px solid var(--dsw-alias-border-l1)", borderRadius: "6px",
-        background: "var(--dsw-alias-bg-layer-1)", color: "var(--dsw-alias-label-primary)",
-        padding: "5px 10px", fontSize: 12, width: 140,
-      },
-      err: { fontSize: 12, color: "var(--dsw-alias-state-error-primary)", lineHeight: 1.6 },
-      btn: {
-        border: "1px solid var(--dsw-alias-border-l1)", borderRadius: "6px",
-        background: "transparent", color: "var(--dsw-alias-label-primary)",
-        padding: "5px 12px", fontSize: 12, cursor: "pointer",
-      },
-      btnPrimary: {
-        border: "1px solid var(--dsw-alias-brand-primary)", borderRadius: "6px",
-        background: "var(--dsw-alias-brand-primary)", color: "#0D1B2A",
-        padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer",
-      },
-      ok: { fontSize: 12, color: "var(--dsw-alias-state-success-primary)", lineHeight: 1.6 },
-      badge: {
-        display: "inline-block", padding: "2px 8px", borderRadius: "10px", fontSize: 11, fontWeight: 600,
-      },
-      divider: { border: "none", borderTop: "1px dashed var(--dsw-alias-border-l1)", margin: "4px 0 0" },
-    };
-
-    function fetchJson(path, opts) {
-      return fetch(path, opts).then(function (r) { return r.json(); });
-    }
-
-    // ---------- 移动端 App 配对确认（全局对话框 + 配对管理） ----------
-    var pairDialogEl = null;
-    var pairDialogShown = false;
-
-    function removePairDialog() {
-      if (pairDialogEl && pairDialogEl.parentNode) pairDialogEl.parentNode.removeChild(pairDialogEl);
-      pairDialogEl = null;
-      pairDialogShown = false;
-    }
-
-    function showPairDialog(pendingDevice, respond) {
-      removePairDialog();
-      pairDialogShown = true;
-
-      var overlay = document.createElement("div");
-      overlay.setAttribute("data-dsh-pair-dialog", "1");
-      overlay.style.cssText = [
-        "position:fixed", "inset:0", "z-index:2147483000",
-        "display:flex", "align-items:center", "justify-content:center",
-        "background:rgba(13,27,42,.62)", "backdrop-filter:blur(4px)",
-        "padding:20px",
-      ].join(";");
-
-      var card = document.createElement("div");
-      card.style.cssText = [
-        "background:var(--dsw-alias-bg-layer-1)", "border:1px solid var(--dsw-alias-border-l1)",
-        "border-radius:14px", "padding:24px", "max-width:380px", "width:100%",
-        "box-shadow:0 20px 60px rgba(0,0,0,.5)", "color:var(--dsw-alias-label-primary)",
-      ].join(";");
-
-      var title = document.createElement("div");
-      title.textContent = "手机设备「" + pendingDevice.name + "」请求首次连接";
-      title.style.cssText = "font-size:15px;font-weight:600;line-height:1.5;margin-bottom:8px";
-
-      var sub = document.createElement("div");
-      sub.textContent = "允许该设备远程控制这台电脑？";
-      sub.style.cssText = "font-size:13px;color:var(--dsw-alias-label-secondary);line-height:1.6;margin-bottom:18px";
-
-      var row = document.createElement("div");
-      row.style.cssText = "display:flex;gap:10px;justify-content:flex-end";
-
-      function mkBtn(label, primary) {
-        var b = document.createElement("button");
-        b.textContent = label;
-        b.style.cssText = primary
-          ? "border:1px solid var(--dsw-alias-brand-primary);border-radius:6px;background:var(--dsw-alias-brand-primary);color:#0D1B2A;padding:7px 16px;font-size:13px;font-weight:600;cursor:pointer"
-          : "border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);padding:7px 16px;font-size:13px;cursor:pointer";
-        return b;
-      }
-
-      var allowBtn = mkBtn("允许", true);
-      var denyBtn = mkBtn("拒绝", false);
-
-      allowBtn.onclick = function () { allowBtn.disabled = true; denyBtn.disabled = true; respond(pendingDevice.deviceId, "approve"); };
-      denyBtn.onclick = function () { allowBtn.disabled = true; denyBtn.disabled = true; respond(pendingDevice.deviceId, "deny"); };
-
-      row.appendChild(allowBtn);
-      row.appendChild(denyBtn);
-      card.appendChild(title);
-      card.appendChild(sub);
-      card.appendChild(row);
-      overlay.appendChild(card);
-      document.body.appendChild(overlay);
-      pairDialogEl = overlay;
-    }
-
-    function PairSection() {
-      var [devices, setDevices] = useState(null);
-      var [busyId, setBusyId] = useState(null);
-      var pairTimer = useRef(null);
-
-      function refreshList() {
-        fetchJson("/api/remote-access/pair/list")
-          .then(function (r) { if (r && r.ok) setDevices(r.devices || []); })
-          .catch(function () {});
-      }
-
-      function respond(deviceId, outcome) {
-        fetchJson("/api/remote-access/pair/respond", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ deviceId: deviceId, outcome: outcome }),
-        })
-          .then(function () { removePairDialog(); refreshList(); })
-          .catch(function () { removePairDialog(); });
-      }
-
-      function pollStatus() {
-        fetchJson("/api/remote-access/pair/status")
-          .then(function (r) {
-            if (!r || !r.ok) return;
-            var pendingDevice = r.pendingDevice || null;
-            if (r.state === "pending" && pendingDevice && !pairDialogShown) {
-              showPairDialog(pendingDevice, respond);
-            } else if (r.state !== "pending" && pairDialogShown) {
-              removePairDialog();
-            }
-          })
-          .catch(function () {});
-      }
-
-      useEffect(function () {
-        refreshList();
-        pollStatus();
-        pairTimer.current = setInterval(pollStatus, 2000);
-        return function () {
-          clearInterval(pairTimer.current);
-          removePairDialog();
-        };
-      }, []);
-
-      function revoke(deviceId) {
-        setBusyId(deviceId);
-        fetchJson("/api/remote-access/pair/revoke", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ deviceId: deviceId }),
-        })
-          .then(function () { refreshList(); })
-          .catch(function () {})
-          .finally(function () { setBusyId(null); });
-      }
-
-      return h("div", { style: S.root },
-        h("div", { style: S.title }, "配对设备管理"),
-        h("div", { style: S.sub }, "手机通过服务器连接时，先扫码或粘贴连接信息，再在电脑确认；直连可使用配对码或本机确认。撤销设备后立即断开，需重新配对。"),
-        h("div", { style: S.card },
-          devices === null ? h("div", { style: S.sub }, "加载中…") :
-            devices.length === 0 ? h("div", { style: S.sub }, "暂无已配对设备。") :
-              devices.map(function (d) {
-                return h("div", { key: d.deviceId, style: Object.assign({}, S.row, { justifyContent: "space-between", marginBottom: 8 }) },
-                  h("div", { style: S.label }, d.name || d.deviceId),
-                  h("button", { style: S.btn, disabled: busyId === d.deviceId, onClick: function () { revoke(d.deviceId); } }, busyId === d.deviceId ? "撤销中…" : "撤销"));
-              })
-        )
-      );
-    }
-
-    // ---------- 配对码（v2.1.0）：PC 生成随机码，手机 App 输入即完成配对 ----------
-    function PairCodeCard() {
-      var [pc, setPc] = useState(null);
-      var [busy, setBusy] = useState(false);
-      var [left, setLeft] = useState(0);
-      var timer = useRef(null);
-
-      function arm(r) {
-        setPc(r);
-        setLeft(Math.floor(r.expiresInSec || 600));
-        if (timer.current) clearInterval(timer.current);
-        timer.current = setInterval(function () {
-          setLeft(function (prev) {
-            if (prev <= 1) {
-              if (timer.current) clearInterval(timer.current);
-              timer.current = null;
-              // 服务端 ensureActiveCode 会自动生成新码：倒计时归零后自动拉当前码重新展示，
-              // 保证设置页「始终有码可填」，不用手动刷新/点生成。
-              fetchJson("/api/remote-access/pair/code/current")
-                .then(function (nr) { if (nr && nr.ok && nr.code) arm(nr); })
-                .catch(function () { setPc(null); });
-              return 0;
-            }
-            return prev - 1;
-          });
-        }, 1000);
-      }
-
-      function generate() {
-        setBusy(true);
-        fetchJson("/api/remote-access/pair/code/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        })
-          .then(function (r) { if (r && r.ok && r.code) arm(r); })
-          .catch(function () {})
-          .finally(function () { setBusy(false); });
-      }
-
-      // 打开设置页即自动展示当前配对码（服务端 ensureActiveCode 保证始终有码）
-      useEffect(function () {
-        fetchJson("/api/remote-access/pair/code/current")
-          .then(function (r) { if (r && r.ok && r.code) arm(r); })
-          .catch(function () {});
-        return function () { if (timer.current) clearInterval(timer.current); };
-      }, []);
-
-      var mm = String(Math.floor(left / 60)).padStart(2, "0");
-      var ss = String(left % 60).padStart(2, "0");
-
-      return h("div", { style: S.card },
-        h("div", { style: S.row },
-          h("div", { style: S.title }, "直连配对码"),
-          pc ? h("span", { style: Object.assign({}, S.badge, { background: "rgba(52,199,89,.15)", color: "var(--dsw-alias-state-success-primary)" }) }, "有效 " + mm + ":" + ss) : null),
-        h("div", { style: S.sub }, "生成一个 6 位随机配对码，手机直连本电脑后输入即可配对。服务器连接请使用“添加手机”。"),
-        pc ? h("div", { style: Object.assign({}, S.mono, { fontSize: 30, fontWeight: 700, letterSpacing: "0.4em", color: "var(--dsw-alias-brand-primary)", marginTop: 8, marginBottom: 2 }) }, pc.code) : null,
-        pc ? h("div", { style: S.sub }, "10 分钟有效 · 最多试错 5 次 · 验证通过立即作废") : null,
-        h("div", { style: Object.assign({}, S.row, { marginTop: 10 }) },
-          h("button", { style: S.btnPrimary, disabled: busy, onClick: generate }, busy ? "生成中…" : pc ? "重新生成" : "生成配对码"))
-      );
-    }
-
-    // ---------- 公网域名信任白名单（v2.4.0）：写入 cordis.patch.yml 的 connection 行（!!js 拼接 ctx.webRuntime.trustedHosts） ----------
-    function TrustedHostsCard() {
-      var [hosts, setHosts] = useState(null);
-      var [input, setInput] = useState("");
-      var [busy, setBusy] = useState(false);
-      var [err, setErr] = useState(null);
-
-      function refresh() {
-        fetchJson("/api/remote-access/trusted-hosts")
-          .then(function (r) {
-            if (r && r.ok) { setHosts(r.hosts || []); setErr(null); }
-            else setErr((r && r.error) || "加载失败");
-          })
-          .catch(function () { setErr("无法连接插件后端（请检查 DeepSeek Harness 是否运行及插件是否已加载）"); });
-      }
-      useEffect(function () { refresh(); }, []);
-
-      function mutate(action, host) {
-        setBusy(true);
-        setErr(null);
-        fetchJson("/api/remote-access/trusted-hosts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: action, host: host }),
-        })
-          .then(function (r) {
-            if (r && r.ok) {
-              setHosts(r.hosts || []);
-              if (action === "add") setInput("");
-            } else {
-              setErr((r && r.error) || "操作失败");
-            }
-          })
-          .catch(function () { setErr("请求失败"); })
-          .finally(function () { setBusy(false); });
-      }
-
-      return h("div", { style: S.card },
-        h("div", { style: S.row },
-          h("div", { style: S.title }, "公网域名白名单"),
-          hosts !== null ? h("span", { style: Object.assign({}, S.badge, { background: "rgba(142,142,147,.15)", color: "var(--dsw-alias-label-secondary)" }) }, "共 " + hosts.length + " 条") : null),
-        h("div", { style: S.sub }, "手机通过公网隧道连接时，DeepSeek Harness 核心校验请求的 Host 域名；把隧道的公网域名加进来手机才能连上。填「域名」或「域名:端口」（不带 https://；中文域名请用 punycode）。"),
-        hosts === null ? h("div", { style: S.sub }, "加载中…") :
-          hosts.length === 0 ? h("div", { style: S.sub }, "暂无白名单条目。") :
-            hosts.map(function (x) {
-              return h("div", { key: x, style: Object.assign({}, S.row, { justifyContent: "space-between", marginBottom: 6 }) },
-                h("span", { style: S.mono }, x),
-                h("button", { style: S.btn, disabled: busy, onClick: function () { mutate("remove", x); } }, "删除"));
-            }),
-        h("div", { style: Object.assign({}, S.row, { marginTop: 10 }) },
-          h("input", { style: Object.assign({}, S.input, { width: 230 }), placeholder: "如 tunnel.example.com 或 域名:8080", value: input, onChange: function (e) { setInput(e.target.value); } }),
-          h("button", { style: S.btnPrimary, disabled: busy || !input.trim(), onClick: function () { mutate("add", input.trim()); } }, busy ? "处理中…" : "添加")),
-        err ? h("div", { style: Object.assign({}, S.err, { marginTop: 6 }) }, err) : null,
-        h("div", { style: S.sub, marginTop: 6 }, "白名单写入 connection 行的 trustedHosts（拼回 LAN 地址与 --trusted-host），修改后立即生效（DeepSeek Harness 热监视 cordis.patch.yml）；如未生效请重启 DeepSeek Harness。白名单只解决 Host 校验，手机请求仍需配对拿到通道 token。")
-      );
-    }
-
-    function RelayCard() {
-      var [config, setConfig] = useState(null);
-      var [busy, setBusy] = useState(false);
-      var [error, setError] = useState("");
-      var [status, setStatus] = useState("");
-      var [pairing, setPairing] = useState(null);
-      var [now, setNow] = useState(Date.now());
-      var [advanced, setAdvanced] = useState(false);
-      var labels = {disabled:"未启用", registering:"正在注册电脑", connecting:"连接中", connected:"已连接", reconnecting:"正在重连", error:"连接失败"};
-      function refresh(initial) {
-        fetchJson("/api/remote-access/relay/config").then(function(r) {
-          if (!r || !r.ok) throw new Error("无法读取中转设置");
-          if (initial) setConfig(r);
-          setStatus((labels[r.state] || r.state) + (r.detail ? " · " + r.detail : ""));
-        }).catch(function() { setStatus("无法读取连接状态"); });
-      }
-      useEffect(function() {
-        refresh(true);
-        var timer = setInterval(function() { setNow(Date.now()); refresh(false); }, 3000);
-        return function() { clearInterval(timer); };
-      }, []);
-      function change(key, value) { setConfig(function(c) { return Object.assign({}, c, { [key]: value }); }); }
-      function save() {
-        setBusy(true); setError(""); setPairing(null);
-        fetchJson("/api/remote-access/relay/config", {
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({enabled:config.enabled, serverUrl:config.serverUrl, computerName:config.computerName,
-            caFile:config.caFile, allowInsecureLoopback:config.allowInsecureLoopback})
-        }).then(function(r) {
-          if (!r || !r.ok) { setError(r && r.error || "保存失败"); return; }
-          refresh(true);
-        }).catch(function() { setError("保存失败，请检查电脑端连接"); }).finally(function() { setBusy(false); });
-      }
-      function addPhone() {
-        setBusy(true); setError(""); setPairing(null);
-        fetchJson("/api/remote-access/relay/pairing", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
-          .then(function(r) { if (!r || !r.ok) throw new Error(r && r.error || "无法生成二维码"); setPairing(r); setNow(Date.now()); })
-          .catch(function(e) { setError(e.message || "无法生成二维码"); }).finally(function() { setBusy(false); });
-      }
-      function field(label, key, placeholder) {
-        return h("label", {style:{display:"block", marginTop:10}},
-          h("div", {style:S.sub}, label),
-          h("input", {style:Object.assign({}, S.input, {width:"100%", boxSizing:"border-box"}),
-            value:config[key] || "", placeholder:placeholder, disabled:busy,
-            onChange:function(e) { change(key,e.target.value); }}));
-      }
-      return h("div", {style:S.card},
-        h("div", {style:S.title}, "服务器"),
-        h("div", {style:S.sub}, "填写服务器地址并启用，电脑身份自动注册。手机扫描“添加手机”生成的二维码，再在电脑确认。每台手机分别配对，可同时控制这台电脑。"),
-        h("div", {style:S.sub, role:"status"}, status || "加载中…"),
-        config ? h("div", {},
-          h("label", {style:S.row}, h("input", {type:"checkbox", checked:config.enabled, disabled:busy,
-            onChange:function(e) { change("enabled",e.target.checked); }}), "启用在线服务"),
-          field("服务器地址", "serverUrl", "https://relay.example.com:8443"),
-          field("电脑名称", "computerName", "电脑"),
-          h("button", {style:S.btn, onClick:function() { setAdvanced(!advanced); }}, advanced ? "收起高级设置" : "高级设置"),
-          advanced ? h("div", {},
-          field("自定义 CA 证书路径（可选）", "caFile", "使用公开受信证书时留空")) : null,
-          h("div", {style:Object.assign({},S.row,{marginTop:12})},
-            h("button", {style:S.btnPrimary, disabled:busy, onClick:save}, busy ? "处理中…" : "保存中转设置"),
-            h("button", {style:S.btn, disabled:busy, onClick:addPhone}, "添加手机")),
-          pairing ? h("div", {style:{marginTop:12}},
-            pairing.expiresAt > now ? h("div", {},
-              h("img", {src:pairing.image, alt:"手机配对二维码", style:{width:300,maxWidth:"100%",height:"auto"}}),
-              h("div", {style:S.sub}, "用手机 App 扫码，随后在电脑确认。每个二维码仅供一台手机使用，有效期 2 分钟。"),
-              h("div", {style:S.sub}, "无法扫码时，复制下面的连接信息，在手机首页选择“粘贴连接信息”。"),
-              h("textarea", {readOnly:true, value:pairing.link, "aria-label":"临时连接信息", style:Object.assign({},S.input,{width:"100%",boxSizing:"border-box"}), onFocus:function(e) { e.target.select(); }}))
-              : h("div", {style:S.sub}, "二维码已过期，请重新点击“添加手机”。")) : null
-        ) : null,
-        error ? h("div", {style:S.err, role:"alert"}, error) : null);
-    }
-
-    // ---------- 设置页「远程控制」：远程互信认证 ----------
-    function TrustSection() {
-      return h("div", { style: S.root },
-        h("div", { style: S.row },
-          h("div", { style: S.title }, "远程身份认证"),
-          h("span", { style: Object.assign({}, S.badge, { background: "rgba(52,199,89,.15)", color: "var(--dsw-alias-state-success-primary)" }) }, "● 已启用")),
-        h("div", { style: S.sub }, "通过直连或服务器连接。服务器连接需扫码或粘贴临时连接信息后在电脑确认；直连可使用配对码或本机确认。"),
-        h("div", { style: S.ok }, "设备管理和中转配置仅允许在本机操作；手机配对后获得独立访问权限。"),
-        h(RelayCard, {}),
-        h(PairCodeCard, {}),
-        h(TrustedHostsCard, {}),
-        h("hr", { style: S.divider }),
-        h(PairSection, {})
-      );
-    }
-
-    function apply(ctx) {
-      ctx.slots.inject("settings.section", function () {
-        return ctx.slots.register(
-          { name: "settings.section", id: "dsh-remote-access", order: 40, label: function () { return "远程控制"; } },
-          TrustSection
-        );
+  id: 'dsh-remote-access',
+  factory(require) {
+    const React = require('react');
+    const { createElement: h, useState, useEffect, useRef } = React;
+    const { Button, Switch, Modal } = require('@deepseek-ai/dsh-client-ui-primitives');
+    const NS = 'dsh-remote-access';
+    const path = '/api/remote-access/';
+    const time = seconds => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+    const button = (text, props = {}) => h(Button, { size: 'sm', variant: 'outline', ...props }, text);
+    const muted = text => h('p', { className: 'remote-muted' }, text);
+    const failure = text => text ? h('p', { className: 'remote-error', role: 'alert' }, text) : null;
+    async function request(route, body, signal) {
+      const response = await fetch(path + route, {
+        method: body === undefined ? 'GET' : 'POST', signal,
+        ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
       });
+      const value = await response.json();
+      if (!response.ok || !value?.ok) throw new Error(value?.error || 'request_failed');
+      return value;
     }
-
-    exports.apply = apply;
-    exports.inject = ["slots"];
-    return module.exports;
-  }
+    function Section({ title, hint, action, children }) {
+      return h('section', { className: 'remote-section' },
+        h('div', { className: 'remote-head' }, h('div', {}, h('h3', {}, title), hint && muted(hint)), action), children);
+    }
+    function Field({ title, name, value, onChange, disabled, placeholder, hint }) {
+      const id = 'dsh-remote-' + name;
+      return h('div', { className: 'remote-field' }, h('label', { htmlFor: id }, title),
+        h('div', {}, h('input', { id, className: 'remote-input', value: value || '', disabled, placeholder,
+          autoComplete: 'off', spellCheck: false, onChange: e => onChange(e.target.value) }), hint && muted(hint)));
+    }
+    function RelaySection({ t }) {
+      const [config, setConfig] = useState(null);
+      const [live, setLive] = useState(null);
+      const [loadFailed, setLoadFailed] = useState(false);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState('');
+      const [saved, setSaved] = useState(false);
+      const [pairing, setPairing] = useState(null);
+      const [now, setNow] = useState(Date.now());
+      const [copyState, setCopyState] = useState('');
+      const mounted = useRef(false);
+      const loading = useRef(false);
+      async function refresh(initial = false) {
+        if (loading.current) return;
+        loading.current = true;
+        try {
+          const r = await request('relay/config');
+          if (!mounted.current) return;
+          setConfig(c => initial || !c ? r : c); setLive(r); setLoadFailed(false);
+        } catch { if (mounted.current) setLoadFailed(true); }
+        finally { loading.current = false; }
+      }
+      useEffect(() => {
+        mounted.current = true; refresh(true);
+        const timer = setInterval(() => refresh(), 3000);
+        return () => { mounted.current = false; clearInterval(timer); };
+      }, []);
+      useEffect(() => {
+        if (!pairing) return;
+        const timer = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(timer);
+      }, [pairing]);
+      function change(key, value) {
+        setConfig(c => ({ ...c, [key]: value })); setSaved(false); setError(''); setPairing(null);
+      }
+      async function save() {
+        setBusy(true); setError(''); setSaved(false); setPairing(null);
+        try {
+          const r = await request('relay/config', {
+            enabled: config.enabled, serverUrl: config.serverUrl, computerName: config.computerName,
+            caFile: config.caFile, allowInsecureLoopback: config.allowInsecureLoopback,
+          });
+          if (!mounted.current) return;
+          setLive(r); setSaved(true); await refresh(true);
+        } catch { if (mounted.current) setError('saveFailed'); }
+        finally { if (mounted.current) setBusy(false); }
+      }
+      async function addPhone() {
+        setBusy(true); setError(''); setCopyState('');
+        try {
+          const r = await request('relay/pairing', {});
+          if (mounted.current) { setPairing(r); setNow(Date.now()); }
+        } catch { if (mounted.current) setError('connectFirst'); }
+        finally { if (mounted.current) setBusy(false); }
+      }
+      async function copy() {
+        try { await navigator.clipboard.writeText(pairing.link); setCopyState('copied'); }
+        catch { setCopyState('copyFailed'); }
+      }
+      const seconds = pairing ? Math.max(0, Math.ceil((pairing.expiresAt - now) / 1000)) : 0;
+      const state = live?.state || 'disabled';
+      const knownState = ['disabled', 'registering', 'connecting', 'connected', 'reconnecting', 'error'].includes(state) ? state : 'error';
+      return h(Section, { title: t('server'), hint: t('serverHint'),
+        action: config && h(Switch, { checked: config.enabled, disabled: busy, label: t('enable'), onChange: v => change('enabled', v) }) },
+        !config && !loadFailed && muted(t('loading')),
+        loadFailed && h('div', {}, failure(t('loadFailed')), button(t('retry'), { onClick: () => refresh() })),
+        config && h('div', { className: 'remote-form' },
+          h(Field, { title: t('address'), name: 'server', value: config.serverUrl, disabled: busy,
+            placeholder: 'https://relay.example.com', onChange: v => change('serverUrl', v) }),
+          h(Field, { title: t('computerName'), name: 'name', value: config.computerName, disabled: busy,
+            placeholder: t('computer'), onChange: v => change('computerName', v) }),
+          h('details', {}, h('summary', {}, t('advanced')),
+            h(Field, { title: t('ca'), name: 'ca', value: config.caFile, disabled: busy, hint: t('caHint'), onChange: v => change('caFile', v) })),
+          h('div', { className: 'remote-row' },
+            h('span', { className: 'remote-status', 'data-state': knownState, role: 'status' }, t(knownState)),
+            h('div', { className: 'remote-actions' }, saved && h('span', { className: 'remote-muted', role: 'status' }, t('saved')),
+              button(t(busy ? 'saving' : 'save'), { disabled: busy, onClick: save }),
+              button(t('addPhone'), { variant: 'primary', disabled: busy || loadFailed || state !== 'connected' || !config.enabled, onClick: addPhone }))),
+          live?.detail && failure(t(detailKey(live.detail)))),
+        failure(error && t(error)),
+        h(Modal, { className: 'dsh-remote', open: !!pairing, onClose: () => setPairing(null), title: t('qrTitle'), closeLabel: t('close'),
+          footer: h('div', { className: 'remote-actions' }, button(t('close'), { onClick: () => setPairing(null) }),
+            seconds > 0 ? button(t(copyState === 'copied' ? 'copied' : 'copyLink'), { variant: 'primary', onClick: copy })
+              : button(t('regenerate'), { variant: 'primary', disabled: busy, onClick: addPhone })) },
+          h('div', { className: 'dsh-remote remote-modal-copy' },
+            seconds > 0 && pairing ? h(React.Fragment, {}, muted(t('qrHint')),
+              h('img', { className: 'remote-qr', src: pairing.image, alt: t('qrAlt') }),
+              h('div', { className: 'remote-qr-meta' }, muted(t('qrExpiry', { time: time(seconds) }))),
+              h('details', { open: copyState === 'copyFailed' || undefined }, h('summary', {}, t('connectionInfo')),
+                h('textarea', { className: 'remote-input remote-link', readOnly: true, value: pairing.link, 'aria-label': t('connectionInfo'), onFocus: e => e.target.select() }), muted(t('pasteHint'))),
+              failure(copyState === 'copyFailed' && t('copyFailed'))) : muted(t('qrExpired')))));
+    }
+    function DirectSection({ t }) {
+      const [pc, setPc] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState(false);
+      const [now, setNow] = useState(Date.now());
+      const mounted = useRef(false);
+      async function load(generate = false) {
+        setBusy(true); setError(false);
+        try {
+          const r = await request(generate ? 'pair/code/generate' : 'pair/code/current', generate ? {} : undefined);
+          if (mounted.current) { const at = Date.now(); setNow(at); setPc({ code: r.code, expiresAt: at + r.expiresInSec * 1000 }); }
+        } catch { if (mounted.current) setError(true); }
+        finally { if (mounted.current) setBusy(false); }
+      }
+      useEffect(() => {
+        mounted.current = true; load();
+        const timer = setInterval(() => setNow(Date.now()), 1000);
+        return () => { mounted.current = false; clearInterval(timer); };
+      }, []);
+      const seconds = pc ? Math.max(0, Math.ceil((pc.expiresAt - now) / 1000)) : 0;
+      useEffect(() => { if (pc && seconds === 0 && !busy && !error) load(); }, [seconds, pc, busy, error]);
+      return h(Section, { title: t('direct'), hint: t('directHint') },
+        h('div', { className: 'remote-code-row' },
+          h('div', {}, h('div', { className: 'remote-code', 'aria-label': t('code') }, pc && seconds > 0 ? pc.code : '— — —'),
+            muted(pc && seconds > 0 ? t('expires', { time: time(seconds) }) : t('codeRules'))),
+          button(t(busy ? 'generating' : pc ? 'regenerate' : 'generate'), { disabled: busy, onClick: () => load(true) })),
+        failure(error && t('requestFailed')));
+    }
+    function DevicesSection({ t }) {
+      const [devices, setDevices] = useState(null), [pending, setPending] = useState(null);
+      const [busyId, setBusyId] = useState(null), [responding, setResponding] = useState(false);
+      const [error, setError] = useState(false), [responseError, setResponseError] = useState(false);
+      const mounted = useRef(false), polling = useRef(false);
+      async function refresh() {
+        if (polling.current) return;
+        polling.current = true;
+        try {
+          const [list, status] = await Promise.all([request('pair/list'), request('pair/status')]);
+          if (!mounted.current) return;
+          setDevices(list.devices || []); setError(false);
+          setPending(status.state === 'pending' ? status.pendingDevice : null);
+        } catch { if (mounted.current) setError(true); }
+        finally { polling.current = false; }
+      }
+      useEffect(() => {
+        mounted.current = true; refresh();
+        const timer = setInterval(refresh, 2000);
+        return () => { mounted.current = false; clearInterval(timer); };
+      }, []);
+      async function revoke(id) {
+        setBusyId(id); setError(false);
+        try { await request('pair/revoke', { deviceId: id }); await refresh(); }
+        catch { if (mounted.current) setError(true); }
+        finally { if (mounted.current) setBusyId(null); }
+      }
+      async function respond(outcome) {
+        if (!pending || responding) return;
+        setResponding(true); setResponseError(false);
+        try {
+          await request('pair/respond', { deviceId: pending.deviceId, outcome });
+          if (mounted.current) setPending(null);
+          await refresh();
+        } catch { if (mounted.current) setResponseError(true); }
+        finally { if (mounted.current) setResponding(false); }
+      }
+      return h(Section, { title: t('devices'), hint: t('devicesHint') },
+        !devices ? muted(t('loading')) : devices.length ? h('ul', { className: 'remote-list' }, devices.map(d =>
+          h('li', { key: d.deviceId }, h('span', { className: 'remote-name' }, d.name || d.deviceId),
+            button(t(busyId === d.deviceId ? 'revoking' : 'revoke'), { disabled: !!busyId, onClick: () => revoke(d.deviceId) }))))
+          : h('p', { className: 'remote-empty' }, t('noDevices')),
+        failure(error && t('requestFailed')),
+        h(Modal, { className: 'dsh-remote', open: !!pending, title: t('approveTitle', { name: pending?.name || '' }), description: t('approveHint'),
+          closeLabel: t('deny'), onClose: () => respond('deny'),
+          footer: h(React.Fragment, {}, button(t('deny'), { disabled: responding, onClick: () => respond('deny') }),
+            button(t(responding ? 'responding' : 'allow'), { variant: 'primary', disabled: responding, onClick: () => respond('approve') })) },
+          h('div', { className: 'dsh-remote' }, failure(responseError && t('requestFailed')))));
+    }
+    function HostsSection({ t }) {
+      const [hosts, setHosts] = useState(null), [input, setInput] = useState('');
+      const [busy, setBusy] = useState(false), [error, setError] = useState('');
+      const mounted = useRef(false);
+      async function refresh() {
+        try { const r = await request('trusted-hosts'); if (mounted.current) { setHosts(r.hosts || []); setError(''); } }
+        catch { if (mounted.current) setError('loadFailed'); }
+      }
+      useEffect(() => { mounted.current = true; refresh(); return () => { mounted.current = false; }; }, []);
+      async function mutate(action, host) {
+        setBusy(true); setError('');
+        try {
+          const r = await request('trusted-hosts', { action, host });
+          if (mounted.current) { setHosts(r.hosts || []); if (action === 'add') setInput(''); }
+        } catch (e) { if (mounted.current) setError(/invalid|无效|域名|host/i.test(e.message) ? 'invalidDomain' : 'requestFailed'); }
+        finally { if (mounted.current) setBusy(false); }
+      }
+      return h(Section, { title: t('hosts'), hint: t('hostsHint') },
+        h('details', {}, h('summary', {}, t('advanced')),
+          !hosts ? muted(t('loading')) : !hosts.length ? h('p', { className: 'remote-empty' }, t('noHosts')) :
+            h('ul', { className: 'remote-list' }, hosts.map(host => h('li', { key: host }, h('span', { className: 'remote-name' }, host),
+              button(t('remove'), { disabled: busy, onClick: () => mutate('remove', host) })))),
+          h('form', { className: 'remote-host-form', onSubmit: e => { e.preventDefault(); if (!busy && input.trim()) mutate('add', input.trim()); } },
+            h('input', { className: 'remote-input', value: input, disabled: busy, placeholder: 'tunnel.example.com', 'aria-label': t('domain'),
+              autoComplete: 'off', spellCheck: false, onChange: e => setInput(e.target.value) }),
+            button(t(busy ? 'working' : 'add'), { type: 'submit', disabled: busy || !input.trim() })),
+          muted(t('hostFormat')), failure(error && t(error)),
+          error === 'loadFailed' && button(t('retry'), { onClick: refresh })));
+    }
+    function Settings({ t }) {
+      return h('div', { className: 'dsh-remote' },
+        h('header', { className: 'remote-intro' }, h('h2', {}, t('nav')), muted(t('intro'))),
+        h(RelaySection, { t }), h(DevicesSection, { t }), h(DirectSection, { t }), h(HostsSection, { t }));
+    }
+    function apply(ctx) {
+      ctx.effect(() => ctx.locale.register(NS, { en, zh }));
+      ctx.effect(() => {
+        const style = document.createElement('style'); style.dataset.plugin = NS; style.textContent = settingsCss;
+        document.head.appendChild(style); return () => style.remove();
+      });
+      const t = ctx.locale.bind(NS);
+      ctx.slots.inject('settings.section', () => ctx.slots.register({
+        name: 'settings.section', id: NS, order: 40, label: () => t('nav'), locale: NS,
+      }, Settings));
+    }
+    return { apply, inject: ['slots', 'locale'] };
+  },
 });

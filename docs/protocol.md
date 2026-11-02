@@ -13,7 +13,7 @@
 
 ## 自动注册与扫码
 
-内测模式不使用账号或邀请。后端一次性配置 `registration.enabled` 和 SQLite 数据库路径后，电脑可通过 `POST /relay/v1/register` 自动注册；后端 2.0.0 起拒绝静态 `hosts` 字段，注册数据库为必填配置。
+后端一次性配置 `registration.enabled` 和 SQLite 数据库路径后，电脑可通过 `POST /relay/v1/register` 自动注册；后端 2.0.0 起拒绝静态 `hosts` 字段，注册数据库为必填配置。
 插件在联网前持久保存 32 字节随机凭证，请求使用 Bearer 头；后端仅保存凭证摘要。主机 ID 为 `SHA256("dsh-remote-host-v1:" + credential)` 的前 32 个十六进制字符，凭证由密码学随机源产生，不取自机器名或硬件。重复请求返回相同 ID，改名不更换身份，切换服务器会生成新的注册凭证。
 
 `dshremote://pair#<base64url JSON>` 是 App 内扫码或粘贴的连接格式，不依赖网页或 Android 系统深链接。v1 字段为 `v`、`server`、`hostId`、`computerId`、`name`、`ticket`、`expiresAt`（毫秒）。二维码在电脑本地生成，不调用第三方二维码服务。ticket 为 32 字节随机秘密，仅在电脑内存保存摘要，两分钟过期；它只能创建待确认请求，不能直接取得控制权。

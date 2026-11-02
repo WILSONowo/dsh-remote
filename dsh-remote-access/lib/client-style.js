@@ -1,0 +1,46 @@
+/** Local layout only; interactive controls come from the DSH component library. */
+export const settingsCss = `
+.dsh-remote { color:var(--dsw-alias-label-primary); font-family:inherit; font-size:14px; line-height:22px; min-width:0; }
+.dsh-remote h2,.dsh-remote h3,.dsh-remote p { margin:0; }
+.dsh-remote h2 { font-size:16px; font-weight:500; line-height:24px; }
+.dsh-remote h3 { font-size:14px; font-weight:500; line-height:22px; }
+.dsh-remote .remote-intro { padding:0 0 16px; }
+.dsh-remote .remote-section { padding:20px 0; border-top:.5px solid var(--dsw-alias-border-l2); }
+.dsh-remote .remote-head,.dsh-remote .remote-row { display:flex; align-items:center; justify-content:space-between; gap:24px; }
+.dsh-remote .remote-head { margin-bottom:16px; }
+.dsh-remote .remote-head:last-child { margin-bottom:0; }
+.dsh-remote .remote-muted { color:var(--dsw-alias-label-secondary); font-size:12px; line-height:18px; margin-top:4px; }
+.dsh-remote .remote-form { display:grid; gap:14px; }
+.dsh-remote .remote-field { display:grid; grid-template-columns:minmax(110px,1fr) minmax(0,2fr); align-items:center; gap:20px; }
+.dsh-remote .remote-input { box-sizing:border-box; width:100%; min-width:0; border:1px solid var(--dsw-alias-border-l2); border-radius:var(--dsw-radius-md); background:var(--dsw-alias-bg-layer-1); color:var(--dsw-alias-label-primary); padding:8px 12px; font:inherit; font-size:13px; line-height:20px; }
+.dsh-remote .remote-input:hover { border-color:var(--dsw-alias-border-l1); }
+.dsh-remote .remote-input:focus-visible,.dsh-remote summary:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:2px; }
+.dsh-remote .remote-input:disabled { opacity:.5; }
+.dsh-remote .remote-input::placeholder { color:var(--dsw-alias-label-tertiary); }
+.dsh-remote .remote-actions { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px; }
+.dsh-remote .remote-status { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--dsw-alias-label-secondary); white-space:nowrap; }
+.dsh-remote .remote-status::before { content:''; width:6px; height:6px; border-radius:50%; background:currentColor; }
+.dsh-remote .remote-status[data-state=connected] { color:var(--dsw-alias-state-success-primary); }
+.dsh-remote .remote-status[data-state=error],.dsh-remote .remote-error { color:var(--dsw-alias-state-error-primary); }
+.dsh-remote .remote-error { font-size:12px; line-height:18px; margin-top:8px; }
+.dsh-remote .remote-list { margin:12px 0 0; padding:0; list-style:none; }
+.dsh-remote .remote-list li { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:10px 0; border-bottom:.5px solid var(--dsw-alias-border-l2); }
+.dsh-remote .remote-list li:last-child { border-bottom:0; }
+.dsh-remote .remote-name { min-width:0; overflow-wrap:anywhere; }
+.dsh-remote .remote-code { font:500 28px/40px ui-monospace,monospace; letter-spacing:.22em; font-variant-numeric:tabular-nums; }
+.dsh-remote .remote-code-row { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; margin-top:12px; }
+.dsh-remote .remote-empty { padding:8px 0; color:var(--dsw-alias-label-secondary); font-size:13px; }
+.dsh-remote details>summary { cursor:pointer; width:fit-content; font-size:13px; color:var(--dsw-alias-label-secondary); }
+.dsh-remote details[open]>summary { margin-bottom:14px; }
+.dsh-remote .remote-host-form { display:flex; gap:8px; margin-top:12px; }
+.dsh-remote .remote-host-form .remote-input { flex:1; }
+.dsh-remote .remote-qr { display:block; width:240px; max-width:100%; height:auto; margin:12px auto; border-radius:var(--dsw-radius-md); }
+.dsh-remote .remote-qr-meta { text-align:center; margin:8px 0 16px; }
+.dsh-remote .remote-link { resize:vertical; min-height:64px; max-height:160px; font:12px/18px ui-monospace,monospace; overflow-wrap:anywhere; }
+.dsh-remote .remote-modal-copy { overflow-wrap:anywhere; }
+@media(max-width:640px) {
+ .dsh-remote .remote-field { grid-template-columns:1fr; gap:6px; }
+ .dsh-remote .remote-head,.dsh-remote .remote-row { gap:12px; }
+ .dsh-remote .remote-section { padding:16px 0; }
+}
+`;
