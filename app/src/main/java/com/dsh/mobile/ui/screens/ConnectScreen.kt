@@ -75,7 +75,7 @@ private fun UploadToPcCard(profile: HostProfile, connection: DshConnection) {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
     ) {
         Column(Modifier.padding(14.dp)) {
-            Text("发送文件到 PC（M1）", style = MaterialTheme.typography.titleSmall)
+            Text("发送文件到电脑", style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.height(6.dp))
             Button(onClick = { picker.launch("*/*") }, enabled = !uploading) {
                 Text(if (uploading) "上传中…" else "选择文件")
@@ -234,7 +234,7 @@ fun ConnectScreen(
                 Spacer(Modifier.height(18.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Image(
-                        painter = painterResource(R.drawable.ic_launcher_foreground),
+                        painter = painterResource(R.drawable.ic_dsh_desktop),
                         contentDescription = null,
                         modifier = Modifier.size(36.dp),
                     )
@@ -242,7 +242,7 @@ fun ConnectScreen(
                     Column {
                         Text("DSH Remote", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                         Text(
-                            "遥控你电脑上的 DeepSeek Harness 智能体",
+                            "远程连接 DeepSeek Harness",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -330,7 +330,7 @@ fun ConnectScreen(
             if (sortedProfiles.isEmpty()) {
                 item {
                     Text(
-                        "还没有设备记录：首次连接只需输入地址，连接后会记录设备机型",
+                        "还没有设备记录：添加主机并选择连接方式，配对后会记录设备机型",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -423,7 +423,7 @@ fun ConnectScreen(
                     }.getOrNull() ?: "?"
                 }
                 Text(
-                    "DSH Remote v$versionName · 非官方客户端 · 数据只存你的手机与你的服务器",
+                    "DSH Remote v$versionName",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                 )
@@ -460,7 +460,7 @@ fun ConnectScreen(
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            "在 PC 端 DSH「设置 → 远程控制」点「生成配对码」，把 6 位配对码填到这里即完成配对（无需电脑端确认）。",
+                            "在电脑的 DeepSeek Harness「设置 → 远程控制」中查看或生成 6 位配对码，输入后即可配对。直连和服务器中转均使用此配对码。",
                         )
                         OutlinedTextField(
                             value = pairCode,
@@ -500,7 +500,7 @@ fun ConnectScreen(
                     TextButton(onClick = {
                         pairDismissedFor = awaitingId
                         scope.launch { appCtx?.pairingCoordinator?.chooseLegacyHandshake() }
-                    }) { Text("等待 PC 确认") }
+                    }) { Text("等待电脑确认") }
                 },
             )
         }

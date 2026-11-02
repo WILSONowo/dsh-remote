@@ -10,7 +10,22 @@ import http from "node:http";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { apply } from "./lib/index.js";
+import os from "node:os";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { promisify } from "node:util";
+
+// Never collect real host metadata in the reproducible test suite.
+os.hostname = () => "synthetic-desktop";
+os.networkInterfaces = () => ({ test: [{ internal: false, family: "IPv4", address: "192.0.2.10", mac: "02:00:00:00:00:01" }] });
+const syntheticExec = (...args) => {
+  const callback = args.at(-1);
+  queueMicrotask(() => callback(null, "Synthetic Model", ""));
+};
+syntheticExec[promisify.custom] = async () => ({ stdout: "Synthetic Model", stderr: "" });
+childProcess.execFile = syntheticExec;
+syncBuiltinESMExports();
+const { apply } = await import("./lib/index.js");
 
 const home = mkdtempSync(join(tmpdir(), "dsh-ra-smoke-"));
 process.env.DSH_HOME = home;
@@ -87,140 +102,54 @@ ctx.webServer.exact.set("/api/protected-test", {
   },
 });
 
-test("配对全流程：request → status → respond(approve) → check 下发 token → list → revoke", async () => {
-  const port = await listen();
-  const deviceId = "device-aaaa-1111";
+const remote = { "x-forwarded-for": "198.51.100.2" };
+const post = (path, body, headers = {}) => req(path, {method: "POST", headers: {"Content-Type": "application/json", ...headers}, body});
+async function pair(id) {
+  const r = await post("/api/remote-access/pair/code/generate", {});
+  const v = await post("/api/remote-access/pair/code/verify", {code:r.body.code, deviceId:id}, remote);
+  assert.equal(v.body.ok, true);
+  return v.body.token;
+}
+const bearer = token => ({...remote, authorization: "Bearer " + token});
 
-  // 1) 首次握手 → pending
-  let r = await req("/api/remote-access/pair/request", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceId, deviceName: "冒烟测试机" },
-  });
-  assert.equal(r.body.ok, true);
-  assert.equal(r.body.state, "pending");
-
-  // 2) 状态轮询 → pending，且带 pendingDevice
-  r = await req("/api/remote-access/pair/status");
-  assert.equal(r.body.state, "pending");
-  assert.equal(r.body.pendingDevice.deviceId, deviceId);
-  assert.equal(r.body.pendingDevice.name, "冒烟测试机");
-
-  // 3) 重复请求不丢 pending、覆盖名称
-  r = await req("/api/remote-access/pair/request", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceId, deviceName: "改名机" },
-  });
-  assert.equal(r.body.state, "pending");
-  r = await req("/api/remote-access/pair/status");
-  assert.equal(r.body.pendingDevice.name, "改名机");
-
-  // 4) PC 批准
-  r = await req("/api/remote-access/pair/respond", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceId, outcome: "approve" },
-  });
-  assert.equal(r.body.ok, true);
-  assert.equal(r.body.state, "approved");
-
-  // 5) pair/check → paired + 通道 token（48 hex）
-  r = await req("/api/remote-access/pair/check?deviceId=" + encodeURIComponent(deviceId));
-  assert.equal(r.body.paired, true);
-  assert.match(r.body.token, /^[0-9a-f]{32,}$/);
-
-  // 6) pair/list 可见
-  r = await req("/api/remote-access/pair/list");
-  assert.equal(r.body.devices.length, 1);
-  assert.equal(r.body.devices[0].deviceId, deviceId);
-
-  // 7) 撤销 → check 未配对、不再下发 token
-  r = await req("/api/remote-access/pair/revoke", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceId },
-  });
-  assert.equal(r.body.ok, true);
-  r = await req("/api/remote-access/pair/check?deviceId=" + encodeURIComponent(deviceId));
-  assert.equal(r.body.paired, false);
-  assert.equal(r.body.token, undefined);
+test("设备独立凭证：不能按 ID 取令牌；撤销 A 不影响 B；旧共享令牌不被接受", async () => {
+  const a = await pair("phone-a"), b = await pair("phone-b");
+  assert.notEqual(a,b);
+  let r = await req("/api/remote-access/pair/check?deviceId=phone-a", {headers: remote});
+  assert.equal(r.body.paired,false); assert.equal(r.body.token,undefined);
+  r = await req("/api/remote-access/pair/check?deviceId=phone-a", {headers:bearer(a)});
+  assert.equal(r.body.paired,true); assert.equal(r.body.token,undefined);
+  assert.equal((await req("/api/protected-test", {headers:bearer(a)})).status,200);
+  assert.equal((await req("/api/remote-access/pair/list", {headers:bearer(a)})).status,401);
+  await post("/api/remote-access/pair/revoke", {deviceId:"phone-a"});
+  assert.equal((await req("/api/protected-test", {headers:bearer(a)})).status,401);
+  assert.equal((await req("/api/protected-test", {headers:bearer(b)})).status,200);
+  writeFileSync(join(home,"remote-access","channel-token"), "a".repeat(48));
+  assert.equal((await req("/api/protected-test", {headers:bearer("a".repeat(48))})).status,401);
+  const stored=readFileSync(join(home,"remote-access","devices-v2.json"),"utf8");
+  assert.ok(!stored.includes(b));
 });
 
-test("配对拒绝：respond(deny) → status denied，不写入配对表", async () => {
-  const deviceId = "device-bbbb-2222";
-  let r = await req("/api/remote-access/pair/request", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceId, deviceName: "拒绝机" },
-  });
-  assert.equal(r.body.state, "pending");
-  r = await req("/api/remote-access/pair/respond", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceId, outcome: "deny" },
-  });
-  assert.equal(r.body.state, "denied");
-  r = await req("/api/remote-access/pair/status");
-  assert.equal(r.body.state, "denied");
-  r = await req("/api/remote-access/pair/check?deviceId=" + encodeURIComponent(deviceId));
-  assert.equal(r.body.paired, false);
-  // 错误 respond（无 pending）→ ok:false
-  r = await req("/api/remote-access/pair/respond", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceId: "ghost", outcome: "approve" },
-  });
-  assert.equal(r.body.ok, false);
+test("人工批准必须使用请求方持有的随机秘密领取；公开状态不泄露设备", async () => {
+  const id="manual-phone", secret="b".repeat(64);
+  const h={...remote,"x-dsh-pairing-secret":secret};
+  assert.equal((await post("/api/remote-access/pair/request", {deviceId:id},h)).body.state,"pending");
+  let r=await req("/api/remote-access/pair/status?deviceId="+id,{headers:{...remote,"x-dsh-pairing-secret":"c".repeat(64)}});
+  assert.equal(r.body.state,"none"); assert.equal(r.body.pendingDevice,undefined);
+  assert.equal((await post("/api/remote-access/pair/respond", {deviceId:id,outcome:"approve"},h)).status,401);
+  await post("/api/remote-access/pair/respond", {deviceId:id,outcome:"approve"});
+  assert.equal((await post("/api/remote-access/pair/claim", {deviceId:id},{...remote,"x-dsh-pairing-secret":"c".repeat(64)})).body.ok,false);
+  r=await post("/api/remote-access/pair/claim", {deviceId:id},h);
+  assert.match(r.body.token,/^[a-f0-9]{64}$/);
+  assert.equal((await post("/api/remote-access/pair/claim", {deviceId:id},h)).body.ok,false);
+  assert.equal((await req("/api/protected-test", {headers:bearer(r.body.token)})).status,200);
 });
 
-test("通道门禁：本机放行 / 公网隧道（XFF）401 / 带 token 放行 / 引导通道豁免", async () => {
-  // 本机 loopback 无 XFF → 放行（设置页浏览器）
-  let r = await req("/api/protected-test");
-  assert.equal(r.status, 200);
-
-  // 模拟公网隧道：loopback 但带 x-forwarded-for → 401
-  r = await req("/api/protected-test", { headers: { "x-forwarded-for": "1.2.3.4" } });
-  assert.equal(r.status, 401);
-
-  // 带正确 Bearer token → 放行
-  const check = await req("/api/remote-access/pair/check?deviceId=whatever"); // 引导通道豁免
-  assert.equal(check.status, 200);
-  // 先配对拿到 token
-  await req("/api/remote-access/pair/request", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceId: "device-gate-3333", deviceName: "门禁机" },
-  });
-  await req("/api/remote-access/pair/respond", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceId: "device-gate-3333", outcome: "approve" },
-  });
-  const c2 = await req("/api/remote-access/pair/check?deviceId=device-gate-3333");
-  assert.match(c2.body.token, /^[0-9a-f]{32,}$/);
-  r = await req("/api/protected-test", {
-    headers: { "x-forwarded-for": "1.2.3.4", authorization: "Bearer " + c2.body.token },
-  });
-  assert.equal(r.status, 200);
-
-  // 错 token → 401
-  r = await req("/api/protected-test", {
-    headers: { "x-forwarded-for": "1.2.3.4", authorization: "Bearer deadbeef" },
-  });
-  assert.equal(r.status, 401);
-
-  // host.describe 豁免（公网隧道下也放行，供连接探测）
-  r = await req("/api/host.describe", { headers: { "x-forwarded-for": "1.2.3.4" } });
-  assert.notEqual(r.status, 401);
-
-  // 缺 deviceId 的握手 → 400
-  r = await req("/api/remote-access/pair/request", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceName: "无名" },
-  });
-  assert.equal(r.status, 400);
+test("代理头、跨站 Origin 和非本机 Host 均不能获得本机管理权限", async () => {
+  for(const headers of [remote,{"x-real-ip":"1.2.3.4"},{forwarded:"for=1.2.3.4"},{origin:"https://evil.example"},{host:"evil.example"}]) {
+    assert.equal((await req("/api/protected-test", {headers})).status,401);
+  }
+  assert.equal((await req("/api/protected-test")).status,200);
 });
 
 test("fs/list + fs/read：目录列举、文本预览、二进制识别、1MB 截断", async () => {
@@ -286,10 +215,11 @@ test("mcp/list：按 mcp__<server>__<tool> 聚合；无 tools 服务时空列表
   assert.deepEqual(r.body.servers, []);
 });
 
-test("device/info：主机名 + MAC + 平台（win32 机型探测失败时降级不报错）", async () => {
+test("device/info：使用合成主机名、机型和 MAC", async () => {
   const r = await req("/api/remote-access/device/info");
   assert.equal(r.body.ok, true);
-  assert.equal(typeof r.body.name, "string");
+  assert.equal(r.body.name, "synthetic-desktop");
+  assert.equal(r.body.mac, "02:00:00:00:00:01");
   assert.equal(typeof r.body.platform, "string");
   assert.equal(typeof r.body.model, "string");
   assert.ok(r.body.model.length > 0);
@@ -385,13 +315,13 @@ test("安全回归：self-approve 漏洞已修复（远程 respond 401，不写�
   // 旧漏洞路径：远程 request 建立 pending 后远程自我 approve
   let r = await req("/api/remote-access/pair/request", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-forwarded-for": "3.4.5.6" },
+    headers: { "Content-Type": "application/json", "x-forwarded-for": "3.4.5.6", "x-dsh-pairing-secret": "d".repeat(64) },
     body: { deviceId: "device-evil-3333", deviceName: "恶意机" },
   });
   assert.equal(r.body.state, "pending");
   r = await req("/api/remote-access/pair/respond", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-forwarded-for": "3.4.5.6" },
+    headers: { "Content-Type": "application/json", "x-forwarded-for": "3.4.5.6", "x-dsh-pairing-secret": "d".repeat(64) },
     body: { deviceId: "device-evil-3333", outcome: "approve" },
   });
   assert.equal(r.status, 401);
@@ -666,72 +596,19 @@ test("M1 双向文件：fs/mkdir（recursive）+ fs/delete 进回收站（trash�
   assert.equal(r.body.error, "cannot_delete_root");
 });
 
-test("M4 token 运维：rotate 换新 / 旧失效 / revoke 清配对 / audit 有记录 / 远程 401", async () => {
-  await req("/api/remote-access/pair/request", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceId: "dev-tok-1", deviceName: "令牌机" },
-  });
-  await req("/api/remote-access/pair/respond", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: { deviceId: "dev-tok-1", outcome: "approve" },
-  });
-  const c = await req("/api/remote-access/pair/check?deviceId=dev-tok-1");
-  const oldToken = c.body.token;
-  assert.match(oldToken, /^[0-9a-f]{32,}$/);
-
-  // 旧 token 当前有效
-  let r = await req("/api/protected-test", {
-    headers: { "x-forwarded-for": "1.2.3.4", authorization: "Bearer " + oldToken },
-  });
-  assert.equal(r.status, 200);
-
-  // 本机轮换 → 新 token ≠ 旧
-  r = await req("/api/remote-access/token/rotate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: {},
-  });
-  assert.equal(r.body.ok, true);
-  const newToken = r.body.token;
-  assert.ok(newToken && newToken !== oldToken);
-
-  // 旧 token 401，新 token 放行
-  r = await req("/api/protected-test", {
-    headers: { "x-forwarded-for": "1.2.3.4", authorization: "Bearer " + oldToken },
-  });
-  assert.equal(r.status, 401);
-  r = await req("/api/protected-test", {
-    headers: { "x-forwarded-for": "1.2.3.4", authorization: "Bearer " + newToken },
-  });
-  assert.equal(r.status, 200);
-
-  // audit 有 rotate 记录（本机可查）
-  r = await req("/api/remote-access/token/audit");
-  assert.ok(r.body.events.some((e) => e.action === "token/rotate"));
-
-  // 远程未授权调 rotate → 401
-  r = await req("/api/remote-access/token/rotate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-forwarded-for": "8.8.8.8" },
-    body: {},
-  });
-  assert.equal(r.status, 401);
-
-  // 吊销（本机）→ 清空配对表；新 token 也被吊销
-  r = await req("/api/remote-access/token/revoke", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: {},
-  });
-  assert.equal(r.body.ok, true);
-  r = await req("/api/remote-access/pair/list");
-  assert.equal(r.body.devices.length, 0);
-  r = await req("/api/protected-test", {
-    headers: { "x-forwarded-for": "1.2.3.4", authorization: "Bearer " + newToken },
-  });
-  assert.equal(r.status, 401);
+test("设备可轮换和撤销自身凭证，其他设备不受影响", async () => {
+  const a=await pair("rotate-a"), b=await pair("rotate-b");
+  const rotated=await post("/api/remote-access/token/rotate",{},bearer(a));
+  assert.equal(rotated.body.ok,true);
+  const next=rotated.body.token;
+  assert.notEqual(next,a);
+  assert.equal((await req("/api/protected-test",{headers:bearer(a)})).status,401);
+  assert.equal((await req("/api/protected-test",{headers:bearer(next)})).status,200);
+  assert.equal((await req("/api/protected-test",{headers:bearer(b)})).status,200);
+  await post("/api/remote-access/token/revoke",{},bearer(next));
+  assert.equal((await req("/api/protected-test",{headers:bearer(next)})).status,401);
+  assert.equal((await req("/api/protected-test",{headers:bearer(b)})).status,200);
+  assert.equal((await post("/api/remote-access/token/rotate",{},remote)).status,401);
 });
 
 test("M3 MCP 资源/提示词：resources/list + read / prompts/list + render（能力清册）", async () => {
@@ -791,7 +668,7 @@ test("M2 离线同步：POST /sync 批量 ACK + 非法 deviceId 400", async () =
   });
   assert.equal(r.body.ok, true);
   assert.equal(r.body.results.length, 2);
-  assert.ok(r.body.results.every((x) => x.ok === true));
+  assert.ok(r.body.results.every((x) => x.ok === false && x.error === "offline_execution_not_supported"));
 
   // deviceId 非白名单（路径穿越）→ 400
   r = await req("/api/remote-access/sync", {

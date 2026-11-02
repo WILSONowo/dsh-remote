@@ -81,6 +81,7 @@ fun SettingsScreen(
     var uiFont by remember { mutableStateOf("") }
     var codeFont by remember { mutableStateOf("") }
     var fontPicker by remember { mutableStateOf<String?>(null) } // "ui" / "code"
+    var showLicenses by remember { mutableStateOf(false) }
     var notifGranted by remember { mutableStateOf(true) }
     var themeImportError by remember { mutableStateOf<String?>(null) }
     var showAppearanceDetail by remember { mutableStateOf(false) }
@@ -690,14 +691,15 @@ fun SettingsScreen(
                 }
             }
 
-            Text("远程连接（内网穿透）", style = MaterialTheme.typography.titleMedium)
+            Text("连接说明", style = MaterialTheme.typography.titleMedium)
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        "1. 同一局域网：把 PC 地址直接填进 App 服务器地址（形如 192.168.1.100:8787）\n" +
-                            "2. 公网访问：任选内网穿透工具（cpolar / cloudflared / ZeroTier 等）把 DSH 端口映射到公网域名\n" +
-                            "3. 把公网域名填进 App 的服务器地址即可，任何网络都能连\n" +
-                            "4. 首次连接需在 PC 端 DSH「设置 → 远程控制」确认配对，配对后自动携带通道令牌",
+                        "1. 直连：选择「直连」，填写电脑的 DeepSeek Harness 地址（如 192.168.1.100:8787）。手机需要能访问该地址。\n" +
+                            "2. 自建中转：先运行中转后端，再在电脑插件中填写 HTTPS 服务器地址、主机 ID 和注册令牌，启用中转。电脑会主动连接服务器。\n" +
+                            "3. 手机选择「服务器」，填写相同的 HTTPS 服务器地址和主机 ID，无需填写中转注册令牌。\n" +
+                            "4. 两种方式均需配对：在电脑的 DeepSeek Harness「设置 → 远程控制」中查看或生成 6 位配对码，在手机输入；也可选择「等待电脑确认」。\n" +
+                            "5. 服务器中转必须校验 HTTPS 证书，自签名证书需导入 CA。中转服务器能读取转发内容，请使用可信服务器；电脑需保持在线。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         lineHeight = MaterialTheme.typography.bodySmall.lineHeight * 1.6,
@@ -705,7 +707,7 @@ fun SettingsScreen(
                 }
             }
 
-            Text("远程控制（M4：令牌运维）", style = MaterialTheme.typography.titleMedium)
+            Text("远程控制", style = MaterialTheme.typography.titleMedium)
             M4TokenSection(connection, settingsStore, scope)
 
             Text("关于", style = MaterialTheme.typography.titleMedium)
@@ -750,7 +752,7 @@ fun SettingsScreen(
                     }
                     SettingInfoRow("协议", "dsh-api (client-request / WS+SSE mux)")
                     SettingInfoRow("后端", "DeepSeek Harness")
-                    SettingInfoRow("主题", "DSH 浅色/深色 · 背景图/蒙层/面板通透可调")
+                    SettingInfoRow("主题", "DeepSeek Harness 浅色/深色 · 背景图/蒙层/面板通透可调")
                 }
             }
 
@@ -790,7 +792,7 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         vault == null -> Text(
-                            "不可用（PC 端未安装 dsh-encrypt 插件）",
+                            "不可用（电脑未安装 dsh-encrypt 插件）",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -903,7 +905,7 @@ fun SettingsScreen(
                 }
             }
 
-            Text("MCP 资源 / 提示词（M3）", style = MaterialTheme.typography.titleMedium)
+            Text("MCP 资源 / 提示词", style = MaterialTheme.typography.titleMedium)
             Card(modifier = Modifier.fillMaxWidth()) {
                 val connected = connState is DshConnection.State.Connected
                 var resList by remember { mutableStateOf<List<McpResourceServer>?>(null) }
@@ -941,20 +943,42 @@ fun SettingsScreen(
             Text("开发人员", style = MaterialTheme.typography.titleMedium)
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    SettingInfoRow("开发", "残星会虚质空间分部 达妮娅同学")
-                    SettingInfoRow("B站", "最喜欢达妮娅了")
-                    SettingInfoRow("签名", "CN=残星会虚质空间分部达妮娅同学")
+                    SettingInfoRow("上游作者", "残星会·虚质空间分部 达妮娅同学、Yauntyours")
+                    SettingInfoRow("上游作者 B站", "最喜欢达妮娅了")
+                    SettingInfoRow("上游仓库", "Hyna-hla/dsh-remote")
+                    SettingInfoRow("当前维护者", "WILSONowo")
+                    SettingInfoRow("当前仓库", "WILSONowo/dsh-remote")
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "© 2026 残星会·虚质空间分部。本应用及其全部界面设计、主题素材与代码版权归开发者所有；" +
-                            "未经授权禁止商用、二传或冒名分发。鲸鱼娘素材（CC BY-NC-SA 4.0）署名链见 README。",
+                        "DSH Remote 是 DeepSeek Harness 的非官方客户端。代码按 MIT 许可发布，保留上游版权声明：Copyright (c) 2026 Aemeath。" +
+                            "鲸鱼娘皮肤素材按 CC BY-NC-SA 4.0 许可使用，署名链：上善 → zipzip → Small-tailqwq（dsh-external/dsh-deep-whale）。素材许可与代码许可分别适用。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         lineHeight = MaterialTheme.typography.bodySmall.lineHeight * 1.5,
                     )
+                    TextButton(onClick = { showLicenses = true }) { Text("查看许可与素材署名") }
                 }
             }
         }
+    }
+
+    if (showLicenses) {
+        val notices = remember {
+            listOf("licenses/MIT.txt", "licenses/maid-atelier-NOTICE.txt").joinToString("\n\n") { name ->
+                context.assets.open(name).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            }
+        }
+        AlertDialog(
+            onDismissRequest = { showLicenses = false },
+            title = { Text("许可与素材署名") },
+            text = {
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(notices, modifier = Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()),
+                        style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = { showLicenses = false }) { Text("关闭") } },
+        )
     }
 
     // 字体选择对话框（UI 字体 / 代码字体）
@@ -1018,11 +1042,11 @@ private fun M4TokenSection(
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("令牌轮换 / 吊销（M4）", style = MaterialTheme.typography.titleSmall)
+            Text("令牌管理", style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.height(4.dp))
             Text(
                 if (profile == null)
-                    "连接主机后可用：轮换会立即使旧 token 失效；吊销会清空配对，强制所有设备重新配对。"
+                    "连接主机后可用：轮换会立即使旧 token 失效；吊销只撤销本手机，其他已配对设备不受影响。"
                 else "目标：${profile.remark.ifBlank { profile.deviceModel.ifBlank { "未命名设备" } }}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1035,7 +1059,12 @@ private fun M4TokenSection(
                             busy = true; result = null
                             result = try {
                                 val r3 = rpc()?.rotateToken()
-                                if (r3?.ok == true) "已轮换 ✓ 新 token 已下发（其它设备需重新同步）"
+                                if (r3?.ok == true && r3.token?.matches(Regex("[a-f0-9]{64}")) == true && profile != null) {
+                                    val updated = profile.copy(channelToken = r3.token, paired = true)
+                                    settingsStore.upsertProfile(updated)
+                                    connection.syncCurrentProfile(updated)
+                                    "已轮换并保存本手机令牌，其他设备不受影响"
+                                }
                                 else "轮换失败：" + (r3?.error ?: "未连接")
                             } catch (e: Exception) {
                                 "轮换失败：" + (e.message ?: e.javaClass.simpleName)
@@ -1050,7 +1079,12 @@ private fun M4TokenSection(
                             busy = true; result = null
                             result = try {
                                 val r3 = rpc()?.revokeToken()
-                                if (r3?.ok == true) "已吊销 ✓ 所有设备需重新配对"
+                                if (r3?.ok == true && profile != null) {
+                                    val updated = profile.copy(channelToken = "", paired = false)
+                                    settingsStore.upsertProfile(updated)
+                                    connection.syncCurrentProfile(updated)
+                                    "已撤销本手机，请重新配对"
+                                }
                                 else "吊销失败：" + (r3?.error ?: "未连接")
                             } catch (e: Exception) {
                                 "吊销失败：" + (e.message ?: e.javaClass.simpleName)
@@ -1059,7 +1093,7 @@ private fun M4TokenSection(
                     },
                     enabled = !busy && profile != null,
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                ) { Text("吊销全部") }
+                ) { Text("撤销本手机") }
             }
             result?.let {
                 Spacer(Modifier.height(6.dp))
@@ -1147,14 +1181,16 @@ private fun SettingInfoRow(label: String, value: String) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
             label,
+            modifier = Modifier.widthIn(max = 120.dp),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Text(value, style = MaterialTheme.typography.bodyMedium)
+        Text(value, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+            textAlign = androidx.compose.ui.text.style.TextAlign.End)
     }
 }
 
@@ -1327,7 +1363,7 @@ private fun VaultUnlockDialog(
                     Text("记住密码（本机加密存储）", style = MaterialTheme.typography.bodyMedium)
                 }
                 Text(
-                    "密码仅在本机求 SHA3-256 摘要后上传（与 web 端一致），解锁后 PC 端同步生效。",
+                    "密码仅在本机求 SHA3-256 摘要后上传（与 web 端一致），解锁后电脑同步生效。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

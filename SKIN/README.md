@@ -7,5 +7,4 @@ DSH Remote 可导入主题包（zip：`theme.json` + `preview.png`），格式�
 
 DeepLook 同时是 App **内置主题**（`ThemeRegistry.kt` 的 `deeplook` / `deeplook-dark`，带专属 `DEEPLOOK` 样式分支：iOS 分组列表圆角 + 深蓝黑选中态），内置与导入包配色一致。
 
-设计来源：`E:\AI搓的小东西\design\dsh-mobile-ui-spec.md` + `dsh-mobile-ui-prototype.html`。
-生成管线：`E:\AI搓的小东西\SKIN\theme-packs\`（themes-data.mjs → build-theme-json.mjs → build-packs.ps1）。
+主题包内包含通用配色配置；修改格式见上方主题文档。

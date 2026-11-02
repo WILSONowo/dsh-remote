@@ -42,6 +42,9 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
 
     var remark by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
+    var connectionMode by remember { mutableStateOf("direct") }
+    var relayServerUrl by remember { mutableStateOf("") }
+    var relayHostId by remember { mutableStateOf("") }
     var trustSelfSigned by remember { mutableStateOf(false) }
     var caCertUri by remember { mutableStateOf<String?>(null) }
     var proxyType by remember { mutableStateOf("none") }
@@ -58,6 +61,9 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
         val p = original ?: return@LaunchedEffect
         remark = p.remark
         url = p.url
+        connectionMode = p.connectionMode
+        relayServerUrl = p.relayServerUrl
+        relayHostId = p.relayHostId
         trustSelfSigned = p.trustSelfSigned
         caCertUri = p.caCertUri
         proxyType = p.proxy?.type ?: "none"
@@ -88,11 +94,14 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
     }
 
     fun save() {
-        val profile = (original ?: HostProfile(id = UUID.randomUUID().toString(), remark = "", url = ""))
+        val edited = (original ?: HostProfile(id = UUID.randomUUID().toString(), remark = "", url = ""))
             .copy(
                 // 设备名称留空即用机型；不再把地址回填成名称（列表不展示 IP）
                 remark = remark.trim(),
                 url = normalizeBaseUrl(url),
+                connectionMode = connectionMode,
+                relayServerUrl = relayServerUrl.trim(),
+                relayHostId = relayHostId.trim(),
                 trustSelfSigned = trustSelfSigned,
                 caCertUri = caCertUri,
                 proxy = if (proxyType == "none") null else ProxyConfig(
@@ -102,17 +111,20 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
                 ),
                 autoConnect = autoConnect,
             )
-        if (profile.url.isBlank()) {
-            Toast.makeText(context, "地址不能为空", Toast.LENGTH_SHORT).show()
+        val error = runCatching { edited.connectionUrl() }.exceptionOrNull()
+        if (error != null) {
+            Toast.makeText(context, error.message ?: "请检查连接设置", Toast.LENGTH_SHORT).show()
             return
         }
+        val profile = resetPairingIfEndpointChanged(original, edited)
         scope.launch {
             settingsStore.upsertProfile(profile)
             // 活跃主机改动需传导到前台连接与后台服务 watcher
             if (settingsStore.activeProfileId.first() == profile.id) {
                 val orig = original
                 val paramsChanged = orig == null ||
-                    orig.url != profile.url ||
+                    orig.url != profile.url || orig.connectionMode != profile.connectionMode ||
+                    orig.relayServerUrl != profile.relayServerUrl || orig.relayHostId != profile.relayHostId ||
                     orig.trustSelfSigned != profile.trustSelfSigned ||
                     orig.caCertUri != profile.caCertUri ||
                     orig.proxy != profile.proxy
@@ -146,6 +158,7 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
     fun runDiag() {
         val profile = (original ?: return).copy(
             remark = remark, url = normalizeBaseUrl(url),
+            connectionMode = connectionMode, relayServerUrl = relayServerUrl.trim(), relayHostId = relayHostId.trim(),
             trustSelfSigned = trustSelfSigned, caCertUri = caCertUri,
             proxy = if (proxyType == "none") null else ProxyConfig(
                 type = proxyType, host = proxyHost, port = proxyPort.toIntOrNull() ?: 0,
@@ -154,7 +167,9 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
         )
         diagRunning = true
         scope.launch {
-            diag = runDiagnostics(profile)
+            diag = runCatching { runDiagnostics(profile) }.getOrElse {
+                listOf(DiagStep("连接设置", false, it.message, 0))
+            }
             diagRunning = false
         }
     }
@@ -184,10 +199,21 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            OutlinedTextField(
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = connectionMode == "direct", onClick = { connectionMode = "direct" }, label = { Text("直连") })
+                FilterChip(selected = connectionMode == "relay", onClick = { connectionMode = "relay"; trustSelfSigned = false }, label = { Text("服务器") })
+            }
+            if (connectionMode == "relay") {
+                OutlinedTextField(value = relayServerUrl, onValueChange = { relayServerUrl = it },
+                    label = { Text("服务器地址") }, placeholder = { Text("https://relay.example.com:8443") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = relayHostId, onValueChange = { relayHostId = it },
+                    label = { Text("主机 ID") }, supportingText = { Text("与插件中的主机 ID 一致，连接后输入配对码") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth())
+            } else OutlinedTextField(
                 value = url, onValueChange = { url = it },
-                label = { Text("服务器地址（首次连接仅需地址）") },
-                placeholder = { Text("192.168.1.100:8787 或你的内网穿透域名") },
+                label = { Text("服务器地址") },
+                placeholder = { Text("192.168.1.100:8787 或电脑的可访问域名") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -219,12 +245,12 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
                         Column(Modifier.weight(1f)) {
                             Text("信任自签名证书", style = MaterialTheme.typography.bodyMedium)
                             Text(
-                                "⚠ 仅对本主机生效，跳过证书校验",
+                                if (connectionMode == "relay") "服务器中转必须校验证书；使用自签名证书时请导入 CA 证书" else "⚠ 仅对本主机生效，跳过证书校验",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.error,
                             )
                         }
-                        Switch(checked = trustSelfSigned, onCheckedChange = { trustSelfSigned = it })
+                        Switch(checked = trustSelfSigned, enabled = connectionMode == "direct", onCheckedChange = { trustSelfSigned = it })
                     }
                     OutlinedButton(onClick = { caPicker.launch(arrayOf("application/x-pem-file", "application/octet-stream")) }) {
                         Icon(Icons.Default.UploadFile, null, Modifier.size(18.dp))

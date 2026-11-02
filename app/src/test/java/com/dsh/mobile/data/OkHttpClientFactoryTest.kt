@@ -10,6 +10,34 @@ import java.net.Proxy
 class OkHttpClientFactoryTest {
 
     @Test
+    fun relayCredentialStaysWithinHostPathAndSurvivesStaleProfile() {
+        val profile = HostProfile(id = "token-scope-test", remark = "test", url = "",
+            connectionMode = "relay", relayServerUrl = "https://relay.example", relayHostId = "pc-a")
+        val client = OkHttpClientFactory.build(profile).first
+        OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, "fresh-token")
+        OkHttpClientFactory.build(profile) // old Compose snapshot must not erase the new token
+        fun tokenAt(url: String): String? {
+            var sent: String? = null
+            val probe = client.newBuilder().addInterceptor { chain ->
+                sent = chain.request().header("Authorization")
+                okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200).message("fixture").body(okhttp3.ResponseBody.create(null, "")).build()
+            }.build()
+            probe.newCall(okhttp3.Request.Builder().url(url).build()).execute().close()
+            return sent
+        }
+        assertEquals("Bearer fresh-token", tokenAt("https://relay.example/h/pc-a/api/session.list"))
+        assertNull(tokenAt("https://relay.example/h/pc-b/api/session.list"))
+        assertNull(tokenAt("https://another.example/h/pc-a/api/session.list"))
+        assertNull(tokenAt("http://relay.example/h/pc-a/api/session.list"))
+        assertTrue(!client.followRedirects)
+        assertTrue(!client.retryOnConnectionFailure)
+        OkHttpClientFactory.build(profile.copy(relayHostId = "pc-b"))
+        assertNull(OkHttpClientFactory.ChannelTokenRegistry.get(profile.id))
+        OkHttpClientFactory.release(profile.id)
+    }
+
+    @Test
     fun proxyMapping() {
         assertNull(buildProxy(null))
         assertNull(buildProxy(ProxyConfig(type = "none")))

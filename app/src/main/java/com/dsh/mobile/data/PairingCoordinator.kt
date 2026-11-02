@@ -41,7 +41,9 @@ class PairingCoordinator(
                     _awaitingDecision.value = null
                     return@collect
                 }
-                if (st is DshConnection.State.Connected) {
+                if (st is DshConnection.State.Error && st.code == ConnectionErrorCode.AUTH_FAILED && profile.paired) {
+                    refreshPaired(profile)
+                } else if (st is DshConnection.State.Connected) {
                     if (profile.paired) {
                         refreshPaired(profile)
                     } else if (handshakingFor != profile.id) {
@@ -73,7 +75,8 @@ class PairingCoordinator(
                 settingsStore.deviceName.first().ifBlank { android.os.Build.MODEL },
             )
         }.getOrNull() ?: return PairCodeResult(false, "配对请求失败（网络或服务器错误），请重试")
-        if (res.ok) {
+        if (connection.currentProfile()?.id != profile.id) return PairCodeResult(false, "连接目标已改变，请重新配对")
+        if (res.ok && res.token?.matches(Regex("[a-f0-9]{64}")) == true) {
             res.token?.takeIf { it.isNotBlank() }?.let { tok ->
                 OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, tok)
             }
@@ -90,15 +93,15 @@ class PairingCoordinator(
             _awaitingDecision.value = null
             _events.tryEmit(
                 if (info?.model?.isNotBlank() == true) "配对完成，已记录设备：${info.model}"
-                else "配对完成，已获取远程通道令牌"
+                else "配对完成，已保存本手机的设备令牌"
             )
             return PairCodeResult(true, null)
         }
         return PairCodeResult(false, when (res.error) {
-            "no_active_code" -> "PC 端会自动生成配对码：打开 DSH 设置 → 远程控制 查看当前码"
-            "code_locked" -> "配对码已锁定（错误次数过多），PC 端会自动刷新，刷新后重试"
+            "no_active_code" -> "请打开电脑的 DeepSeek Harness「设置 → 远程控制」，查看或重新生成配对码"
+            "code_locked" -> "配对码已锁定（错误次数过多），请在电脑的 DeepSeek Harness「设置 → 远程控制」中重新生成"
             "code_mismatch" -> "配对码不正确" + (res.attemptsLeft?.let { "（还剩 $it 次机会）" } ?: "")
-            "plugin_old" -> "PC 插件版本过旧（需 v2.4.0+），可改用「等待 PC 确认」"
+            "plugin_old" -> "配对接口不可用：直连请检查电脑插件是否安装；服务器中转请检查服务器地址、主机 ID 和电脑插件状态"
             else -> "配对失败" + (res.error?.let { "：$it" } ?: "")
         })
     }
@@ -108,10 +111,8 @@ class PairingCoordinator(
         val profile = connection.currentProfile() ?: return
         if (handshakingFor == profile.id) return
         handshakingFor = profile.id
+        val rpc = HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first)
         val result = runCatching {
-            // 握手前已取得 profile，直接用其 unary client（避免不可达的兜底分支）
-            val client = OkHttpClientFactory.build(profile).first
-            val rpc = HttpPairingRpc(connection, client)
             PairingManager(rpc, scope)
                 .ensurePaired(
                     settingsStore.ensureDeviceId(),
@@ -125,10 +126,14 @@ class PairingCoordinator(
             }
             PairingOutcome.PAIRED, PairingOutcome.APPROVED -> {
                 // 配对通过后立即回查拿通道 token（Bearer 鉴权凭证），注册表热生效
-                val rpc = HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first)
-                val tok = runCatching {
-                    rpc.check(settingsStore.ensureDeviceId()).token
-                }.getOrNull()
+                val tok = if (result == PairingOutcome.PAIRED) profile.channelToken
+                    else runCatching { rpc.claim() }.getOrNull()
+                if (tok.isNullOrBlank() || connection.currentProfile()?.id != profile.id) {
+                    _events.tryEmit("未能领取设备凭证，请重新配对")
+                    _awaitingDecision.value = profile.id
+                    handshakingFor = null
+                    return
+                }
                 if (!tok.isNullOrBlank()) {
                     OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, tok)
                 }
@@ -146,7 +151,7 @@ class PairingCoordinator(
                 when {
                     !tok.isNullOrBlank() -> _events.tryEmit(
                         if (info?.model?.isNotBlank() == true) "配对完成，已记录设备：${info.model}"
-                        else "配对完成，已获取远程通道令牌"
+                        else "配对完成，已保存本手机的设备令牌"
                     )
                     else -> _events.tryEmit("配对完成")
                 }
@@ -154,17 +159,17 @@ class PairingCoordinator(
             PairingOutcome.SKIPPED -> {
                 // 安全：空配对码/插件未确认时绝不跳过验证、绝不签发令牌。
                 // 保持待配对（awaitingDecision），引导用户用 PC 端自动生成的配对码完成配对。
-                _events.tryEmit("已阻止跳过验证：请用 PC 端自动生成的 6 位配对码完成配对")
+                _events.tryEmit("请使用电脑上显示的 6 位配对码完成配对")
                 _awaitingDecision.value = profile.id
             }
             PairingOutcome.DENIED -> {
                 _awaitingDecision.value = null
-                _events.tryEmit("PC 端拒绝了本次配对，连接已断开")
+                _events.tryEmit("电脑拒绝了本次配对，连接已断开")
                 connection.disconnect()
             }
             PairingOutcome.TIMEOUT -> {
                 _awaitingDecision.value = null
-                _events.tryEmit("配对确认超时（请确认 PC 端已打开 设置→远程控制 页面），连接已断开")
+                _events.tryEmit("配对确认超时，请在电脑的 DeepSeek Harness「设置 → 远程控制」中确认请求；连接已断开")
                 connection.disconnect()
             }
         }
@@ -182,19 +187,13 @@ class PairingCoordinator(
             still == null -> return
             !still.paired -> {
                 // 已被 PC 撤销：重新等待配对决策（配对码优先）
-                val revoked = profile.copy(paired = false)
+                val revoked = profile.copy(paired = false, channelToken = "")
+                OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, null)
                 settingsStore.upsertProfile(revoked)
                 connection.syncCurrentProfile(revoked)
                 _awaitingDecision.value = profile.id
             }
             else -> {
-                // 已配对：顺带刷新通道 token（PC 端重生成/本机丢失时静默补齐）
-                still.token?.takeIf { it.isNotBlank() && it != profile.channelToken }?.let { tok ->
-                    val refreshed = profile.copy(channelToken = tok)
-                    settingsStore.upsertProfile(refreshed)
-                    connection.syncCurrentProfile(refreshed)
-                    OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, tok)
-                }
                 // 重连设备校验：MAC 不匹配（IP 被回收到他人主机）→ 断开
                 verifyDevice(profile)
             }

@@ -10,6 +10,7 @@ import com.dsh.mobile.DshApplication
 import com.dsh.mobile.MainActivity
 import com.dsh.mobile.data.DshConnection
 import com.dsh.mobile.data.HostProfile
+import com.dsh.mobile.data.connectionUrl
 import com.dsh.mobile.data.PairingCoordinator
 import com.dsh.mobile.data.SettingsStore
 import com.dsh.mobile.data.TokenUsageWatcher
@@ -61,7 +62,7 @@ class DshConnectionService : Service() {
         val notification = Notification.Builder(this, DshApplication.CHANNEL_ID)
             .setContentTitle("DSH Remote")
             .setContentText("后台连接已开启，审批/确认/完成会横幅提醒")
-            .setSmallIcon(android.R.drawable.ic_menu_compass)
+            .setSmallIcon(com.dsh.mobile.R.drawable.ic_notification_dsh)
             .setOngoing(true)
             .setContentIntent(
                 PendingIntent.getActivity(
@@ -80,7 +81,7 @@ class DshConnectionService : Service() {
         val notification = Notification.Builder(this, DshApplication.CHANNEL_ID)
             .setContentTitle("DSH Remote")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_menu_compass)
+            .setSmallIcon(com.dsh.mobile.R.drawable.ic_notification_dsh)
             .setOngoing(true)
             .setContentIntent(
                 PendingIntent.getActivity(
@@ -125,7 +126,7 @@ class DshConnectionService : Service() {
 
                     val profile = if (activeId == null) null else
                         settings.profiles.first().firstOrNull { it.id == activeId }
-                    if (profile == null || profile.url.isBlank()) {
+                    if (profile == null || runCatching { profile.connectionUrl() }.isFailure) {
                         updateForegroundText("未选择活跃主机")
                         return@collect
                     }
@@ -184,7 +185,7 @@ class DshConnectionService : Service() {
                 ) return
                 val reason = event.reason?.let { "：" + it } ?: ""
                 postAlert(
-                    "DSH 需要你的审批",
+                    "DeepSeek Harness 需要你的审批",
                     "工具「" + event.toolName + "」请求执行权限" + reason,
                     event.sessionId,
                     trackKey = "a:${event.sessionId}:${event.approvalId}",
@@ -210,7 +211,7 @@ class DshConnectionService : Service() {
                 ) return
                 val first = event.questions.firstOrNull()?.question?.take(60)
                 postAlert(
-                    "DSH 需要你的确认",
+                    "DeepSeek Harness 需要你的确认",
                     if (first != null) "「" + first + "」等 " + event.questions.size + " 个问题等待回答"
                     else "有 " + event.questions.size + " 个问题等待回答",
                     event.sessionId,
@@ -254,7 +255,7 @@ class DshConnectionService : Service() {
                         )
                     ) return@launch
                     postAlert(
-                        "DSH 任务完成",
+                        "DeepSeek Harness 任务完成",
                         "会话 " + sessionId.take(8) + " 的执行已结束",
                         sessionId,
                         channelId = DshApplication.CHANNEL_COMPLETION,
@@ -283,7 +284,7 @@ class DshConnectionService : Service() {
         val notification = Notification.Builder(this, channelId)
             .setContentTitle(title)
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(com.dsh.mobile.R.drawable.ic_notification_dsh)
             .setAutoCancel(true)
             .setPriority(Notification.PRIORITY_HIGH)
             .setContentIntent(

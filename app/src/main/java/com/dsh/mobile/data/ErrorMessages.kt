@@ -5,21 +5,21 @@ object ErrorMessages {
         ConnectionErrorCode.DNS_UNREACHABLE -> "域名无法解析"
         ConnectionErrorCode.PORT_UNREACHABLE -> "端口不可达（连接被拒绝/超时）"
         ConnectionErrorCode.TLS_CERT_FAILED -> "HTTPS 证书校验失败"
-        ConnectionErrorCode.AUTH_FAILED -> "前置网关鉴权失败（401/403）"
-        ConnectionErrorCode.VERSION_MISMATCH -> "移动端与 PC 端版本不兼容"
+        ConnectionErrorCode.AUTH_FAILED -> "设备令牌或访问凭证无效（401/403）"
+        ConnectionErrorCode.VERSION_MISMATCH -> "手机与电脑上的 DeepSeek Harness 版本不兼容"
         ConnectionErrorCode.PROXY_FAILED -> "代理不可达"
         ConnectionErrorCode.PROTOCOL_ERROR -> "服务响应异常"
         ConnectionErrorCode.UNKNOWN -> "未知错误"
     }
 
     fun advice(code: ConnectionErrorCode): String = when (code) {
-        ConnectionErrorCode.DNS_UNREACHABLE -> "检查地址拼写；局域网场景改用 IP"
-        ConnectionErrorCode.PORT_UNREACHABLE -> "确认 PC 端 DSH 已启动、端口正确、防火墙放行"
-        ConnectionErrorCode.TLS_CERT_FAILED -> "若为自签名证书，在本主机配置里开启「信任自签名」或导入其 CA"
-        ConnectionErrorCode.AUTH_FAILED -> "DSH 本机直连无鉴权；检查自建反代/网关的鉴权配置或凭证"
-        ConnectionErrorCode.VERSION_MISMATCH -> "升级 DSH 或本 App"
+        ConnectionErrorCode.DNS_UNREACHABLE -> "检查服务器地址中的域名；直连局域网电脑时也可填写其 IP 地址"
+        ConnectionErrorCode.PORT_UNREACHABLE -> "直连：确认电脑上的 DeepSeek Harness 已启动，地址和端口正确；服务器中转：确认中转服务运行，手机可访问其地址和端口"
+        ConnectionErrorCode.TLS_CERT_FAILED -> "检查证书有效期及域名；使用自签名证书时，请在主机配置中导入 CA 证书。服务器中转必须校验证书，不能跳过"
+        ConnectionErrorCode.AUTH_FAILED -> "确认连接的是目标电脑，使用其配对码重新配对；若配置了额外的网关鉴权，请检查访问凭证。中转注册令牌仅填写在电脑插件中"
+        ConnectionErrorCode.VERSION_MISMATCH -> "检查手机应用、电脑上的 DeepSeek Harness 与远程控制插件是否为兼容版本"
         ConnectionErrorCode.PROXY_FAILED -> "检查代理地址/端口/账号，或关闭该主机的代理"
-        ConnectionErrorCode.PROTOCOL_ERROR -> "确认地址指向 DSH web 服务；导出日志排查"
+        ConnectionErrorCode.PROTOCOL_ERROR -> "直连地址应指向电脑的 DeepSeek Harness 服务；服务器中转请检查 HTTPS 服务器地址、主机 ID 和电脑插件的中转状态（电脑离线时会返回 503）。仍失败可导出日志排查"
         ConnectionErrorCode.UNKNOWN -> "导出日志排查"
     }
 }

@@ -339,6 +339,7 @@ class SessionChatState(
     // load() 完成前到达的实时事件先入队，历史页落地后重放，
     // 防止网络加载期间 _items 被整页覆盖丢掉实时 chunk
     private var loaded = false
+    private var lastDurableSeq = -1L
     private val preloadBuffer = mutableListOf<SessionEventWire>()
 
     private fun nextKey() = "k${counter.getAndIncrement()}"
@@ -382,7 +383,13 @@ class SessionChatState(
         } catch (_: Exception) {}
     }
 
-    suspend fun load() {
+    suspend fun load(forceRefresh: Boolean = false) {
+        if (forceRefresh) {
+            loaded = false
+            flushJob?.cancel()
+            pendingChunk.clear()
+            pendingThinking.clear()
+        }
         // 冷热分离：先渲染本地温缓存（秒开；gzip 解压+解码移出主线程），再刷网络冷数据
         // loadHistoryWithMeta 携带完整加载水位：loadAll 到过底的会话，缓存覆盖到最老 seq
         val cachedDoc = withContext(Dispatchers.Default) { cache.loadHistoryWithMeta(sessionId) }
@@ -396,8 +403,22 @@ class SessionChatState(
             // 首屏只取最近 3 条消息：服务端把 assistant/chunk 全量回传（约占 payload 98%），
             // maxMessages=10 时载荷可达 1MB+，手机端传输+解码+拼接就是"加载慢"的来源。
             // Home 后台预取命中时零网络直接消费。
-            val h = HistoryMemoryCache.takePrefetch(sessionId)
-                ?: connection.history(sessionId, maxMessages = 3)
+            val head = (if (forceRefresh) null else HistoryMemoryCache.takePrefetch(sessionId))
+                ?: connection.history(sessionId, maxMessages = if (forceRefresh) 15 else 3)
+            val recovered = head.events.toMutableList()
+            var more = head.hasMore
+            // Fill the entire disconnect gap, not just the most recent page.
+            var before = recovered.firstOrNull()?.event?.seq
+            while (forceRefresh && lastDurableSeq >= 0 && more && before != null && before > lastDurableSeq + 1) {
+                val older = connection.history(sessionId, beforeSeq = before, maxMessages = 15)
+                val next = older.events.firstOrNull()?.event?.seq
+                if (next == null || next >= before) break
+                recovered.addAll(0, older.events)
+                before = next
+                more = older.hasMore
+            }
+            val h = head.copy(events = recovered, hasMore = more)
+            lastDurableSeq = maxOf(lastDurableSeq, h.events.maxOfOrNull { it.event.seq } ?: -1L)
             oldestSeq = h.events.firstOrNull()?.event?.seq
             hasMore = h.hasMore
             parseMeta(h.projections)
@@ -470,7 +491,7 @@ class SessionChatState(
                             e.data.jsonObject["title"]?.jsonPrimitive?.contentOrNull?.let { title.value = it }
                         }
                         DshEventTypes.AGENT_ERROR -> {
-                            val msg = e.data.jsonObject["error"]?.toString() ?: "智能体出错"
+                            val msg = e.data.jsonObject["error"]?.toString() ?: "DeepSeek Harness 执行出错"
                             list.add(ChatItem.Notice(nextKey(), msg, true, seq = e.seq))
                         }
                         else -> {}
@@ -564,7 +585,7 @@ class SessionChatState(
                     e.data.jsonObject["title"]?.jsonPrimitive?.contentOrNull?.let { title.value = it }
                 }
                 DshEventTypes.AGENT_ERROR -> {
-                    val msg = e.data.jsonObject["error"]?.toString() ?: "智能体出错"
+                    val msg = e.data.jsonObject["error"]?.toString() ?: "DeepSeek Harness 执行出错"
                     out.add(ChatItem.Notice(nextKey(), msg, true, seq = e.seq))
                 }
                 else -> {}
@@ -623,6 +644,25 @@ class SessionChatState(
     }
 
     private fun processLiveEvent(e: SessionEventWire) {
+        if (e.type == "assistant/reset") {
+            val data = e.data.jsonObject
+            flushJob?.cancel()
+            pendingChunk.clear()
+            pendingThinking.clear()
+            _items.value = _items.value.filterNot { it is ChatItem.Assistant && it.streaming }
+            val cursor = data["startedAfterSeq"]?.jsonPrimitive?.longOrNull ?: -1L
+            if (cursor >= lastDurableSeq) {
+                pendingChunk.append(data["text"]?.jsonPrimitive?.contentOrNull.orEmpty())
+                pendingThinking.append(data["reasoning"]?.jsonPrimitive?.contentOrNull.orEmpty())
+                flushPendingChunk()
+            }
+            return
+        }
+        // History snapshots and reconnect streams overlap at the durable cursor.
+        if (e.seq >= 0) {
+            if (e.seq <= lastDurableSeq) return
+            lastDurableSeq = e.seq
+        }
         // chunk 走批量缓冲路径：攒 CHUNK_FLUSH_MS 的增量一次性 flush，
         // 不做每 token 一次的全列表拷贝 + 重组（快流式下主线程被打满 → 卡死）
         if (e.type == DshEventTypes.ASSISTANT_CHUNK) {
@@ -708,7 +748,7 @@ class SessionChatState(
                 cur.add(
                     ChatItem.Notice(
                         nextKey(),
-                        e.data.jsonObject["error"]?.toString() ?: "智能体出错",
+                        e.data.jsonObject["error"]?.toString() ?: "DeepSeek Harness 执行出错",
                         true,
                         seq = e.seq,
                     )
@@ -926,6 +966,7 @@ fun SessionScreen(
                     streamNotice = null
                     // S5：重连后时间线重新开始，清空旧配对
                     state.clearToolTiming()
+                    if (historyReady) state.load(forceRefresh = true)
                 }
 
                 else -> {}
@@ -1074,7 +1115,7 @@ fun SessionScreen(
                 val share = Intent(Intent.ACTION_SEND).apply {
                     type = "text/markdown"
                     putExtra(Intent.EXTRA_STREAM, uri)
-                    putExtra(Intent.EXTRA_TEXT, "DSH 会话日志：${title ?: sessionId}")
+                    putExtra(Intent.EXTRA_TEXT, "DeepSeek Harness 会话日志：${title ?: sessionId}")
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
                 context.startActivity(Intent.createChooser(share, "导出会话日志"))
@@ -1490,9 +1531,9 @@ fun SessionScreen(
                         Text(
                             when {
                                 DshThemeStyle == ThemeStyle.CODEX -> "> 消息…"
-                                DshThemeStyle == ThemeStyle.CHATGPT -> "询问 DSH…"
-                                DshThemeStyle == ThemeStyle.CLAUDE -> "给 DSH 发消息…"
-                                else -> "给智能体发消息…"
+                                DshThemeStyle == ThemeStyle.CHATGPT -> "询问 DeepSeek Harness…"
+                                DshThemeStyle == ThemeStyle.CLAUDE -> "给 DeepSeek Harness 发消息…"
+                                else -> "给大肥鱼发消息…"
                             },
                         )
                     },

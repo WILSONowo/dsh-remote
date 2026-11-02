@@ -1,0 +1,11 @@
+{
+  "name": "dsh-remote-workspace",
+  "private": true,
+  "workspaces": [
+    "dsh-remote-access"
+  ],
+  "scripts": {
+    "build": "npm run build -w dsh-remote-access && npm run build:client -w dsh-remote-access",
+    "test": "npm test -w dsh-remote-access"
+  }
+}

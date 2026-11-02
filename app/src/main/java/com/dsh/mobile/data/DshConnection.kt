@@ -102,15 +102,27 @@ class DshConnection(private val appContext: Context? = null) {
     /** 配对状态变化后同步内存中的活跃 profile（paired/token 热生效，导航据此判断是否可进首页） */
     @Synchronized
     fun syncCurrentProfile(updated: HostProfile) {
-        if (connectedProfile?.id == updated.id) connectedProfile = updated
+        if (connectedProfile?.id == updated.id) {
+            val credentialsChanged = connectedProfile?.paired != updated.paired ||
+                connectedProfile?.channelToken != updated.channelToken
+            connectedProfile = updated
+            OkHttpClientFactory.ChannelTokenRegistry.set(updated.id, updated.channelToken.ifBlank { null })
+            if (credentialsChanged) {
+                disconnectInternal()
+                connect(updated, onAttempt)
+            }
+        }
     }
 
     // ────────────────────────── 连接管理 ──────────────────────────
 
     @Synchronized
     fun connect(profile: HostProfile, onAttempt: ((AttemptInfo) -> Unit)? = null) {
-        val normalized = normalizeBaseUrl(profile.url)
-        if (_state.value is State.Connected && baseUrl == normalized) return
+        val normalized = try { profile.connectionUrl() } catch (e: Exception) {
+            _state.value = State.Error(e.message ?: "连接设置无效", ConnectionErrorCode.PROTOCOL_ERROR, profile.id)
+            return
+        }
+        if (_state.value is State.Connected && connectedProfile == profile && baseUrl == normalized) return
         disconnectInternal()
         profileId = profile.id
         connectedProfile = profile
@@ -256,12 +268,22 @@ class DshConnection(private val appContext: Context? = null) {
                     openWsStream(path)
                     backoffMs = 3_000L
                 } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    if (e is ApiException && e.code == "auth_failed") {
+                        _state.value = State.Error("设备凭证已失效，请重新配对", ConnectionErrorCode.AUTH_FAILED, profileId)
+                        return@launch
+                    }
                     lastError = e.message ?: "ws 失败"
                     // 回退：部分 dsh web 服务器用 SSE 承载该流
                     try {
                         readSse(path)
                         backoffMs = 3_000L
                     } catch (e2: Exception) {
+                        if (e2 is CancellationException) throw e2
+                        if (e2 is ApiException && e2.code == "auth_failed") {
+                            _state.value = State.Error("设备凭证已失效，请重新配对", ConnectionErrorCode.AUTH_FAILED, profileId)
+                            return@launch
+                        }
                         lastError = "ws/see 均失败: ${e2.message}"
                     }
                 }
@@ -283,6 +305,7 @@ class DshConnection(private val appContext: Context? = null) {
         val request = Request.Builder().url(wsUrl).build()
         val ws = streamClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (path == "/api/events.mux") _events.tryEmit(Event.Reconnected(baseUrl))
                 // 保持挂起：等 socket 关闭或失败才返回，交给外层重连
             }
 
@@ -300,7 +323,8 @@ class DshConnection(private val appContext: Context? = null) {
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (cont.isActive) {
-                    cont.resumeWith(Result.failure(t))
+                    cont.resumeWith(Result.failure(if (response?.code == 401)
+                        ApiException("HTTP 401", "auth_failed") else t))
                 }
             }
         })
@@ -317,12 +341,13 @@ class DshConnection(private val appContext: Context? = null) {
         val response = streamClient.newCall(request).execute()
         if (!response.isSuccessful) {
             response.close()
-            throw ApiException("HTTP ${response.code}")
+            throw ApiException("HTTP ${response.code}", if (response.code == 401) "auth_failed" else null)
         }
         val source = response.body?.source() ?: run {
             response.close()
             throw ApiException("空响应体")
         }
+        if (path == "/api/events.mux") _events.tryEmit(Event.Reconnected(baseUrl))
         try {
             val dataLines = mutableListOf<String>()
             while (currentCoroutineContext().isActive) {
@@ -365,7 +390,8 @@ class DshConnection(private val appContext: Context? = null) {
                 f.sessionId?.let { _events.tryEmit(Event.SessionEvent(it, ev)) }
             }
             DshEventTypes.FRAME_SUBSCRIBED -> {
-                f.sessionId?.let { _events.tryEmit(Event.Reconnected(baseUrl)) }
+                // Physical mux reconnection already requests history recovery.
+                // A session subscription can also be created by that recovery.
             }
             DshEventTypes.FRAME_APPROVAL_REQUESTED -> {
                 val sid = f.sessionId ?: return
@@ -645,7 +671,7 @@ class DshConnection(private val appContext: Context? = null) {
         }
     }
 
-    /** 新建工作区：path 必须是 PC 端已存在的目录绝对路径（如 E:\AI搓的小东西） */
+    /** 新建工作区：path 必须是 PC 端已存在的目录绝对路径（如 E:\workspace） */
     suspend fun createWorkspace(path: String, title: String? = null) {
         call(DshEndpoints.WORKSPACE_CREATE, buildJsonObject {
             put("path", path)

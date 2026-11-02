@@ -9,29 +9,25 @@ jobs:
   plugin:
     name: Plugin (dsh-remote-access)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: dsh-remote-access
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Install deps
-        # 仓库暂无 package-lock.json（本地 npm 网络受限未能生成），用 npm install（幂等）
-        run: npm install
+        run: npm ci --legacy-peer-deps
       - name: Build (src → lib)
         run: npm run build
-      - name: Test on built output (smoke 12/12)
+      - name: Test plugin on built output
         run: npm test
       # prepack 生命周期会再跑 typecheck+build+test 并产出 tgz
       - name: Pack
-        run: npm pack
+        run: npm pack -w dsh-remote-access
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
           name: dsh-remote-access-tgz
-          path: dsh-remote-access/dsh-remote-access-*.tgz
+          path: dsh-remote-access-*.tgz
           if-no-files-found: error
 
   android:
@@ -49,8 +45,8 @@ jobs:
         uses: gradle/actions/wrapper-validation@v6
       - name: Make gradlew executable
         run: chmod +x gradlew
-      - name: Assemble debug APK
-        run: ./gradlew assembleDebug --no-daemon --console=plain
+      - name: Test and assemble debug APK
+        run: ./gradlew testDebugUnitTest assembleDebug --no-daemon --console=plain
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:

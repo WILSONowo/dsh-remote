@@ -149,7 +149,7 @@ fun HomeScreen(
                 val listing = if (path == "/") {
                     // 计算机根：直接走插件 fs/list 盘符列表（host RPC 无跨盘根语义）
                     val fs = connection.fsList("/")
-                        ?: throw Exception("无法列出盘符（需 PC 端插件 dsh-remote-access ≥ v1.3.1）")
+                        ?: throw Exception("无法列出盘符（需电脑插件 dsh-remote-access ≥ v1.3.1）")
                     DirListing(
                         path = "/",
                         crumbs = listOf(Crumb("计算机", "/")),
@@ -761,7 +761,7 @@ fun HomeScreen(
                             )
                         }
                         Text(
-                            "今天想交给智能体什么任务？",
+                            "今天想交给大肥鱼什么任务？",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -935,7 +935,7 @@ fun HomeScreen(
                             modifier = Modifier.fillMaxWidth(),
                             placeholder = {
                                 Text(
-                                    if (DshThemeStyle == ThemeStyle.CODEX) "> 输入任务指令…" else "描述你的任务，例如：审查最近改动并给出改进建议",
+                                    if (DshThemeStyle == ThemeStyle.CODEX) "> 输入任务指令…" else "描述你的任务…",
                                 )
                             },
                             minLines = 3,
@@ -1058,7 +1058,7 @@ fun HomeScreen(
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Image(
-                                    painter = androidx.compose.ui.res.painterResource(com.dsh.mobile.R.drawable.ic_launcher_foreground),
+                                    painter = androidx.compose.ui.res.painterResource(com.dsh.mobile.R.drawable.ic_dsh_desktop),
                                     contentDescription = null,
                                     modifier = Modifier.size(40.dp),
                                 )
@@ -1255,8 +1255,8 @@ private fun WorkspaceSheetContent(
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            if (browseOpen) "任意选择一个 PC 端文件夹作为工作区（不限于 DSH 已划定的工作区）。"
-            else "新对话将创建在所选工作区（PC 端目录）下，切换后自动记住。",
+            if (browseOpen) "任意选择一个电脑文件夹作为工作区（不限于 DeepSeek Harness 已划定的工作区）。"
+            else "新对话将创建在所选工作区（电脑目录）下，切换后自动记住。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1494,7 +1494,7 @@ private fun WorkspaceSheetContent(
         WorkspaceRow(
             icon = Icons.Default.FolderOpen,
             title = "浏览电脑目录…",
-            subtitle = "任选 PC 端文件夹作为工作区",
+            subtitle = "任选电脑文件夹作为工作区",
             selected = false,
             onClick = onBrowseOpen,
         )
@@ -1503,7 +1503,7 @@ private fun WorkspaceSheetContent(
         WorkspaceRow(
             icon = Icons.Default.Home,
             title = "默认工作区",
-            subtitle = "跟随 DSH 的默认目录",
+            subtitle = "跟随 DeepSeek Harness 的默认目录",
             selected = selectedWorkspaceId.isBlank(),
             onClick = onPickDefault,
         )
@@ -1535,7 +1535,7 @@ private fun WorkspaceSheetContent(
             value = newWsPath,
             onValueChange = onNewWsPath,
             modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("PC 端目录绝对路径，如 E:\\AI搓的小东西") },
+            placeholder = { Text("电脑目录绝对路径，如 E:\\workspace") },
             label = { Text("目录路径（必须已存在）") },
             singleLine = true,
             shape = DshShape.small,
@@ -1563,7 +1563,7 @@ private fun WorkspaceSheetContent(
             onClick = {
                 val path = newWsPath.trim()
                 if (path.isEmpty()) {
-                    onSetError("请填写 PC 端目录路径")
+                    onSetError("请填写电脑目录路径")
                     return@Button
                 }
                 if (wsBusy) return@Button
@@ -2152,7 +2152,7 @@ private fun ClaudeHomeLayout(
                 )
                 Icon(
                     Icons.Default.AutoAwesome,
-                    "Claude 风格品牌图标",
+                    "主题装饰图标",
                     Modifier
                         .size(28.dp)
                         .clickable { onRefresh() },
@@ -2227,7 +2227,7 @@ private fun ClaudeHomeLayout(
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Text(
-                            "Get more with DSH",
+                            "探索 DeepSeek Harness",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFFA8A29E),
                         )
@@ -2262,7 +2262,7 @@ private fun ClaudeHomeLayout(
                             Box {
                                 if (input.isEmpty()) {
                                     Text(
-                                        "给 DSH 发消息…",
+                                        "给 DeepSeek Harness 发消息…",
                                         color = Color(0xFFA8A29E),
                                         style = MaterialTheme.typography.bodyMedium,
                                     )
@@ -2432,7 +2432,7 @@ private fun DeepLookHomeLayout(
                 contentAlignment = Alignment.Center,
             ) {
                 Image(
-                    painter = androidx.compose.ui.res.painterResource(R.drawable.ic_launcher_foreground),
+                    painter = androidx.compose.ui.res.painterResource(R.drawable.ic_dsh_desktop),
                     contentDescription = null,
                     modifier = Modifier.size(20.dp),
                 )
@@ -2508,8 +2508,8 @@ private fun DeepLookHomeLayout(
                     }
                 }
 
-                // 分组「给智能体派个任务」
-                DeepLookGroupTitle("给智能体派个任务")
+                // 分组「给大肥鱼派个任务」
+                DeepLookGroupTitle("给大肥鱼派个任务")
                 DeepLookCard {
                     Column(Modifier.padding(14.dp)) {
                         OutlinedTextField(
@@ -3345,7 +3345,7 @@ private fun ChatGptHomeLayout(
                         Box {
                             if (input.isEmpty()) {
                                 Text(
-                                    "询问 DSH…",
+                                    "询问 DeepSeek Harness…",
                                     color = Color(0xFF9CA3AF),
                                     style = MaterialTheme.typography.bodyMedium,
                                 )

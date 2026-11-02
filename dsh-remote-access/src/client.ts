@@ -83,7 +83,7 @@ window.__ModuleLoader__.load({
       ].join(";");
 
       var title = document.createElement("div");
-      title.textContent = "🔐 手机设备「" + pendingDevice.name + "」请求首次连接";
+      title.textContent = "手机设备「" + pendingDevice.name + "」请求首次连接";
       title.style.cssText = "font-size:15px;font-weight:600;line-height:1.5;margin-bottom:8px";
 
       var sub = document.createElement("div");
@@ -176,8 +176,8 @@ window.__ModuleLoader__.load({
       }
 
       return h("div", { style: S.root },
-        h("div", { style: S.title }, "配对管理（手机 App）"),
-        h("div", { style: S.sub }, "手机 App 首次连接本电脑时，需在此确认允许；已允许的设备可随时撤销，撤销后下次连接需重新确认。"),
+        h("div", { style: S.title }, "配对设备管理"),
+        h("div", { style: S.sub }, "手机 App 首次连接本电脑时，可使用配对码或在此确认允许；已允许的设备可随时撤销，撤销后立即断开该设备，需重新配对。"),
         h("div", { style: S.card },
           devices === null ? h("div", { style: S.sub }, "加载中…") :
             devices.length === 0 ? h("div", { style: S.sub }, "暂无已配对设备。") :
@@ -245,7 +245,7 @@ window.__ModuleLoader__.load({
         h("div", { style: S.row },
           h("div", { style: S.title }, "配对码（推荐）"),
           pc ? h("span", { style: Object.assign({}, S.badge, { background: "rgba(52,199,89,.15)", color: "var(--dsw-alias-state-success-primary)" }) }, "有效 " + mm + ":" + ss) : null),
-        h("div", { style: S.sub }, "生成一个 6 位随机配对码，在手机 App 连接本机后输入即完成配对——不用再守着确认框点允许。"),
+        h("div", { style: S.sub }, "生成一个 6 位随机配对码，在手机 App 连接本机后输入即完成配对。"),
         pc ? h("div", { style: Object.assign({}, S.mono, { fontSize: 30, fontWeight: 700, letterSpacing: "0.4em", color: "var(--dsw-alias-brand-primary)", marginTop: 8, marginBottom: 2 }) }, pc.code) : null,
         pc ? h("div", { style: S.sub }, "10 分钟有效 · 最多试错 5 次 · 验证通过立即作废") : null,
         h("div", { style: Object.assign({}, S.row, { marginTop: 10 }) },
@@ -266,7 +266,7 @@ window.__ModuleLoader__.load({
             if (r && r.ok) { setHosts(r.hosts || []); setErr(null); }
             else setErr((r && r.error) || "加载失败");
           })
-          .catch(function () { setErr("无法连接插件后端（重启 DSH 后生效）"); });
+          .catch(function () { setErr("无法连接插件后端（请检查 DeepSeek Harness 是否运行及插件是否已加载）"); });
       }
       useEffect(function () { refresh(); }, []);
 
@@ -294,9 +294,9 @@ window.__ModuleLoader__.load({
         h("div", { style: S.row },
           h("div", { style: S.title }, "公网域名白名单"),
           hosts !== null ? h("span", { style: Object.assign({}, S.badge, { background: "rgba(142,142,147,.15)", color: "var(--dsw-alias-label-secondary)" }) }, "共 " + hosts.length + " 条") : null),
-        h("div", { style: S.sub }, "手机通过公网隧道连接时，DSH 核心校验请求的 Host 域名（防 DNS 重绑定）；把隧道的公网域名加进来手机才能连上。填「域名」或「域名:端口」（不带 https://；中文域名请用 punycode）。"),
+        h("div", { style: S.sub }, "手机通过公网隧道连接时，DeepSeek Harness 核心校验请求的 Host 域名；把隧道的公网域名加进来手机才能连上。填「域名」或「域名:端口」（不带 https://；中文域名请用 punycode）。"),
         hosts === null ? h("div", { style: S.sub }, "加载中…") :
-          hosts.length === 0 ? h("div", { style: S.sub }, "暂无白名单条目（手机只能走局域网，或重写 Host 为 localhost 的隧道）。") :
+          hosts.length === 0 ? h("div", { style: S.sub }, "暂无白名单条目。") :
             hosts.map(function (x) {
               return h("div", { key: x, style: Object.assign({}, S.row, { justifyContent: "space-between", marginBottom: 6 }) },
                 h("span", { style: S.mono }, x),
@@ -306,18 +306,76 @@ window.__ModuleLoader__.load({
           h("input", { style: Object.assign({}, S.input, { width: 230 }), placeholder: "如 tunnel.example.com 或 域名:8080", value: input, onChange: function (e) { setInput(e.target.value); } }),
           h("button", { style: S.btnPrimary, disabled: busy || !input.trim(), onClick: function () { mutate("add", input.trim()); } }, busy ? "处理中…" : "添加")),
         err ? h("div", { style: Object.assign({}, S.err, { marginTop: 6 }) }, err) : null,
-        h("div", { style: S.sub, marginTop: 6 }, "✔ 白名单写入 connection 行的 trustedHosts（拼回 LAN 地址与 --trusted-host），修改后立即生效（DSH 热监视 cordis.patch.yml）；如未生效请重启 DSH。白名单只解决 Host 校验，手机请求仍需配对拿到通道 token。")
+        h("div", { style: S.sub, marginTop: 6 }, "白名单写入 connection 行的 trustedHosts（拼回 LAN 地址与 --trusted-host），修改后立即生效（DeepSeek Harness 热监视 cordis.patch.yml）；如未生效请重启 DeepSeek Harness。白名单只解决 Host 校验，手机请求仍需配对拿到通道 token。")
       );
+    }
+
+    function RelayCard() {
+      var [config, setConfig] = useState(null);
+      var [token, setToken] = useState("");
+      var [busy, setBusy] = useState(false);
+      var [error, setError] = useState("");
+      var [status, setStatus] = useState("");
+      var labels = {disabled:"未启用", connecting:"连接中", connected:"已连接", reconnecting:"正在重连", error:"连接失败"};
+      function refresh(initial) {
+        fetchJson("/api/remote-access/relay/config").then(function(r) {
+          if (!r || !r.ok) throw new Error("无法读取中转设置");
+          if (initial) setConfig(r);
+          setStatus((labels[r.state] || r.state) + (r.detail ? " · " + r.detail : ""));
+        }).catch(function() { setStatus("无法读取连接状态"); });
+      }
+      useEffect(function() {
+        refresh(true);
+        var timer = setInterval(function() { refresh(false); }, 3000);
+        return function() { clearInterval(timer); };
+      }, []);
+      function change(key, value) { setConfig(function(c) { return Object.assign({}, c, { [key]: value }); }); }
+      function save() {
+        setBusy(true); setError("");
+        fetchJson("/api/remote-access/relay/config", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({enabled:config.enabled, serverUrl:config.serverUrl, hostId:config.hostId,
+            registrationToken:token, caFile:config.caFile, allowInsecureLoopback:config.allowInsecureLoopback})
+        }).then(function(r) {
+          if (!r || !r.ok) { setError(r && r.error || "保存失败"); return; }
+          setToken(""); refresh(true);
+        }).catch(function() { setError("保存失败，请检查电脑端连接"); }).finally(function() { setBusy(false); });
+      }
+      function field(label, key, placeholder) {
+        return h("label", {style:{display:"block", marginTop:10}},
+          h("div", {style:S.sub}, label),
+          h("input", {style:Object.assign({}, S.input, {width:"100%", boxSizing:"border-box"}),
+            value:config[key] || "", placeholder:placeholder, disabled:busy,
+            onChange:function(e) { change(key,e.target.value); }}));
+      }
+      return h("div", {style:S.card},
+        h("div", {style:S.title}, "服务器"),
+        h("div", {style:S.sub}, "本机主动连接服务器。手机选择“服务器”，填写相同服务器地址和主机 ID，再使用本机配对码授权。直连仍可使用。"),
+        h("div", {style:S.sub, role:"status"}, status || "加载中…"),
+        config ? h("div", {},
+          h("label", {style:S.row}, h("input", {type:"checkbox", checked:config.enabled, disabled:busy,
+            onChange:function(e) { change("enabled",e.target.checked); }}), "启用在线服务"),
+          field("服务器地址", "serverUrl", "https://relay.example.com:8443"),
+          field("主机 ID", "hostId", "与服务器分配的主机 ID 一致"),
+          h("label", {style:{display:"block", marginTop:10}}, h("div", {style:S.sub}, "主机注册凭证"),
+            h("input", {type:"password", autoComplete:"new-password", style:Object.assign({},S.input,{width:"100%",boxSizing:"border-box"}),
+              value:token, disabled:busy, placeholder:config.tokenConfigured ? "已保存，留空保持原凭证" : "服务器生成的注册凭证",
+              onChange:function(e) { setToken(e.target.value); }})),
+          field("自定义 CA 证书路径（可选）", "caFile", "使用公开受信证书时留空"),
+          h("button", {style:Object.assign({},S.btnPrimary,{marginTop:12}), disabled:busy, onClick:save}, busy ? "保存中…" : "保存中转设置")
+        ) : null,
+        error ? h("div", {style:S.err, role:"alert"}, error) : null);
     }
 
     // ---------- 设置页「远程控制」：远程互信认证 ----------
     function TrustSection() {
       return h("div", { style: S.root },
         h("div", { style: S.row },
-          h("div", { style: S.title }, "远程互信认证"),
+          h("div", { style: S.title }, "远程身份认证"),
           h("span", { style: Object.assign({}, S.badge, { background: "rgba(52,199,89,.15)", color: "var(--dsw-alias-state-success-primary)" }) }, "● 已启用")),
-        h("div", { style: S.sub }, "插件只负责远程互信：手机 App 首次连接后经配对码（或 PC 确认框）完成配对，获得远程通道 token；此后所有 /api 请求与实时通道（WebSocket）都要求该 token，拿到地址的陌生人无法遥控这台电脑。"),
-        h("div", { style: S.ok }, "✔ 通道鉴权已挂载：本机浏览器放行；手机引导端点（配对握手、配对码校验、host.describe）豁免；其余 /api（含配对管理操作）一律需要 Bearer token。"),
+        h("div", { style: S.sub }, "通过直连或服务器连接，首次使用配对码或本机确认进行授权。"),
+        h("div", { style: S.ok }, "设备管理和中转配置仅允许在本机操作；手机配对后获得独立访问权限。"),
+        h(RelayCard, {}),
         h(PairCodeCard, {}),
         h(TrustedHostsCard, {}),
         h("hr", { style: S.divider }),

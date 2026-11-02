@@ -78,7 +78,7 @@ fun PendingScreen(
                 Text("暂无待办", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "审批、问答与智能体报错会收在这里",
+                    "审批、问答与 DeepSeek Harness 报错会收在这里",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

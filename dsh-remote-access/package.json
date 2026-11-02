@@ -1,7 +1,7 @@
 {
   "name": "dsh-remote-access",
-  "version": "2.5.1",
-  "description": "DSH 远程互信认证：配对码快速配对、首次配对确认、已配对设备管理、公网域名信任白名单（v2.5.1，写 connection 行 !!js 拼接 trustedHosts 热生效，兼容 --trusted-host）、主机设备信息、只读目录/文件预览、MCP 枚举、远程通道 Bearer token 鉴权（不含微信桥与 cpolar 隧道）",
+  "version": "3.0.0",
+  "description": "DSH 手机远程访问：独立设备配对、直连、自建中转及 0.2.1-rc.5 协议适配",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -9,7 +9,8 @@
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./tunnel": "./lib/tunnel.js"
   },
   "files": [
     "lib",
@@ -21,7 +22,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
     "build:client": "esbuild src/client.ts --bundle --platform=browser --format=iife --outfile=lib/client.js --target=es2020",
-    "test": "node --test smoke-test.mjs",
+    "test": "node --test test/*.test.mjs smoke-test.mjs",
     "prepack": "npm run typecheck && npm run build && npm run build:client && npm test",
     "pack": "npm pack"
   },
@@ -39,11 +40,17 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1-rc.1",
-    "@deepseek-ai/dsh": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1"
+    "@deepseek-ai/dsh": "^0.1.0-rc.7 || ^0.2.1-rc.5",
+    "@deepseek-ai/dsh-tools": "^0.0.1-rc.1 || ^0.2.1-rc.5"
   },
   "devDependencies": {
-
+    "typescript": "~5.9.3",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "esbuild": "^0.25.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
 }

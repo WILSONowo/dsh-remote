@@ -80,11 +80,11 @@ fun scanHistoryEvents(sessionId: String, entries: List<HistoryEntry>): List<Pend
 
 /** 异常消息宽松提取：message / error / name，全缺返回默认文案 */
 internal fun errorMessageOf(data: JsonElement): String {
-    val o = (data as? JsonObject) ?: return "智能体执行出错"
+    val o = (data as? JsonObject) ?: return "DeepSeek Harness 执行出错"
     return (o["message"] as? JsonPrimitive)?.contentOrNull
         ?: (o["error"] as? JsonPrimitive)?.contentOrNull
         ?: (o["name"] as? JsonPrimitive)?.contentOrNull
-        ?: "智能体执行出错"
+        ?: "DeepSeek Harness 执行出错"
 }
 
 /** 三档顺序 + 档内排序（spec §5.1）：审批/问答 arrivedAt 升序，异常降序 */

@@ -17,10 +17,16 @@ class HttpPairingRpc(
     private val connection: DshConnection,
     private val client: OkHttpClient,
 ) : PairingRpc {
+    private val pairingSecret = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    private var pairingDeviceId = ""
+    private val endpoint = connection.baseUrl()
+
 
     private suspend fun post(path: String, body: JSONObject): String = withContext(Dispatchers.IO) {
         val req = Request.Builder()
-            .url(connection.baseUrl() + path)
+            .url(endpoint + path)
+            .header("X-DSH-Pairing-Secret", pairingSecret)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
         client.newCall(req).execute().use { resp ->
@@ -35,7 +41,7 @@ class HttpPairingRpc(
     }
 
     private suspend fun get(path: String): String = withContext(Dispatchers.IO) {
-        val req = Request.Builder().url(connection.baseUrl() + path).get().build()
+        val req = Request.Builder().url(endpoint + path).header("X-DSH-Pairing-Secret", pairingSecret).get().build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
@@ -43,22 +49,36 @@ class HttpPairingRpc(
         }
     }
 
-    override suspend fun request(deviceId: String, deviceName: String): String =
-        post("/api/remote-access/pair/request", JSONObject()
+    override suspend fun request(deviceId: String, deviceName: String): String {
+        pairingDeviceId = deviceId
+        return post("/api/remote-access/pair/request", JSONObject()
             .put("deviceId", deviceId).put("deviceName", deviceName))
+    }
 
     override suspend fun status(): String =
-        get("/api/remote-access/pair/status")
+        get("/api/remote-access/pair/status?deviceId=" + java.net.URLEncoder.encode(pairingDeviceId, "UTF-8"))
 
-    /** pair/check 结果：paired + 通道 token（仅已配对设备下发；旧插件无 token 字段为 null） */
-    data class CheckResult(val paired: Boolean, val token: String?)
+    /** pair/check 只验证当前设备凭证，不下发或恢复令牌。 */
+    data class CheckResult(val paired: Boolean)
+
+    suspend fun claim(): String? = withContext(Dispatchers.IO) {
+        val req = Request.Builder().url(endpoint + "/api/remote-access/pair/claim")
+            .header("X-DSH-Pairing-Secret", pairingSecret)
+            .post(JSONObject().put("deviceId", pairingDeviceId).toString()
+                .toRequestBody("application/json".toMediaType())).build()
+        client.newCall(req).execute().use { response ->
+            if (!response.isSuccessful) return@withContext null
+            val obj = JSONObject(response.body?.string().orEmpty())
+            if (obj.optBoolean("ok")) obj.optString("token").takeIf { it.matches(Regex("[a-f0-9]{64}")) } else null
+        }
+    }
 
     /** device/info：主机机型与 MAC（设备记录 + 重连校验）；旧插件 404/410 → null（降级不校验） */
     data class DeviceInfo(val name: String, val model: String, val mac: String, val platform: String)
 
     suspend fun deviceInfo(): DeviceInfo? = withContext(Dispatchers.IO) {
         val req = Request.Builder()
-            .url(connection.baseUrl() + "/api/remote-access/device/info")
+            .url(endpoint + "/api/remote-access/device/info")
             .get()
             .build()
         client.newCall(req).execute().use { resp ->
@@ -79,14 +99,14 @@ class HttpPairingRpc(
     suspend fun check(deviceId: String): CheckResult = withContext(Dispatchers.IO) {
         val encoded = java.net.URLEncoder.encode(deviceId, "UTF-8")
         val req = Request.Builder()
-            .url(connection.baseUrl() + "/api/remote-access/pair/check?deviceId=" + encoded)
+            .url(endpoint + "/api/remote-access/pair/check?deviceId=" + encoded)
             .get()
             .build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
             val obj = JSONObject(text)
-            CheckResult(obj.optBoolean("paired", false), obj.optString("token", "").ifBlank { null })
+            CheckResult(obj.optBoolean("paired", false))
         }
     }
 
@@ -105,7 +125,7 @@ class HttpPairingRpc(
     suspend fun codeVerify(code: String, deviceId: String, deviceName: String): CodeVerifyResult =
         withContext(Dispatchers.IO) {
             val req = Request.Builder()
-                .url(connection.baseUrl() + "/api/remote-access/pair/code/verify")
+                .url(endpoint + "/api/remote-access/pair/code/verify")
                 .post(JSONObject()
                     .put("code", code)
                     .put("deviceId", deviceId)
@@ -140,7 +160,7 @@ class HttpPairingRpc(
             .put("content", Base64.encodeToString(bytes, Base64.NO_WRAP))
             .put("overwrite", true)
         val req = Request.Builder()
-            .url(connection.baseUrl() + "/api/remote-access/fs/write")
+            .url(endpoint + "/api/remote-access/fs/write")
             .post(json.toString().toRequestBody("application/json".toMediaType()))
             .build()
         client.newCall(req).execute().use { resp ->
@@ -164,7 +184,7 @@ class HttpPairingRpc(
 
     suspend fun rotateToken(): TokenOpResult = withContext(Dispatchers.IO) {
         val req = Request.Builder()
-            .url(connection.baseUrl() + "/api/remote-access/token/rotate")
+            .url(endpoint + "/api/remote-access/token/rotate")
             .post("{}".toRequestBody("application/json".toMediaType()))
             .build()
         client.newCall(req).execute().use { resp ->
@@ -180,7 +200,7 @@ class HttpPairingRpc(
 
     suspend fun revokeToken(): TokenOpResult = withContext(Dispatchers.IO) {
         val req = Request.Builder()
-            .url(connection.baseUrl() + "/api/remote-access/token/revoke")
+            .url(endpoint + "/api/remote-access/token/revoke")
             .post("{}".toRequestBody("application/json".toMediaType()))
             .build()
         client.newCall(req).execute().use { resp ->
@@ -198,7 +218,7 @@ class HttpPairingRpc(
 
     suspend fun audit(): List<AuditEvent> = withContext(Dispatchers.IO) {
         val req = Request.Builder()
-            .url(connection.baseUrl() + "/api/remote-access/token/audit")
+            .url(endpoint + "/api/remote-access/token/audit")
             .get()
             .build()
         client.newCall(req).execute().use { resp ->

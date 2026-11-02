@@ -7,8 +7,11 @@
 //       只读文件预览（fs/read）、MCP 枚举（mcp/list）、远程通道 Bearer token 鉴权（/api 全量门禁，含 WebSocket）。
 // 移除：微信 iLink 桥（lib/ilink.js + lib/bridge.js）、cpolar 隧道供应（lib/cpolar.js），
 //       对应 wx/*、cpolar/*、/status、/start、/stop、/qr 路由与 qrcode 依赖一并删除。
+import { createRelayManager } from "./relay.js";
+import { createModernAdapter } from "./modern.js";
+import { createSecurity, DEVICE_ID } from "./security.js";
 import { execFile } from "node:child_process";
-import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync, } from "node:fs";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -566,209 +569,8 @@ export const apply = (ctx) => {
             });
         },
     });
-    // ---------- 移动端首次配对（一次性握手确认） ----------
-    const pairFile = join(home, "remote-access", "paired.json");
-    const readPaired = () => {
-        try {
-            return JSON.parse(readFileSync(pairFile, "utf8")).devices ?? [];
-        }
-        catch {
-            return [];
-        }
-    };
-    const writePaired = (devices) => {
-        try {
-            mkdirSync(join(home, "remote-access"), { recursive: true });
-            writeFileSync(pairFile, JSON.stringify({ devices }, null, 2), "utf8");
-        }
-        catch (e) {
-            log("paired.json 写入失败", e);
-        }
-    };
-    let pendingPair = null; // { deviceId, name, at, outcome }（JSON 安全；120s 定时器单独持有）
-    let pendingTimer = null;
-    const clearPending = () => {
-        if (pendingTimer)
-            clearTimeout(pendingTimer);
-        pendingTimer = null;
-        pendingPair = null;
-    };
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/pair/request",
-        handler: async (req, res) => {
-            if (req.method !== "POST")
-                return json(res, 405, { error: "method not allowed" });
-            const body = await readBody(req);
-            const deviceId = String(body.deviceId || "").trim();
-            const deviceName = String(body.deviceName || "未知设备").trim().slice(0, 64);
-            if (!deviceId)
-                return json(res, 400, { error: "missing deviceId" });
-            if (readPaired().some((d) => d.deviceId === deviceId)) {
-                return json(res, 200, { ok: true, state: "paired" });
-            }
-            if (!pendingPair || pendingPair.deviceId !== deviceId) {
-                // 新设备来配对：自动生成/确保有一个有效配对码可供手机输入
-                ensureActiveCode();
-                clearPending();
-                pendingPair = { deviceId, name: deviceName, at: Date.now(), outcome: null };
-                pendingTimer = setTimeout(() => { pendingPair = null; pendingTimer = null; }, 120000);
-            }
-            else {
-                // 同一设备重新发起握手：清除上一次 approve/deny 结果，恢复 pending
-                pendingPair.outcome = null;
-                pendingPair.name = deviceName;
-            }
-            json(res, 200, { ok: true, state: "pending" });
-        },
-    });
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/pair/status",
-        handler: async (req, res) => {
-            if (req.method !== "GET")
-                return json(res, 405, { error: "method not allowed" });
-            json(res, 200, { ok: true, state: pendingPair?.outcome ?? (pendingPair ? "pending" : "none"), pendingDevice: pendingPair ?? null });
-        },
-    });
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/pair/respond",
-        handler: async (req, res) => {
-            if (req.method !== "POST")
-                return json(res, 405, { error: "method not allowed" });
-            const body = await readBody(req);
-            const deviceId = String(body.deviceId || "").trim();
-            const outcome = String(body.outcome || "");
-            if (!pendingPair || pendingPair.deviceId !== deviceId) {
-                return json(res, 200, { ok: false, error: "no pending request" });
-            }
-            if (outcome === "approve") {
-                const devices = readPaired().filter((d) => d.deviceId !== deviceId);
-                devices.push({ deviceId, name: pendingPair.name, at: Date.now() });
-                writePaired(devices);
-            }
-            pendingPair.outcome = outcome === "approve" ? "approved" : "denied";
-            json(res, 200, { ok: true, state: pendingPair.outcome });
-        },
-    });
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/pair/list",
-        handler: async (req, res) => {
-            if (req.method !== "GET")
-                return json(res, 405, { error: "method not allowed" });
-            json(res, 200, { ok: true, devices: readPaired() });
-        },
-    });
-    // 回查某设备是否仍配对（App 撤销后重新握手用）
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/pair/check",
-        handler: async (req, res) => {
-            if (req.method !== "GET")
-                return json(res, 405, { error: "method not allowed" });
-            const u = new URL(req.url, "http://localhost");
-            const deviceId = u.searchParams.get("deviceId") ?? "";
-            const paired = readPaired().some((d) => d.deviceId === deviceId);
-            // 已配对设备回查时下发通道 token（App 存入 HostProfile，此后所有请求带 Bearer 头）
-            json(res, 200, { ok: true, paired, token: paired ? channelToken() : undefined });
-        },
-    });
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/pair/revoke",
-        handler: async (req, res) => {
-            if (req.method !== "POST")
-                return json(res, 405, { error: "method not allowed" });
-            const body = await readBody(req);
-            const deviceId = String(body.deviceId || "").trim();
-            writePaired(readPaired().filter((d) => d.deviceId !== deviceId));
-            json(res, 200, { ok: true });
-        },
-    });
-    // ---------- 配对码（v2.1.0）：PC 生成 → 手机输入 → 立即配对并下发 token ----------
-    // 安全属性：一次性（验证成功即作废）；10 分钟过期；最多 5 次错误尝试（超限作废，此后新码仅本机
-    // /current 可见，远端无法继续爆破）；常量时间比较防时序侧信道；
-    // generate/current 不豁免（仅本机设置页可达），verify 豁免（未配对手机的引导通道）。
-    // 说明：这里不设时间节流——6 位码 + 5 次即锁已足以防爆破，且时间节流会误伤正常连打重试。
-    const CODE_TTL_MS = 10 * 60 * 1000;
-    const CODE_MAX_ATTEMPTS = 5;
-    let pairCode = null; // { code, at, expiresAt, attempts }
-    const codeDigest = (s) => createHash("sha256").update(String(s), "utf8").digest();
-    // 自动生成：当前无有效码（过期 / 用尽 / 从未生成）时立刻生成一个 6 位码，
-    // 保证手机来配对时 PC 端始终有码可填（无需手动点「生成配对码」）。
-    const ensureActiveCode = () => {
-        const now = Date.now();
-        if (pairCode && now <= pairCode.expiresAt && pairCode.attempts < CODE_MAX_ATTEMPTS) {
-            return pairCode;
-        }
-        const code = randomInt(0, 1000000).toString().padStart(6, "0");
-        pairCode = { code, at: now, expiresAt: now + CODE_TTL_MS, attempts: 0 };
-        return pairCode;
-    };
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/pair/code/generate",
-        handler: async (req, res) => {
-            if (req.method !== "POST")
-                return json(res, 405, { error: "method not allowed" });
-            const code = randomInt(0, 1000000).toString().padStart(6, "0");
-            pairCode = { code, at: Date.now(), expiresAt: Date.now() + CODE_TTL_MS, attempts: 0 };
-            log("已生成配对码（10 分钟有效，最多 5 次尝试，一次性）");
-            json(res, 200, { ok: true, code, expiresInSec: CODE_TTL_MS / 1000, maxAttempts: CODE_MAX_ATTEMPTS });
-        },
-    });
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/pair/code/current",
-        handler: async (req, res) => {
-            if (req.method !== "GET")
-                return json(res, 405, { error: "method not allowed" });
-            // 非豁免路由：远程需 Bearer token 才能读；本机设置页走 loopback 放行。
-            const active = ensureActiveCode();
-            json(res, 200, {
-                ok: true,
-                code: active.code,
-                expiresInSec: Math.max(0, Math.floor((active.expiresAt - Date.now()) / 1000)),
-                maxAttempts: CODE_MAX_ATTEMPTS,
-            });
-        },
-    });
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/pair/code/verify", handler: async (req, res) => {
-            if (req.method !== "POST")
-                return json(res, 405, { error: "method not allowed" });
-            const now = Date.now();
-            const body = await readBody(req);
-            const deviceId = String(body.deviceId || "").trim();
-            const deviceName = String(body.deviceName || "未知设备").trim().slice(0, 64);
-            const code = String(body.code || "").trim();
-            if (!deviceId)
-                return json(res, 400, { error: "missing deviceId" });
-            if (!pairCode || now > pairCode.expiresAt) {
-                pairCode = null;
-                return json(res, 200, { ok: false, error: "no_active_code", retryable: false });
-            }
-            if (pairCode.attempts >= CODE_MAX_ATTEMPTS) {
-                pairCode = null;
-                return json(res, 200, { ok: false, error: "code_locked", retryable: false });
-            }
-            if (!/^\d{6}$/.test(code) || !timingSafeEqual(codeDigest(code), codeDigest(pairCode.code))) {
-                pairCode.attempts += 1;
-                const left = CODE_MAX_ATTEMPTS - pairCode.attempts;
-                // 码对象保留：后续尝试由上方 code_locked 分支统一拒绝并销毁
-                return json(res, 200, { ok: false, error: "code_mismatch", attemptsLeft: Math.max(0, left), retryable: left > 0 });
-            }
-            // 验证成功：一次性作废 + 直接写入配对表并下发通道 token
-            pairCode = null;
-            const devices = readPaired().filter((d) => d.deviceId !== deviceId);
-            devices.push({ deviceId, name: deviceName, at: now });
-            writePaired(devices);
-            json(res, 200, { ok: true, state: "approved", token: channelToken() });
-        },
-    });
+    const security = createSecurity(home, reg);
+    ctx.effect(() => () => security.dispose(), "dsh-remote-access: device credentials");
     // ---------- 公网域名信任白名单（v2.4.0：写入 connection 行 !!js 拼接表达式） ----------
     // DSH ≥0.1.0-rc.7 的 /api Host 围栏读取 client-connection（行 id: connection）的 config.trustedHosts，
     // web 组合包给该行的默认值是 !!js ctx.webRuntime.trustedHosts（LAN IP 字面量 + CLI --trusted-host），
@@ -980,100 +782,6 @@ export const apply = (ctx) => {
             json(res, 200, { ok: true, hosts: next, note: "已热生效：写入 connection 行 trustedHosts（DSH 监视 cordis.patch.yml 自动应用）" });
         },
     });
-    // ---------- 远程通道 token 鉴权 ----------
-    // /api 全量 Bearer 门禁（含 WebSocket 升级），规则：
-    //   - 本机浏览器放行：loopback 远端且无 X-Forwarded-For（公网隧道虽从 127.0.0.1
-    //     连入，但携带 XFF/x-real-ip 头，据此与真本机请求区分）；
-    //   - 局域网直连（非 loopback 远端）与任何公网隧道一律要求 token；
-    //   - 引导通道豁免：/api/remote-access/pair/*（配对握手）与 /api/host.describe（连接探测）；
-    //   - token 首次加载时自动生成，存放 $DSH_HOME/remote-access/channel-token。
-    const tokenFile = join(home, "remote-access", "channel-token");
-    let cachedToken = null;
-    const channelToken = () => {
-        if (cachedToken)
-            return cachedToken;
-        try {
-            const t = readFileSync(tokenFile, "utf8").trim();
-            if (/^[0-9a-f]{32,}$/.test(t)) {
-                // token 一旦载入进程内缓存即不重读磁盘：外部替换/轮换 channel-token 文件需重启 DSH 才生效
-                log("远程通道 token 已在进程内缓存；如需轮换请重写 " + tokenFile + " 后重启 DSH");
-                return (cachedToken = t);
-            }
-        }
-        catch { }
-        try {
-            mkdirSync(join(home, "remote-access"), { recursive: true });
-            const t = randomBytes(24).toString("hex");
-            writeFileSync(tokenFile, t, "utf8");
-            log("已生成远程通道 token（remote-access/channel-token）");
-            return (cachedToken = t);
-        }
-        catch (e) {
-            log("channel-token 生成失败，鉴权不启用", e);
-            return null;
-        }
-    };
-    // ---------- Token 运维（M4）：轮换 / 吊销 / 审计 ----------
-    // 均为非豁免 /api 路由 → 仅本机 loopback（无 XFF）或已配对设备（带当前 Bearer）可达，远程未持 token 一律 401。
-    const audit = []; // {ts, action, deviceId?, ip}
-    const logAudit = (action, req, deviceId) => {
-        audit.push({ ts: Date.now(), action, deviceId: deviceId || null, ip: req?.socket?.remoteAddress || null });
-        if (audit.length > 200)
-            audit.splice(0, audit.length - 200);
-        try {
-            mkdirSync(join(home, "remote-access"), { recursive: true });
-            writeFileSync(join(home, "remote-access", "audit.json"), JSON.stringify(audit.slice(-50), null, 2), "utf8");
-        }
-        catch { }
-    };
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/token/rotate",
-        handler: async (req, res) => {
-            if (req.method !== "POST")
-                return json(res, 405, { error: "method not allowed" });
-            // 轮换 = 生成新 token 并重置进程内缓存（旧 token 即刻失效，现有设备需以新 token 继续）
-            const t = randomBytes(24).toString("hex");
-            cachedToken = null;
-            try {
-                mkdirSync(join(home, "remote-access"), { recursive: true });
-                writeFileSync(tokenFile, t, "utf8");
-            }
-            catch {
-                return json(res, 200, { ok: false, error: "write_failed" });
-            }
-            cachedToken = t;
-            logAudit("token/rotate", req);
-            json(res, 200, { ok: true, token: t, rotatedAt: Date.now() });
-        },
-    });
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/token/revoke",
-        handler: async (req, res) => {
-            if (req.method !== "POST")
-                return json(res, 405, { error: "method not allowed" });
-            // 吊销 = 清空 token 文件 + 缓存，并清空配对表 → 所有设备下次请求 401，强制重新配对
-            cachedToken = null;
-            try {
-                mkdirSync(join(home, "remote-access"), { recursive: true });
-                writeFileSync(tokenFile, "", "utf8");
-            }
-            catch { }
-            writePaired([]);
-            logAudit("token/revoke", req);
-            json(res, 200, { ok: true, revokedAt: Date.now() });
-        },
-    });
-    reg({
-        kind: "exact",
-        path: "/api/remote-access/token/audit",
-        handler: async (req, res) => {
-            if (req.method !== "GET")
-                return json(res, 405, { error: "method not allowed" });
-            json(res, 200, { ok: true, events: audit.slice(-50) });
-        },
-    });
     // ---------- 离线同步（M2，插件侧）：设备待确认事件队列 + 批量 ACK ----------
     // 以 deviceId 隔离：pending 事件落 $DSH_HOME/remote-access/sync/<deviceId>.json。
     // v1 语义：App 断网/被杀时的发送/审批/问答进入本地 outbox，恢复后 POST /sync 上报并 ACK；
@@ -1103,10 +811,12 @@ export const apply = (ctx) => {
             const deviceId = String(body.deviceId || "").trim();
             if (!DEVICE_ID_RE.test(deviceId))
                 return json(res, 400, { error: "invalid deviceId" });
+            if (req[DEVICE_ID] && req[DEVICE_ID] !== deviceId)
+                return json(res, 403, { error: "device_mismatch" });
             const events = Array.isArray(body.events) ? body.events : [];
             const results = events.map((e) => ({
                 id: e && e.id !== undefined ? e.id : null,
-                ok: true,
+                ok: false, error: "offline_execution_not_supported",
             }));
             // ACK：清除该设备已确认的 server→device 事件
             const acked = Array.isArray(body.acked) ? body.acked.filter((x) => x !== undefined && x !== null) : [];
@@ -1127,32 +837,28 @@ export const apply = (ctx) => {
             const deviceId = u.searchParams.get("deviceId") ?? "";
             if (!DEVICE_ID_RE.test(deviceId))
                 return json(res, 400, { error: "invalid deviceId" });
+            if (req[DEVICE_ID] && req[DEVICE_ID] !== deviceId)
+                return json(res, 403, { error: "device_mismatch" });
             json(res, 200, { ok: true, deviceId, pending: readSyncPending(deviceId), status: "ok" });
         },
     });
-    const isLoopback = (addr) => addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1" || addr === "::ffff:7f00:1";
-    // 引导通道豁免仅限「手机侧引导端点」白名单（v2.1.0 起收紧）：
-    // pair/request、pair/status、pair/check、pair/code/verify、host.describe。
-    // pair/respond、pair/list、pair/revoke、pair/code/generate 不豁免——本机设置页走
-    // loopback 放行，远程一律要求通道 token（修复 v1.x 的 self-approve 漏洞）。
-    const authExemptSet = new Set([
-        "/api/remote-access/pair/request",
-        "/api/remote-access/pair/status",
-        "/api/remote-access/pair/check",
-        "/api/remote-access/pair/code/verify",
-        "/api/host.describe",
-    ]);
-    const authExempt = (path) => authExemptSet.has(path);
+    let nativeRequestRejection;
     const unauthorized = (req) => {
-        const tok = channelToken();
-        if (!tok)
-            return false; // token 不可用时不设防（降级可用性优先）
-        const p = String(req.url ?? "").split("?")[0];
-        if (!p.startsWith("/api") || authExempt(p))
+        if (security.authorize(req))
             return false;
-        if (isLoopback(req.socket?.remoteAddress ?? "") && !req.headers?.["x-forwarded-for"])
-            return false;
-        return String(req.headers?.authorization ?? "") !== `Bearer ${tok}`;
+        // Preserve native desktop browser authentication for the host-owned API.
+        // Plugin admin routes must still pass the stricter local-admin boundary.
+        const path = new URL(req.url, "http://localhost").pathname;
+        if (path.startsWith("/api/remote-access/"))
+            return true;
+        try {
+            if (typeof nativeRequestRejection !== "function")
+                return true;
+            return nativeRequestRejection(req) !== undefined;
+        }
+        catch {
+            return true;
+        }
     };
     const rejectHttp = (res) => {
         res.statusCode = 401;
@@ -1167,22 +873,26 @@ export const apply = (ctx) => {
     // 之后惰性挂载，靠 proxy set 陷阱兜住晚注册；分发侧 match() 动态读表属性，换表即生效。
     // 注意：ctx.effect(fn) 是「立即执行 fn、返回值作清理器」——恢复逻辑必须以返回值形式
     // 注册（写成立即执行会在挂载瞬间就把代理表撤掉）。
-    const wrapHttp = (route) => ({
+    const originals = new WeakMap();
+    const rememberWrapper = (route, wrapped) => { originals.set(wrapped, route); return wrapped; };
+    const wrapHttp = (route) => rememberWrapper(route, ({
         ...route,
         handler: (req, res) => {
             if (unauthorized(req))
                 return rejectHttp(res);
+            security.track(req, res);
             return route.handler(req, res);
         },
-    });
-    const wrapUpgrade = (route) => ({
+    }));
+    const wrapUpgrade = (route) => rememberWrapper(route, ({
         ...route,
         handler: (req, socket, head) => {
             if (unauthorized(req))
                 return rejectUpgrade(socket);
+            security.track(req, socket);
             return route.handler(req, socket, head);
         },
-    });
+    }));
     const proxyTable = (table, wrap) => new Proxy(table, {
         get(target, key) {
             if (key === "set")
@@ -1207,7 +917,16 @@ export const apply = (ctx) => {
         webServer.exact = proxyTable(webServer.exact, wrapHttp);
         webServer.prefixes = proxyTable(webServer.prefixes, wrapHttp);
         ctx.effect(() => () => {
-            // 恢复原始表引用（已包裹的 handler 随各自路由注销清理）
+            // Remove this plugin's wrappers from surviving host routes on hot unload.
+            for (const table of [table0exact, table0prefixes, table0upgrades]) {
+                if (!table)
+                    continue;
+                for (const [path, route] of table) {
+                    const original = originals.get(route);
+                    if (original)
+                        table.set(path, original);
+                }
+            }
             webServer.exact = table0exact;
             webServer.prefixes = table0prefixes;
             if (typeof table0upgrades?.set === "function")
@@ -1216,6 +935,30 @@ export const apply = (ctx) => {
         log("远程通道 token 鉴权已挂载");
     }
     else {
-        log("webServer 路由表结构未知，token 鉴权未挂载");
+        throw new Error("Unsupported webServer route tables; remote access refused");
     }
+    const relay = createRelayManager(home, webServer, reg);
+    // Modern desktop services are optional so legacy hosts retain their carrier.
+    if (typeof ctx.inject === "function")
+        ctx.inject(["typertGateway", "connection"], modernCtx => {
+            const nativeCheck = req => modernCtx.connection.requestRejection(req);
+            nativeRequestRejection = nativeCheck;
+            const routes = [];
+            const adapter = createModernAdapter(modernCtx, route => {
+                routes.push(route.kind === "upgrade"
+                    ? webServer.registerUpgrade(route)
+                    : webServer.register(route));
+            });
+            modernCtx.effect(() => () => {
+                if (nativeRequestRejection === nativeCheck)
+                    nativeRequestRejection = undefined;
+                for (const dispose of routes)
+                    dispose();
+                return adapter.dispose();
+            }, "dsh-remote-access: modern protocol");
+        });
+    ctx.effect(() => {
+        void relay.start();
+        return () => { void relay.stop(); };
+    }, "dsh-remote-access: relay");
 };

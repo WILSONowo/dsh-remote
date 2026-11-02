@@ -46,7 +46,7 @@ fun parseCaCertificate(bytes: ByteArray): X509Certificate? = runCatching {
 
 object OkHttpClientFactory {
 
-    private data class ClientPair(val unary: OkHttpClient, val stream: OkHttpClient)
+    private data class ClientPair(val profile: HostProfile, val unary: OkHttpClient, val stream: OkHttpClient)
 
     private val cache = HashMap<String, ClientPair>()
 
@@ -68,9 +68,15 @@ object OkHttpClientFactory {
 
     @Synchronized
     fun build(profile: HostProfile): Pair<OkHttpClient, OkHttpClient> {
-        ChannelTokenRegistry.set(profile.id, profile.channelToken.ifBlank { null })
-        cache[profile.id]?.let { return it.unary to it.stream }
+        // Cached callers may still hold the pre-pairing profile. Do not replace
+        // a freshly issued live credential with that stale snapshot.
+        if (!cache.containsKey(profile.id))
+            ChannelTokenRegistry.set(profile.id, profile.channelToken.ifBlank { null })
+        else if (cache[profile.id]?.profile?.connectionUrl() != profile.connectionUrl())
+            ChannelTokenRegistry.set(profile.id, null)
+        cache[profile.id]?.takeIf { it.profile.copy(channelToken = profile.channelToken, paired = profile.paired) == profile }?.let { return it.unary to it.stream }
         val pair = ClientPair(
+            profile = profile,
             unary = newClient(profile, stream = false),
             stream = newClient(profile, stream = true),
         )
@@ -84,7 +90,9 @@ object OkHttpClientFactory {
     }
 
     private fun newClient(profile: HostProfile, stream: Boolean): OkHttpClient {
-        val builder = OkHttpClient.Builder()
+        val endpoint = java.net.URI(profile.connectionUrl())
+        val builder = OkHttpClient.Builder().retryOnConnectionFailure(false)
+            .followRedirects(false).followSslRedirects(false)
         if (stream) {
             builder.connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -95,7 +103,7 @@ object OkHttpClientFactory {
                 .writeTimeout(15, TimeUnit.SECONDS)
         }
         val ca = profile.caCertUri
-        if (profile.trustSelfSigned) {
+        if (profile.trustSelfSigned && profile.connectionMode == "direct") {
             val ctx = trustAllSslContext()
             builder.sslSocketFactory(ctx.socketFactory, trustAllX509())
             builder.hostnameVerifier { _, _ -> true }
@@ -111,7 +119,11 @@ object OkHttpClientFactory {
         // 远程通道 token：请求时从注册表动态取（配对下发后热生效；无 token 时不加头，
         // 兼容未启用鉴权的旧 PC 端）
         builder.addInterceptor { chain ->
-            val token = ChannelTokenRegistry.get(profile.id)
+            val target = chain.request().url
+            val sameHost = target.host == endpoint.host && target.port == (if (endpoint.port >= 0) endpoint.port else if (endpoint.scheme == "https") 443 else 80)
+            val sameTransport = target.scheme == endpoint.scheme
+            val samePath = target.encodedPath.startsWith(endpoint.rawPath.trimEnd('/') + "/api/")
+            val token = if (sameHost && sameTransport && samePath) ChannelTokenRegistry.get(profile.id) else null
             val req = if (token.isNullOrBlank()) chain.request()
             else chain.request().newBuilder().header("Authorization", "Bearer $token").build()
             chain.proceed(req)

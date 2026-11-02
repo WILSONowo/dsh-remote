@@ -15,11 +15,12 @@ data class DiagStep(val name: String, val ok: Boolean, val detail: String?, val 
 
 suspend fun runDiagnostics(profile: HostProfile): List<DiagStep> = withContext(Dispatchers.IO) {
     // 防御性规范化：与连接/保存共用同一 URL 语义，避免 URI(url) 对无协议地址直接失败
-    val normalized = profile.copy(url = normalizeBaseUrl(profile.url))
+    val normalized = profile
+    val endpoint = profile.connectionUrl()
     val steps = mutableListOf<DiagStep>()
-    val uri = runCatching { URI(normalized.url) }.getOrNull()
+    val uri = runCatching { URI(endpoint) }.getOrNull()
     val host = uri?.host ?: ""
-    val https = normalized.url.startsWith("https://")
+    val https = endpoint.startsWith("https://")
     val port = uri?.port?.takeIf { it > 0 } ?: if (https) 443 else 80
 
     // 1. DNS
@@ -55,7 +56,7 @@ suspend fun runDiagnostics(profile: HostProfile): List<DiagStep> = withContext(D
         val rpcId = "diag-" + java.util.UUID.randomUUID()
         val body = """{"type":"client-request","rpcId":"$rpcId","method":"host.describe","payload":{}}"""
             .toRequestBody("application/json".toMediaType())
-        val req = Request.Builder().url(normalized.url + "/api/host.describe").post(body).build()
+        val req = Request.Builder().url(endpoint + "/api/host.describe").post(body).build()
         unary.newCall(req).execute().use { resp ->
             val text = resp.body?.string() ?: ""
             if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
