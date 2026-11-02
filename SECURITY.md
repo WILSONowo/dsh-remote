@@ -15,6 +15,6 @@
   `verify` 常量时间比较、通道 token 的 /api 全量 Bearer 门禁、公网域名白名单（trustedHosts）校验。
 - **远程访问边界**：仅向已配对设备签发 token；`pair/respond`、`pair/list`、`pair/revoke`、
   `pair/code/generate|current` 仅本机管理请求可达，手机设备 token 不授予管理权限。
-- **App 端**：凭证加密存储（AndroidKeyStore）、连接 MAC 校验、高危操作二次确认。
+- **App 端**：凭证加密存储（AndroidKeyStore）、持久电脑身份校验、高危操作二次确认。
 
 任何改动涉及上述面时，请同时跑 `dsh-remote-access` 的冒烟测试（`npm test`）。

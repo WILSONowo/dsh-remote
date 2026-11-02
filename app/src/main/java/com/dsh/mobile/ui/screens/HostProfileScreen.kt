@@ -45,6 +45,7 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
     var connectionMode by remember { mutableStateOf("direct") }
     var relayServerUrl by remember { mutableStateOf("") }
     var relayHostId by remember { mutableStateOf("") }
+    var showManualRelay by remember { mutableStateOf(false) }
     var trustSelfSigned by remember { mutableStateOf(false) }
     var caCertUri by remember { mutableStateOf<String?>(null) }
     var proxyType by remember { mutableStateOf("none") }
@@ -177,7 +178,7 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (isNew) "添加主机" else "编辑主机") },
+                title = { Text(if (isNew) "添加电脑" else "编辑电脑") },
                 navigationIcon = {
                     IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "返回") }
                 },
@@ -195,7 +196,7 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
             OutlinedTextField(
                 value = remark, onValueChange = { remark = it },
                 label = { Text("设备名称（可选）") },
-                placeholder = { Text("如：家里 / 公司 / 服务器；留空显示机型") },
+                placeholder = { Text("如：家里 / 公司；留空显示电脑名称") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -204,12 +205,16 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
                 FilterChip(selected = connectionMode == "relay", onClick = { connectionMode = "relay"; trustSelfSigned = false }, label = { Text("服务器") })
             }
             if (connectionMode == "relay") {
+                Text("推荐在首页扫码或粘贴电脑生成的连接信息，服务器地址和电脑身份会自动填写。")
+                TextButton(onClick = { showManualRelay = !showManualRelay }) { Text(if (showManualRelay) "收起手动设置" else "手动设置（兼容旧版）") }
+                if (showManualRelay) {
                 OutlinedTextField(value = relayServerUrl, onValueChange = { relayServerUrl = it },
                     label = { Text("服务器地址") }, placeholder = { Text("https://relay.example.com:8443") },
                     singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = relayHostId, onValueChange = { relayHostId = it },
-                    label = { Text("主机 ID") }, supportingText = { Text("与插件中的主机 ID 一致，连接后输入配对码") },
+                    label = { Text("主机 ID") }, supportingText = { Text("仅用于旧版手动配置；新连接请从首页扫码") },
                     singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
             } else OutlinedTextField(
                 value = url, onValueChange = { url = it },
                 label = { Text("服务器地址") },
@@ -219,17 +224,17 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
             )
             // 已记录的设备信息（只读）：重连校验依据
             original?.let { p ->
-                if (p.deviceModel.isNotBlank() || p.deviceMac.isNotBlank()) {
+                if (p.deviceModel.isNotBlank() || p.computerId.isNotBlank()) {
                     Card(Modifier.fillMaxWidth(), shape = DshShape.card) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text("已记录设备", style = MaterialTheme.typography.titleSmall)
                             Text(
-                                if (p.deviceModel.isNotBlank()) "机型：${p.deviceModel}" else "机型：未记录",
+                                if (p.deviceModel.isNotBlank()) "电脑名称：${p.deviceModel}" else "电脑名称：未记录",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Text(
-                                if (p.deviceMac.isNotBlank()) "MAC：${p.deviceMac}（重连时校验一致才恢复连接）" else "MAC：未记录",
+                                if (p.computerId.isNotBlank()) "已保存电脑身份，修改名称不会影响配对" else "配对后自动保存电脑身份",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

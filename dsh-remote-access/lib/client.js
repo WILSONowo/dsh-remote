@@ -359,7 +359,10 @@
         var [busy, setBusy] = useState(false);
         var [error, setError] = useState("");
         var [status, setStatus] = useState("");
-        var labels = { disabled: "\u672A\u542F\u7528", connecting: "\u8FDE\u63A5\u4E2D", connected: "\u5DF2\u8FDE\u63A5", reconnecting: "\u6B63\u5728\u91CD\u8FDE", error: "\u8FDE\u63A5\u5931\u8D25" };
+        var [pairing, setPairing] = useState(null);
+        var [now, setNow] = useState(Date.now());
+        var [advanced, setAdvanced] = useState(false);
+        var labels = { disabled: "\u672A\u542F\u7528", registering: "\u6B63\u5728\u6CE8\u518C\u7535\u8111", connecting: "\u8FDE\u63A5\u4E2D", connected: "\u5DF2\u8FDE\u63A5", reconnecting: "\u6B63\u5728\u91CD\u8FDE", error: "\u8FDE\u63A5\u5931\u8D25" };
         function refresh(initial) {
           fetchJson("/api/remote-access/relay/config").then(function(r) {
             if (!r || !r.ok) throw new Error("\u65E0\u6CD5\u8BFB\u53D6\u4E2D\u8F6C\u8BBE\u7F6E");
@@ -372,6 +375,7 @@
         useEffect(function() {
           refresh(true);
           var timer = setInterval(function() {
+            setNow(Date.now());
             refresh(false);
           }, 3e3);
           return function() {
@@ -386,6 +390,7 @@
         function save() {
           setBusy(true);
           setError("");
+          setPairing(null);
           fetchJson("/api/remote-access/relay/config", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -394,6 +399,8 @@
               serverUrl: config.serverUrl,
               hostId: config.hostId,
               registrationToken: token,
+              registrationMode: config.registrationMode,
+              computerName: config.computerName,
               caFile: config.caFile,
               allowInsecureLoopback: config.allowInsecureLoopback
             })
@@ -406,6 +413,20 @@
             refresh(true);
           }).catch(function() {
             setError("\u4FDD\u5B58\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7535\u8111\u7AEF\u8FDE\u63A5");
+          }).finally(function() {
+            setBusy(false);
+          });
+        }
+        function addPhone() {
+          setBusy(true);
+          setError("");
+          setPairing(null);
+          fetchJson("/api/remote-access/relay/pairing", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then(function(r) {
+            if (!r || !r.ok) throw new Error(r && r.error || "\u65E0\u6CD5\u751F\u6210\u4E8C\u7EF4\u7801");
+            setPairing(r);
+            setNow(Date.now());
+          }).catch(function(e) {
+            setError(e.message || "\u65E0\u6CD5\u751F\u6210\u4E8C\u7EF4\u7801");
           }).finally(function() {
             setBusy(false);
           });
@@ -430,7 +451,7 @@
           "div",
           { style: S.card },
           h("div", { style: S.title }, "\u670D\u52A1\u5668"),
-          h("div", { style: S.sub }, "\u672C\u673A\u4E3B\u52A8\u8FDE\u63A5\u670D\u52A1\u5668\u3002\u624B\u673A\u9009\u62E9\u201C\u670D\u52A1\u5668\u201D\uFF0C\u586B\u5199\u76F8\u540C\u670D\u52A1\u5668\u5730\u5740\u548C\u4E3B\u673A ID\uFF0C\u518D\u4F7F\u7528\u672C\u673A\u914D\u5BF9\u7801\u6388\u6743\u3002\u76F4\u8FDE\u4ECD\u53EF\u4F7F\u7528\u3002"),
+          h("div", { style: S.sub }, "\u586B\u5199\u670D\u52A1\u5668\u5730\u5740\u5E76\u542F\u7528\uFF0C\u7535\u8111\u8EAB\u4EFD\u81EA\u52A8\u6CE8\u518C\u3002\u624B\u673A\u626B\u63CF\u201C\u6DFB\u52A0\u624B\u673A\u201D\u751F\u6210\u7684\u4E8C\u7EF4\u7801\uFF0C\u518D\u5728\u7535\u8111\u786E\u8BA4\u3002\u6BCF\u53F0\u624B\u673A\u5206\u522B\u914D\u5BF9\uFF0C\u53EF\u540C\u65F6\u63A7\u5236\u8FD9\u53F0\u7535\u8111\u3002"),
           h("div", { style: S.sub, role: "status" }, status || "\u52A0\u8F7D\u4E2D\u2026"),
           config ? h(
             "div",
@@ -444,25 +465,64 @@
               }
             }), "\u542F\u7528\u5728\u7EBF\u670D\u52A1"),
             field("\u670D\u52A1\u5668\u5730\u5740", "serverUrl", "https://relay.example.com:8443"),
-            field("\u4E3B\u673A ID", "hostId", "\u4E0E\u670D\u52A1\u5668\u5206\u914D\u7684\u4E3B\u673A ID \u4E00\u81F4"),
-            h(
-              "label",
-              { style: { display: "block", marginTop: 10 } },
-              h("div", { style: S.sub }, "\u4E3B\u673A\u6CE8\u518C\u51ED\u8BC1"),
-              h("input", {
-                type: "password",
-                autoComplete: "new-password",
-                style: Object.assign({}, S.input, { width: "100%", boxSizing: "border-box" }),
-                value: token,
+            field("\u7535\u8111\u540D\u79F0", "computerName", "\u7535\u8111"),
+            h("button", { style: S.btn, onClick: function() {
+              setAdvanced(!advanced);
+            } }, advanced ? "\u6536\u8D77\u9AD8\u7EA7\u8BBE\u7F6E" : "\u9AD8\u7EA7\u8BBE\u7F6E"),
+            advanced ? h(
+              "div",
+              {},
+              h("label", { style: S.row }, h("input", {
+                type: "checkbox",
+                checked: config.registrationMode === "manual",
                 disabled: busy,
-                placeholder: config.tokenConfigured ? "\u5DF2\u4FDD\u5B58\uFF0C\u7559\u7A7A\u4FDD\u6301\u539F\u51ED\u8BC1" : "\u670D\u52A1\u5668\u751F\u6210\u7684\u6CE8\u518C\u51ED\u8BC1",
                 onChange: function(e) {
-                  setToken(e.target.value);
+                  change("registrationMode", e.target.checked ? "manual" : "automatic");
                 }
-              })
+              }), "\u4F7F\u7528\u65E7\u7248\u624B\u52A8\u6CE8\u518C\u8BBE\u7F6E"),
+              config.registrationMode === "manual" ? h(
+                "div",
+                {},
+                field("\u4E3B\u673A ID", "hostId", "\u65E7\u7248\u670D\u52A1\u5668\u767B\u8BB0\u7684\u4E3B\u673A ID"),
+                h(
+                  "label",
+                  { style: { display: "block", marginTop: 10 } },
+                  h("div", { style: S.sub }, "\u4E3B\u673A\u6CE8\u518C\u51ED\u8BC1"),
+                  h("input", {
+                    type: "password",
+                    autoComplete: "new-password",
+                    style: Object.assign({}, S.input, { width: "100%", boxSizing: "border-box" }),
+                    value: token,
+                    disabled: busy,
+                    placeholder: config.tokenConfigured ? "\u5DF2\u4FDD\u5B58\uFF0C\u7559\u7A7A\u4FDD\u6301\u539F\u51ED\u8BC1" : "\u670D\u52A1\u5668\u751F\u6210\u7684\u6CE8\u518C\u51ED\u8BC1",
+                    onChange: function(e) {
+                      setToken(e.target.value);
+                    }
+                  })
+                )
+              ) : null,
+              field("\u81EA\u5B9A\u4E49 CA \u8BC1\u4E66\u8DEF\u5F84\uFF08\u53EF\u9009\uFF09", "caFile", "\u4F7F\u7528\u516C\u5F00\u53D7\u4FE1\u8BC1\u4E66\u65F6\u7559\u7A7A")
+            ) : null,
+            h(
+              "div",
+              { style: Object.assign({}, S.row, { marginTop: 12 }) },
+              h("button", { style: S.btnPrimary, disabled: busy, onClick: save }, busy ? "\u5904\u7406\u4E2D\u2026" : "\u4FDD\u5B58\u4E2D\u8F6C\u8BBE\u7F6E"),
+              h("button", { style: S.btn, disabled: busy, onClick: addPhone }, "\u6DFB\u52A0\u624B\u673A")
             ),
-            field("\u81EA\u5B9A\u4E49 CA \u8BC1\u4E66\u8DEF\u5F84\uFF08\u53EF\u9009\uFF09", "caFile", "\u4F7F\u7528\u516C\u5F00\u53D7\u4FE1\u8BC1\u4E66\u65F6\u7559\u7A7A"),
-            h("button", { style: Object.assign({}, S.btnPrimary, { marginTop: 12 }), disabled: busy, onClick: save }, busy ? "\u4FDD\u5B58\u4E2D\u2026" : "\u4FDD\u5B58\u4E2D\u8F6C\u8BBE\u7F6E")
+            pairing ? h(
+              "div",
+              { style: { marginTop: 12 } },
+              pairing.expiresAt > now ? h(
+                "div",
+                {},
+                h("img", { src: pairing.image, alt: "\u624B\u673A\u914D\u5BF9\u4E8C\u7EF4\u7801", style: { width: 300, maxWidth: "100%", height: "auto" } }),
+                h("div", { style: S.sub }, "\u7528\u624B\u673A App \u626B\u7801\uFF0C\u968F\u540E\u5728\u7535\u8111\u786E\u8BA4\u3002\u6BCF\u4E2A\u4E8C\u7EF4\u7801\u4EC5\u4F9B\u4E00\u53F0\u624B\u673A\u4F7F\u7528\uFF0C\u6709\u6548\u671F 2 \u5206\u949F\u3002"),
+                h("div", { style: S.sub }, "\u65E0\u6CD5\u626B\u7801\u65F6\uFF0C\u590D\u5236\u4E0B\u9762\u7684\u8FDE\u63A5\u4FE1\u606F\uFF0C\u5728\u624B\u673A\u9996\u9875\u9009\u62E9\u201C\u7C98\u8D34\u8FDE\u63A5\u4FE1\u606F\u201D\u3002"),
+                h("textarea", { readOnly: true, value: pairing.link, "aria-label": "\u4E34\u65F6\u8FDE\u63A5\u4FE1\u606F", style: Object.assign({}, S.input, { width: "100%", boxSizing: "border-box" }), onFocus: function(e) {
+                  e.target.select();
+                } })
+              ) : h("div", { style: S.sub }, "\u4E8C\u7EF4\u7801\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u201C\u6DFB\u52A0\u624B\u673A\u201D\u3002")
+            ) : null
           ) : null,
           error ? h("div", { style: S.err, role: "alert" }, error) : null
         );

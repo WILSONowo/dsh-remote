@@ -89,7 +89,7 @@ export function createSecurity(home, register) {
         return device || undefined;
     };
     const bootstrap = new Set(['pair/request', 'pair/status', 'pair/check', 'pair/claim', 'pair/code/verify'].map(p => '/api/remote-access/' + p));
-    const adminPaths = new Set(['pair/respond', 'pair/list', 'pair/revoke', 'pair/code/generate', 'pair/code/current', 'trusted-hosts', 'relay/config'].map(p => '/api/remote-access/' + p));
+    const adminPaths = new Set(['pair/respond', 'pair/list', 'pair/revoke', 'pair/code/generate', 'pair/code/current', 'trusted-hosts', 'relay/config', 'relay/pairing'].map(p => '/api/remote-access/' + p));
     const authorize = (req) => {
         const path = new URL(req.url, 'http://localhost').pathname;
         // Static desktop UI and browser login remain owned by the host.
@@ -119,6 +119,12 @@ export function createSecurity(home, register) {
         target.once('finish', remove);
     };
     const pending = new Map();
+    let scanTicket;
+    const generatePairTicket = () => {
+        const ticket = fresh(), expiresAt = Date.now() + 120000;
+        scanTicket = { hash: hash(ticket), expiresAt };
+        return { ticket, expiresAt };
+    };
     const pendingNow = (id) => {
         const p = pending.get(id);
         if (p && Date.now() - p.at < 120000)
@@ -182,6 +188,12 @@ export function createSecurity(home, register) {
             pendingNow(id);
         if (!old && pending.size >= 16)
             return { ok: false, state: 'busy' };
+        if (b.ticket !== undefined && !old) {
+            if (typeof b.ticket !== 'string' || !/^[a-f0-9]{64}$/.test(b.ticket) || !scanTicket || scanTicket.expiresAt <= Date.now() || !equal(hash(b.ticket), scanTicket.hash)) {
+                return { ok: false, state: 'expired', error: 'invalid_pairing_ticket' };
+            }
+            scanTicket = undefined; // One phone per QR. The computer still must approve.
+        }
         if (!old)
             pending.set(id, { deviceId: id, name, secretHash: hash(s), at: Date.now(), state: 'pending' });
         return { ok: true, state: old?.state || 'pending' };
@@ -264,6 +276,6 @@ export function createSecurity(home, register) {
         return { ok: true, revokedAt: Date.now() };
     });
     registerApi('token/audit', 'GET', req => ({ ok: true, events: audit.filter(e => isLocalAdmin(req) || e.deviceId === req[DEVICE_ID]).slice(-50) }));
-    return { authorize, track, dispose: () => { for (const id of active.keys())
+    return { authorize, track, generatePairTicket, dispose: () => { scanTicket = undefined; for (const id of active.keys())
             disconnect(id); } };
 }

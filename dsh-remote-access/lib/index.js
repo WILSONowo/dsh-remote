@@ -7,16 +7,14 @@
 //       只读文件预览（fs/read）、MCP 枚举（mcp/list）、远程通道 Bearer token 鉴权（/api 全量门禁，含 WebSocket）。
 // 移除：微信 iLink 桥（lib/ilink.js + lib/bridge.js）、cpolar 隧道供应（lib/cpolar.js），
 //       对应 wx/*、cpolar/*、/status、/start、/stop、/qr 路由与 qrcode 依赖一并删除。
+import { computerIdentity } from "./identity.js";
 import { createRelayManager } from "./relay.js";
 import { createModernAdapter } from "./modern.js";
 import { createSecurity, DEVICE_ID } from "./security.js";
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync, } from "node:fs";
-import { homedir, hostname, networkInterfaces } from "node:os";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { promisify } from "node:util";
-const execFileAsync = promisify(execFile);
 export const name = "dsh-remote-access";
 // fs / tools 不进 inject 声明，运行时以 ctx.fs / ctx.get("tools") 惰性取用：
 // 不可用回退 node:fs / 空工具列表；tools 由 dsh-mcp-client 挂载（可能晚于本插件）。
@@ -522,51 +520,17 @@ export const apply = (ctx) => {
             });
         },
     });
-    // ---------- 主机设备信息（App 设备记录：机型展示 + MAC 重连校验） ----------
-    // MAC：优先带 IPv4 的物理网卡；本地管理位（随机化/虚拟网卡）的接口靠后
-    const isLocalAdminMac = (mac) => /^[0-9a-f][26ae]:/i.test(mac);
-    const primaryMac = () => {
-        const entries = Object.values(networkInterfaces()).flat().filter((a) => a && !a.internal && a.mac && a.mac !== "00:00:00:00:00:00");
-        const pick = entries.find((a) => a.family === "IPv4" && !isLocalAdminMac(a.mac)) ||
-            entries.find((a) => !isLocalAdminMac(a.mac)) ||
-            entries.find((a) => a.family === "IPv4") ||
-            entries[0];
-        return pick?.mac ?? "";
-    };
-    // 机型：Win32_ComputerSystem 厂商+型号（10 分钟缓存，避免每次连接都 spawn PowerShell）
-    let hostModelCache = { at: 0, value: "" };
-    const hostModel = async () => {
-        if (hostModelCache.value && Date.now() - hostModelCache.at < 600000)
-            return hostModelCache.value;
-        let model = "";
-        if (process.platform === "win32") {
-            try {
-                const ps = "$ErrorActionPreference='SilentlyContinue'; " +
-                    "$c = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1; " +
-                    "@(($c.Manufacturer -replace '\\s+$',''), ($c.Model -replace '\\s+$','')) -join ' '";
-                const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-Command", ps], { timeout: 5000 });
-                model = String(stdout).trim();
-            }
-            catch { }
-        }
-        if (!model)
-            model = `${hostname()} (${process.platform})`;
-        hostModelCache = { at: Date.now(), value: model };
-        return model;
-    };
+    // Display name and random installation identity are independent of hardware.
+    computerIdentity(home);
     reg({
         kind: "exact",
         path: "/api/remote-access/device/info",
         handler: async (req, res) => {
             if (req.method !== "GET")
                 return json(res, 405, { error: "method not allowed" });
-            json(res, 200, {
-                ok: true,
-                name: hostname(),
-                model: await hostModel(),
-                mac: primaryMac(),
-                platform: process.platform,
-            });
+            const identity = computerIdentity(home);
+            json(res, 200, { ok: true, name: identity.name, computerId: identity.id,
+                model: identity.name, mac: "", platform: process.platform });
         },
     });
     const security = createSecurity(home, reg);
@@ -937,7 +901,7 @@ export const apply = (ctx) => {
     else {
         throw new Error("Unsupported webServer route tables; remote access refused");
     }
-    const relay = createRelayManager(home, webServer, reg);
+    const relay = createRelayManager(home, webServer, reg, security.generatePairTicket);
     // Modern desktop services are optional so legacy hosts retain their carrier.
     if (typeof ctx.inject === "function")
         ctx.inject(["typertGateway", "connection"], modernCtx => {

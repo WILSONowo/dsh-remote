@@ -314,10 +314,11 @@ class SettingsStore(
 
     /** 首读生成并持久化设备 ID（幂等） */
     suspend fun ensureDeviceId(): String {
-        val existing = deviceId.first()
-        if (existing.isNotBlank()) return existing
-        val id = java.util.UUID.randomUUID().toString()
-        context.dataStore.edit { it[DEVICE_ID_KEY] = id }
+        var id = ""
+        context.dataStore.edit { prefs ->
+            id = prefs[DEVICE_ID_KEY]?.takeIf { it.isNotBlank() } ?: java.util.UUID.randomUUID().toString()
+            prefs[DEVICE_ID_KEY] = id
+        }
         return id
     }
 }

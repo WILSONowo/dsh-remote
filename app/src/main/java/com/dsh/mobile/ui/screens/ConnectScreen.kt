@@ -35,7 +35,7 @@ import com.journeyapps.barcodescanner.CaptureActivity
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-/** 设备记录标题：自定义名 > 机型 > 占位（列表不展示公网 IP） */
+/** 设备记录标题：自定义名 > 电脑名称 > 占位（列表不展示公网 IP） */
 private fun deviceTitle(p: HostProfile): String =
     p.remark.ifBlank { p.deviceModel.ifBlank { "未命名设备" } }
 
@@ -98,6 +98,11 @@ fun ConnectScreen(
     val scope = rememberCoroutineScope()
 
     val profiles by settingsStore.profiles.collectAsState(initial = emptyList())
+    val appCtx = context.applicationContext as? DshApplication
+    var scanPreview by remember { mutableStateOf<PairingLink?>(null) }
+    var showPaste by remember { mutableStateOf(false) }
+    var pastedLink by remember { mutableStateOf("") }
+    var pasteError by remember { mutableStateOf<String?>(null) }
     val activeId by settingsStore.activeProfileId.collectAsState(initial = null)
     val connState by connection.state.collectAsState()
     var pendingDelete by remember { mutableStateOf<HostProfile?>(null) }
@@ -121,19 +126,24 @@ fun ConnectScreen(
         }
     }
 
-    fun connectTo(profile: HostProfile) {
+    fun connectTo(profile: HostProfile, link: PairingLink? = null) {
         scope.launch {
-            settingsStore.setActiveProfile(profile.id)
+            val target = profile.copy(autoConnect = true)
             // 多设备记录共存：仅当前主机保留「启动自动连接」（记住上次使用），其余只取消标记、不删记录
-            settingsStore.upsertProfile(profile.copy(autoConnect = true))
+            settingsStore.upsertProfile(target)
+            settingsStore.setActiveProfile(profile.id)
             settingsStore.profiles.first()
                 .filter { it.id != profile.id && it.autoConnect }
                 .forEach { settingsStore.upsertProfile(it.copy(autoConnect = false)) }
+            if (link != null) {
+                connection.disconnect()
+                appCtx?.pairingCoordinator?.prepareScan(target, link)
+            }
+            connection.connect(target) { info ->
+                scope.launch { settingsStore.markAttempt(info.profileId, info.errorCode, info.hostVersion) }
+            }
+            onConnectedActions()
         }
-        connection.connect(profile) { info ->
-            scope.launch { settingsStore.markAttempt(info.profileId, info.errorCode, info.hostVersion) }
-        }
-        onConnectedActions()
     }
 
     // —— 扫码：解析结果 → 新建或更新配置并连接 ——
@@ -143,6 +153,12 @@ fun ConnectScreen(
         if (result.resultCode == Activity.RESULT_OK) {
             val scanned = result.data?.getStringExtra("SCAN_RESULT")?.trim().orEmpty()
             if (scanned.isNotEmpty()) {
+                if (scanned.startsWith("dshremote:")) {
+                    runCatching { PairingLink.parse(scanned) }.onSuccess { scanPreview = it }.onFailure {
+                        Toast.makeText(context, "连接信息无效或已过期，请在电脑重新生成二维码", Toast.LENGTH_LONG).show()
+                    }
+                    return@rememberLauncherForActivityResult
+                }
                 val existing = profiles.firstOrNull { it.url == scanned }
                 val profile = existing
                     ?: HostProfile(
@@ -150,8 +166,8 @@ fun ConnectScreen(
                         remark = "",
                         url = scanned,
                     )
-                scope.launch { settingsStore.upsertProfile(profile) }
-                connectTo(profile)
+                if (runCatching { profile.connectionUrl() }.isSuccess) connectTo(profile)
+                else Toast.makeText(context, "请扫描电脑插件生成的连接二维码", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -189,12 +205,12 @@ fun ConnectScreen(
     }
 
     // —— 首次配对对话框（v1.8.0：配对码优先；「等待 PC 确认」旧式兜底）——
-    val appCtx = context.applicationContext as? DshApplication
     var pairCode by remember { mutableStateOf("") }
     var pairError by remember { mutableStateOf<String?>(null) }
     var pairBusy by remember { mutableStateOf(false) }
     var pairDismissedFor by remember { mutableStateOf<String?>(null) }
     val awaitingId = appCtx?.pairingCoordinator?.awaitingDecision?.collectAsState(initial = null)?.value
+    val waitingId = appCtx?.pairingCoordinator?.waitingForApproval?.collectAsState(initial = null)?.value
     LaunchedEffect(awaitingId) {
         // 决策清除（断线/配对完成）后复位「本会话已关」标记，下次连接可再弹
         if (awaitingId == null) pairDismissedFor = null
@@ -202,6 +218,14 @@ fun ConnectScreen(
     val showPairDialog = awaitingId != null && pairDismissedFor != awaitingId
 
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+        if (waitingId != null) {
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
+                Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("等待电脑确认：请在 DeepSeek Harness 的远程控制页面允许本手机连接。", modifier = Modifier.weight(1f))
+                    TextButton(onClick = { connection.disconnect() }) { Text("取消") }
+                }
+            }
+        }
         // 错误横幅（spec §6：错误码 → 原因 → 建议；不可恢复错误标注已停止重连）
         val st = connState
         if (st is DshConnection.State.Error && st.code != null) {
@@ -253,6 +277,10 @@ fun ConnectScreen(
                     }
                 }
                 Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { startScan() }) { Text("扫码连接电脑") }
+                    TextButton(onClick = { showPaste = true; pasteError = null }) { Text("粘贴连接信息") }
+                }
             }
 
             // 活跃主机卡片
@@ -292,7 +320,7 @@ fun ConnectScreen(
                                 TextButton(onClick = { onEditHost(p.id) }) { Text("编辑") }
                             }
                             Text(
-                                p.deviceModel.ifBlank { "连接成功后自动记录设备机型" },
+                                p.deviceModel.ifBlank { "配对后自动记录电脑名称" },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
@@ -330,7 +358,7 @@ fun ConnectScreen(
             if (sortedProfiles.isEmpty()) {
                 item {
                     Text(
-                        "还没有设备记录：添加主机并选择连接方式，配对后会记录设备机型",
+                        "还没有电脑记录：扫描电脑上的配对二维码，或粘贴临时连接信息",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -368,7 +396,7 @@ fun ConnectScreen(
                                             color = DshBrand,
                                         )
                                     }
-                                    if (p.deviceMac.isNotBlank()) {
+                                    if (p.paired && p.computerId.isNotBlank()) {
                                         Spacer(Modifier.width(6.dp))
                                         Text(
                                             "已验证",
@@ -379,7 +407,7 @@ fun ConnectScreen(
                                 }
                                 Text(
                                     if (p.deviceModel.isNotBlank()) p.deviceModel
-                                    else "连接一次后自动记录机型",
+                                    else "配对后自动记录电脑名称",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
@@ -414,7 +442,7 @@ fun ConnectScreen(
                 ) {
                     Icon(Icons.Default.Add, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("添加主机")
+                    Text("添加电脑")
                 }
                 Spacer(Modifier.height(20.dp))
                 val versionName = remember {
@@ -452,7 +480,45 @@ fun ConnectScreen(
             )
         }
 
-        // 首次配对：配对码优先（PC 端「设置 → 远程控制 → 生成配对码」）
+        if (showPaste) {
+            AlertDialog(
+                onDismissRequest = { showPaste = false; pastedLink = "" },
+                title = { Text("粘贴连接信息") },
+                text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("在电脑的 DeepSeek Harness「远程控制 → 添加手机」中复制临时连接信息。")
+                    OutlinedTextField(value = pastedLink, onValueChange = { pastedLink = it.take(4096); pasteError = null },
+                        label = { Text("临时连接信息") }, modifier = Modifier.fillMaxWidth())
+                    pasteError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                } },
+                confirmButton = { TextButton(onClick = {
+                    runCatching { PairingLink.parse(pastedLink) }.onSuccess {
+                        scanPreview = it; showPaste = false; pastedLink = ""
+                    }.onFailure { pasteError = "连接信息无效或已过期，请在电脑重新生成" }
+                }) { Text("继续") } },
+                dismissButton = { TextButton(onClick = { showPaste = false; pastedLink = "" }) { Text("取消") } },
+            )
+        }
+        scanPreview?.let { link ->
+            AlertDialog(
+                onDismissRequest = { scanPreview = null },
+                title = { Text("连接电脑") },
+                text = { Text("电脑：${link.name}\n服务器：${link.server}\n\n连接后请在电脑确认，允许这台手机控制电脑。") },
+                confirmButton = { TextButton(onClick = {
+                    runCatching {
+                        require(link.expiresAt > System.currentTimeMillis())
+                        val existing = profiles.firstOrNull { it.connectionMode == "relay" &&
+                            it.relayServerUrl.trimEnd('/') == link.server.trimEnd('/') && it.relayHostId == link.hostId }
+                        link.profile(existing)
+                    }.onSuccess { connectTo(it, link) }.onFailure {
+                        Toast.makeText(context, "连接信息已过期或电脑身份已改变，请重新确认并扫码", Toast.LENGTH_LONG).show()
+                    }
+                    scanPreview = null
+                }) { Text("连接") } },
+                dismissButton = { TextButton(onClick = { scanPreview = null }) { Text("取消") } },
+            )
+        }
+
+        // Legacy/direct pairing remains available.
         if (showPairDialog) {
             AlertDialog(
                 onDismissRequest = { pairDismissedFor = awaitingId },

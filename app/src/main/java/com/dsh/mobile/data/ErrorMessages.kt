@@ -19,7 +19,7 @@ object ErrorMessages {
         ConnectionErrorCode.AUTH_FAILED -> "确认连接的是目标电脑，使用其配对码重新配对；若配置了额外的网关鉴权，请检查访问凭证。中转注册令牌仅填写在电脑插件中"
         ConnectionErrorCode.VERSION_MISMATCH -> "检查手机应用、电脑上的 DeepSeek Harness 与远程控制插件是否为兼容版本"
         ConnectionErrorCode.PROXY_FAILED -> "检查代理地址/端口/账号，或关闭该主机的代理"
-        ConnectionErrorCode.PROTOCOL_ERROR -> "直连地址应指向电脑的 DeepSeek Harness 服务；服务器中转请检查 HTTPS 服务器地址、主机 ID 和电脑插件的中转状态（电脑离线时会返回 503）。仍失败可导出日志排查"
+        ConnectionErrorCode.PROTOCOL_ERROR -> "直连地址应指向电脑的 DeepSeek Harness 服务；服务器中转请检查电脑插件的连接状态，或重新扫描电脑生成的二维码（电脑离线时会返回 503）。仍失败可导出日志排查"
         ConnectionErrorCode.UNKNOWN -> "导出日志排查"
     }
 }

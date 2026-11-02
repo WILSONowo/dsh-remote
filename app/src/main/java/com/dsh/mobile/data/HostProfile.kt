@@ -39,8 +39,10 @@ data class HostProfile(
     val channelToken: String = "",
     /** 主机机型（device/info 抓取；设备记录列表展示用，不再展示公网 IP） */
     val deviceModel: String = "",
-    /** 主机网卡 MAC（首次配对连接时记录；重连校验 MAC 一致才恢复连接，防动态 IP 被回收后误连他人主机） */
+    /** Legacy field retained only to read old saved profiles. New pairing does not collect MACs. */
     val deviceMac: String = "",
+    /** Random installation identity, separate from the editable display name. */
+    val computerId: String = "",
     val connectionMode: String = "direct",
     val relayServerUrl: String = "",
     val relayHostId: String = "",
@@ -64,7 +66,7 @@ fun HostProfile.connectionUrl(): String {
 
 fun resetPairingIfEndpointChanged(previous: HostProfile?, next: HostProfile): HostProfile =
     if (previous != null && runCatching { previous.connectionUrl() }.getOrNull() != runCatching { next.connectionUrl() }.getOrNull())
-        next.copy(paired = false, channelToken = "", deviceModel = "", deviceMac = "")
+        next.copy(paired = false, channelToken = "", deviceModel = "", deviceMac = "", computerId = "")
     else next
 
 /**

@@ -316,7 +316,10 @@ window.__ModuleLoader__.load({
       var [busy, setBusy] = useState(false);
       var [error, setError] = useState("");
       var [status, setStatus] = useState("");
-      var labels = {disabled:"未启用", connecting:"连接中", connected:"已连接", reconnecting:"正在重连", error:"连接失败"};
+      var [pairing, setPairing] = useState(null);
+      var [now, setNow] = useState(Date.now());
+      var [advanced, setAdvanced] = useState(false);
+      var labels = {disabled:"未启用", registering:"正在注册电脑", connecting:"连接中", connected:"已连接", reconnecting:"正在重连", error:"连接失败"};
       function refresh(initial) {
         fetchJson("/api/remote-access/relay/config").then(function(r) {
           if (!r || !r.ok) throw new Error("无法读取中转设置");
@@ -326,20 +329,27 @@ window.__ModuleLoader__.load({
       }
       useEffect(function() {
         refresh(true);
-        var timer = setInterval(function() { refresh(false); }, 3000);
+        var timer = setInterval(function() { setNow(Date.now()); refresh(false); }, 3000);
         return function() { clearInterval(timer); };
       }, []);
       function change(key, value) { setConfig(function(c) { return Object.assign({}, c, { [key]: value }); }); }
       function save() {
-        setBusy(true); setError("");
+        setBusy(true); setError(""); setPairing(null);
         fetchJson("/api/remote-access/relay/config", {
           method:"POST", headers:{"Content-Type":"application/json"},
           body: JSON.stringify({enabled:config.enabled, serverUrl:config.serverUrl, hostId:config.hostId,
-            registrationToken:token, caFile:config.caFile, allowInsecureLoopback:config.allowInsecureLoopback})
+            registrationToken:token, registrationMode:config.registrationMode, computerName:config.computerName,
+            caFile:config.caFile, allowInsecureLoopback:config.allowInsecureLoopback})
         }).then(function(r) {
           if (!r || !r.ok) { setError(r && r.error || "保存失败"); return; }
           setToken(""); refresh(true);
         }).catch(function() { setError("保存失败，请检查电脑端连接"); }).finally(function() { setBusy(false); });
+      }
+      function addPhone() {
+        setBusy(true); setError(""); setPairing(null);
+        fetchJson("/api/remote-access/relay/pairing", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
+          .then(function(r) { if (!r || !r.ok) throw new Error(r && r.error || "无法生成二维码"); setPairing(r); setNow(Date.now()); })
+          .catch(function(e) { setError(e.message || "无法生成二维码"); }).finally(function() { setBusy(false); });
       }
       function field(label, key, placeholder) {
         return h("label", {style:{display:"block", marginTop:10}},
@@ -350,19 +360,34 @@ window.__ModuleLoader__.load({
       }
       return h("div", {style:S.card},
         h("div", {style:S.title}, "服务器"),
-        h("div", {style:S.sub}, "本机主动连接服务器。手机选择“服务器”，填写相同服务器地址和主机 ID，再使用本机配对码授权。直连仍可使用。"),
+        h("div", {style:S.sub}, "填写服务器地址并启用，电脑身份自动注册。手机扫描“添加手机”生成的二维码，再在电脑确认。每台手机分别配对，可同时控制这台电脑。"),
         h("div", {style:S.sub, role:"status"}, status || "加载中…"),
         config ? h("div", {},
           h("label", {style:S.row}, h("input", {type:"checkbox", checked:config.enabled, disabled:busy,
             onChange:function(e) { change("enabled",e.target.checked); }}), "启用在线服务"),
           field("服务器地址", "serverUrl", "https://relay.example.com:8443"),
-          field("主机 ID", "hostId", "与服务器分配的主机 ID 一致"),
+          field("电脑名称", "computerName", "电脑"),
+          h("button", {style:S.btn, onClick:function() { setAdvanced(!advanced); }}, advanced ? "收起高级设置" : "高级设置"),
+          advanced ? h("div", {},
+          h("label", {style:S.row}, h("input", {type:"checkbox", checked:config.registrationMode === "manual", disabled:busy,
+            onChange:function(e) { change("registrationMode", e.target.checked ? "manual" : "automatic"); }}), "使用旧版手动注册设置"),
+          config.registrationMode === "manual" ? h("div", {},
+          field("主机 ID", "hostId", "旧版服务器登记的主机 ID"),
           h("label", {style:{display:"block", marginTop:10}}, h("div", {style:S.sub}, "主机注册凭证"),
             h("input", {type:"password", autoComplete:"new-password", style:Object.assign({},S.input,{width:"100%",boxSizing:"border-box"}),
               value:token, disabled:busy, placeholder:config.tokenConfigured ? "已保存，留空保持原凭证" : "服务器生成的注册凭证",
-              onChange:function(e) { setToken(e.target.value); }})),
-          field("自定义 CA 证书路径（可选）", "caFile", "使用公开受信证书时留空"),
-          h("button", {style:Object.assign({},S.btnPrimary,{marginTop:12}), disabled:busy, onClick:save}, busy ? "保存中…" : "保存中转设置")
+              onChange:function(e) { setToken(e.target.value); }}))) : null,
+          field("自定义 CA 证书路径（可选）", "caFile", "使用公开受信证书时留空")) : null,
+          h("div", {style:Object.assign({},S.row,{marginTop:12})},
+            h("button", {style:S.btnPrimary, disabled:busy, onClick:save}, busy ? "处理中…" : "保存中转设置"),
+            h("button", {style:S.btn, disabled:busy, onClick:addPhone}, "添加手机")),
+          pairing ? h("div", {style:{marginTop:12}},
+            pairing.expiresAt > now ? h("div", {},
+              h("img", {src:pairing.image, alt:"手机配对二维码", style:{width:300,maxWidth:"100%",height:"auto"}}),
+              h("div", {style:S.sub}, "用手机 App 扫码，随后在电脑确认。每个二维码仅供一台手机使用，有效期 2 分钟。"),
+              h("div", {style:S.sub}, "无法扫码时，复制下面的连接信息，在手机首页选择“粘贴连接信息”。"),
+              h("textarea", {readOnly:true, value:pairing.link, "aria-label":"临时连接信息", style:Object.assign({},S.input,{width:"100%",boxSizing:"border-box"}), onFocus:function(e) { e.target.select(); }}))
+              : h("div", {style:S.sub}, "二维码已过期，请重新点击“添加手机”。")) : null
         ) : null,
         error ? h("div", {style:S.err, role:"alert"}, error) : null);
     }

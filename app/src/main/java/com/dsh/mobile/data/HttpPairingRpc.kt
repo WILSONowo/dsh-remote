@@ -16,6 +16,7 @@ import org.json.JSONObject
 class HttpPairingRpc(
     private val connection: DshConnection,
     private val client: OkHttpClient,
+    private val scanTicket: String? = null,
 ) : PairingRpc {
     private val pairingSecret = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
         .joinToString("") { "%02x".format(it.toInt() and 0xff) }
@@ -36,7 +37,12 @@ class HttpPairingRpc(
                 if (resp.code == 404 || resp.code == 410) return@withContext "skip"
                 throw IllegalStateException("HTTP ${resp.code}")
             }
-            JSONObject(text).optString("state", "")
+            val result = JSONObject(text)
+            if (!result.optBoolean("ok")) throw IllegalStateException(when (result.optString("error")) {
+                "invalid_pairing_ticket" -> "二维码已使用或过期，请在电脑重新生成"
+                else -> "配对请求未被接受，请稍后重试"
+            })
+            result.optString("state", "")
         }
     }
 
@@ -52,7 +58,7 @@ class HttpPairingRpc(
     override suspend fun request(deviceId: String, deviceName: String): String {
         pairingDeviceId = deviceId
         return post("/api/remote-access/pair/request", JSONObject()
-            .put("deviceId", deviceId).put("deviceName", deviceName))
+            .put("deviceId", deviceId).put("deviceName", deviceName).apply { scanTicket?.let { put("ticket", it) } })
     }
 
     override suspend fun status(): String =
@@ -73,8 +79,8 @@ class HttpPairingRpc(
         }
     }
 
-    /** device/info：主机机型与 MAC（设备记录 + 重连校验）；旧插件 404/410 → null（降级不校验） */
-    data class DeviceInfo(val name: String, val model: String, val mac: String, val platform: String)
+    /** Random computer identity and display name; old servers may omit computerId. */
+    data class DeviceInfo(val name: String, val model: String, val mac: String, val platform: String, val computerId: String = "")
 
     suspend fun deviceInfo(): DeviceInfo? = withContext(Dispatchers.IO) {
         val req = Request.Builder()
@@ -91,6 +97,7 @@ class HttpPairingRpc(
                 model = obj.optString("model", ""),
                 mac = obj.optString("mac", ""),
                 platform = obj.optString("platform", ""),
+                computerId = obj.optString("computerId", ""),
             )
         }
     }

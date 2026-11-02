@@ -1,13 +1,22 @@
 import http from 'node:http';
+import https from 'node:https';
+import { randomBytes } from 'node:crypto';
 import net from 'node:net';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { Tunnel, MAX_FRAME } from './tunnel.js';
 import { RELAY_REQUEST, VALID_ID, bodyJson, isLocalAdmin, reply } from './security.js';
-const empty = { enabled: false, serverUrl: '', hostId: '', registrationToken: '', caFile: '', allowInsecureLoopback: false };
+import { computerIdentity } from './identity.js';
+import QRCode from 'qrcode';
+const empty = { enabled: false, serverUrl: '', hostId: '', registrationToken: '', registrationMode: 'automatic', caFile: '', allowInsecureLoopback: false };
 export function validateRelayConfig(input, previous = empty) {
-    const c = { enabled: input.enabled === true, serverUrl: String(input.serverUrl || '').trim().replace(/\/$/, ''), hostId: String(input.hostId || '').trim(), registrationToken: String(input.registrationToken || previous.registrationToken), caFile: String(input.caFile || '').trim(), allowInsecureLoopback: input.allowInsecureLoopback === true };
+    const serverUrl = String(input.serverUrl || '').trim().replace(/\/$/, '');
+    const sameServer = serverUrl === previous.serverUrl;
+    const mode = input.registrationMode ?? (input.hostId ? 'manual' : 'automatic');
+    if (!['automatic', 'manual'].includes(mode))
+        throw new Error('未知注册方式');
+    const c = { enabled: input.enabled === true, serverUrl, hostId: String(input.hostId || '').trim(), registrationToken: String(input.registrationToken || (sameServer ? previous.registrationToken : '')), registrationMode: mode, caFile: String(input.caFile || '').trim(), allowInsecureLoopback: input.allowInsecureLoopback === true };
     if (!c.enabled && !c.serverUrl)
         return c;
     const url = new URL(c.serverUrl);
@@ -16,7 +25,20 @@ export function validateRelayConfig(input, previous = empty) {
         throw new Error('服务器地址只填写协议、域名和端口');
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback && c.allowInsecureLoopback))
         throw new Error('公网中转必须使用 HTTPS');
-    if (!VALID_ID.test(c.hostId))
+    if (mode === 'automatic') {
+        if (sameServer && previous.registrationMode === 'automatic') {
+            c.hostId = previous.hostId;
+            c.registrationToken = previous.registrationToken;
+        }
+        else {
+            // Loading a persisted automatic configuration keeps its existing secret.
+            c.hostId = previous === empty ? c.hostId : '';
+            c.registrationToken = previous === empty ? c.registrationToken : '';
+        }
+        if (!c.registrationToken)
+            c.registrationToken = randomBytes(32).toString('hex');
+    }
+    if ((mode === 'manual' || c.hostId) && !VALID_ID.test(c.hostId))
         throw new Error('主机 ID 只允许字母、数字、下划线及连字符，最多 64 字符');
     if (!/^[a-f0-9]{64}$/.test(c.registrationToken))
         throw new Error('注册凭证必须为服务器生成的 64 位十六进制字符串');
@@ -61,7 +83,7 @@ export function createGateway(webServer) {
     return { gateway, async close() { for (const s of sockets)
             s.destroy(); await new Promise(r => gateway.close(() => r())); } };
 }
-export function createRelayManager(home, webServer, register) {
+export function createRelayManager(home, webServer, register, generatePairTicket) {
     const file = join(home, 'remote-access', 'relay.json');
     let config = { ...empty };
     let state = 'disabled', detail = '';
@@ -77,10 +99,18 @@ export function createRelayManager(home, webServer, register) {
     let ws;
     let retry;
     let backoff = 1000;
+    const persist = () => {
+        mkdirSync(join(home, 'remote-access'), { recursive: true, mode: 0o700 });
+        writeFileSync(file + '.tmp', JSON.stringify(config), { mode: 0o600 });
+        renameSync(file + '.tmp', file);
+    };
+    let registrationRequest;
     const stop = async () => {
         generation++;
         clearTimeout(retry);
         retry = undefined;
+        registrationRequest?.destroy();
+        registrationRequest = undefined;
         ws?.terminate();
         ws = undefined;
         const old = local;
@@ -103,6 +133,67 @@ export function createRelayManager(home, webServer, register) {
             state = 'error';
             detail = '无法读取 CA 证书';
             return;
+        }
+        if (config.registrationMode === 'automatic') {
+            state = 'registering';
+            detail = '';
+            try {
+                persist(); // Save the random credential before sending it; retry is idempotent.
+                const result = await new Promise((resolve, reject) => {
+                    const req = (config.serverUrl.startsWith('https:') ? https : http).request(config.serverUrl + '/relay/v1/register', {
+                        method: 'POST', ca, rejectUnauthorized: true,
+                        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + config.registrationToken },
+                    }, res => {
+                        let data = '';
+                        res.on('data', chunk => { data += chunk; if (data.length > 8192)
+                            req.destroy(new Error('注册响应异常')); });
+                        res.on('error', reject);
+                        res.on('end', () => {
+                            // Closing enrollment must not disable computers already registered.
+                            if (res.statusCode === 403 && config.hostId) {
+                                resolve({ ok: true, hostId: config.hostId });
+                                return;
+                            }
+                            if (res.statusCode !== 200) {
+                                const messages = { 403: '服务器未启用自动注册，请联系服务器维护者', 404: '服务器版本不支持自动注册，请更新后端', 429: '注册请求过于频繁，请稍后重试', 503: '服务器暂不可用或已达到设备容量上限' };
+                                reject(new Error(messages[res.statusCode || 0] || '电脑注册失败，请检查服务器状态'));
+                                return;
+                            }
+                            try {
+                                resolve(JSON.parse(data));
+                            }
+                            catch {
+                                reject(new Error('注册响应异常'));
+                            }
+                        });
+                    });
+                    registrationRequest = req;
+                    const deadline = setTimeout(() => req.destroy(new Error('注册超时，请检查网络和服务器地址')), 15000);
+                    deadline.unref();
+                    req.once('close', () => clearTimeout(deadline));
+                    req.on('error', reject);
+                    req.end(JSON.stringify({ name: computerIdentity(home).name }));
+                });
+                if (generation !== current)
+                    return;
+                if (!result?.ok || typeof result.hostId !== 'string' || !VALID_ID.test(result.hostId) || (config.hostId && config.hostId !== result.hostId))
+                    throw new Error('服务器返回的电脑身份不一致');
+                config.hostId = result.hostId;
+                persist();
+            }
+            catch (error) {
+                if (generation !== current)
+                    return;
+                state = 'error';
+                detail = error instanceof Error && !/certificate|connect|ENOTFOUND|ECONN/i.test(error.message) ? error.message : '注册失败，请检查网络、服务器地址和 TLS 证书';
+                retry = setTimeout(() => { void start(); }, 30000);
+                retry.unref();
+                return;
+            }
+            finally {
+                if (generation === current)
+                    registrationRequest = undefined;
+            }
         }
         const instance = createGateway(webServer);
         local = instance;
@@ -146,7 +237,7 @@ export function createRelayManager(home, webServer, register) {
             });
             client.on('unexpected-response', (_, response) => {
                 denied = [401, 403, 409].includes(response.statusCode || 0);
-                detail = denied ? '注册被拒绝，请核对主机 ID、凭证及重复连接' : '中转服务器暂不可用';
+                detail = denied ? '电脑连接被拒绝：设备登记无效或已有相同身份在线，请检查服务器状态及重复运行的插件' : '中转服务器暂不可用';
                 response.resume();
                 client.terminate();
             });
@@ -171,7 +262,7 @@ export function createRelayManager(home, webServer, register) {
                 return reply(res, 401, { error: 'local_admin_required' });
             if (req.method === 'GET') {
                 const { registrationToken, ...publicConfig } = config;
-                return reply(res, 200, { ok: true, ...publicConfig, tokenConfigured: !!registrationToken, state, detail });
+                return reply(res, 200, { ok: true, ...publicConfig, computerName: computerIdentity(home).name, tokenConfigured: !!registrationToken, state, detail });
             }
             if (req.method !== 'POST')
                 return reply(res, 405, { error: 'method_not_allowed' });
@@ -179,19 +270,38 @@ export function createRelayManager(home, webServer, register) {
                 return reply(res, 409, { ok: false, error: '配置正在保存，请稍后重试' });
             saving = true;
             try {
-                const next = validateRelayConfig(await bodyJson(req), config);
-                mkdirSync(join(home, 'remote-access'), { recursive: true, mode: 0o700 });
-                writeFileSync(file + '.tmp', JSON.stringify(next), { mode: 0o600 });
-                renameSync(file + '.tmp', file);
+                const input = await bodyJson(req), next = validateRelayConfig(input, config);
+                computerIdentity(home, input.computerName);
+                await stop();
                 config = next;
+                persist();
                 await start();
                 return reply(res, 200, { ok: true, state, detail });
             }
             catch {
-                return reply(res, 400, { ok: false, error: '保存失败：请核对 HTTPS 地址、主机 ID、64 位注册凭证和文件权限' });
+                return reply(res, 400, { ok: false, error: '保存失败：请检查服务器 HTTPS 地址、电脑名称、证书和文件权限；手动配置还需核对主机 ID 与注册凭证' });
             }
             finally {
                 saving = false;
+            }
+        } });
+    register({ kind: 'exact', path: '/api/remote-access/relay/pairing', handler: async (req, res) => {
+            if (!isLocalAdmin(req))
+                return reply(res, 401, { error: 'local_admin_required' });
+            if (req.method !== 'POST')
+                return reply(res, 405, { error: 'method_not_allowed' });
+            if (state !== 'connected' || !generatePairTicket)
+                return reply(res, 409, { ok: false, error: '请先启用服务器连接并等待连接成功' });
+            try {
+                await bodyJson(req);
+                const identity = computerIdentity(home);
+                const payload = { v: 1, server: config.serverUrl, hostId: config.hostId, computerId: identity.id, name: identity.name, ...generatePairTicket() };
+                const link = 'dshremote://pair#' + Buffer.from(JSON.stringify(payload)).toString('base64url');
+                const image = await QRCode.toDataURL(link, { errorCorrectionLevel: 'M', margin: 4, width: 400 });
+                return reply(res, 200, { ok: true, link, image, expiresAt: payload.expiresAt });
+            }
+            catch {
+                return reply(res, 503, { ok: false, error: '无法生成配对二维码，请重试' });
             }
         } });
     return { start, stop, status: () => ({ state, detail }) };

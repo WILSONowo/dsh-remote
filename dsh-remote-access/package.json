@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-access",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "DSH 手机远程访问：独立设备配对、直连、自建中转及 0.2.1-rc.5 协议适配",
   "type": "module",
   "main": "lib/index.js",
@@ -44,13 +44,15 @@
     "@deepseek-ai/dsh-tools": "^0.0.1-rc.1 || ^0.2.1-rc.5"
   },
   "devDependencies": {
-    "typescript": "~5.9.3",
     "@types/node": "^22.0.0",
+    "@types/qrcode": "^1.5.5",
     "@types/ws": "^8.5.0",
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.25.0",
+    "typescript": "~5.9.3"
   },
   "license": "MIT",
   "dependencies": {
+    "qrcode": "^1.5.4",
     "ws": "^8.18.0"
   }
 }

@@ -20,6 +20,10 @@ export declare function createSecurity(home: string, register: (route: Route) =>
         once: Function;
         destroy: () => void;
     }) => void;
+    generatePairTicket: () => {
+        ticket: string;
+        expiresAt: number;
+    };
     dispose: () => void;
 };
 export {};

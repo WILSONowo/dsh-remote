@@ -1,6 +1,11 @@
 package com.dsh.mobile.data
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -8,16 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-/**
- * 连接成功后的配对协调器（v1.8.0 起配对码优先）：
- * Connected 且活跃 profile 未配对时，不再自动发起握手，而是把决策权交给 UI
- * （awaitingDecision 状态流）：UI 可走「配对码」（pairWithCode——PC 生成 6 位随机码、
- * 手机输入即完成配对并直接拿 token），或回退「等待 PC 确认框」（chooseLegacyHandshake）。
- * 结果事件供 UI 层 Toast/snackbar 展示。
- *
- * 设备记录（v1.6.0）：配对通过后经 device/info 抓取主机机型与 MAC 存入 HostProfile；
- * 重连（已配对）时校验 MAC 一致才放行——动态公网 IP 被回收再分配时不会误连他人主机。
- */
+/** Coordinates per-phone approval. Scan tickets are kept only for the current attempt. */
 class PairingCoordinator(
     private val connection: DshConnection,
     private val settingsStore: SettingsStore,
@@ -25,205 +21,177 @@ class PairingCoordinator(
 ) {
     private val _events = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val events: SharedFlow<String> = _events
-
-    /** 等待配对决策的活跃 profile id；null = 无待决策（UI 据此弹配对对话框） */
     private val _awaitingDecision = MutableStateFlow<String?>(null)
     val awaitingDecision: StateFlow<String?> = _awaitingDecision
-
+    private val _waitingForApproval = MutableStateFlow<String?>(null)
+    val waitingForApproval: StateFlow<String?> = _waitingForApproval
     private var handshakingFor: String? = null
+    private var handshakeJob: Job? = null
+    private var scan: Pair<String, PairingLink>? = null
+
+    fun prepareScan(profile: HostProfile, link: PairingLink) {
+        handshakeJob?.cancel()
+        handshakingFor = null
+        _waitingForApproval.value = null
+        scan = if (profile.paired) null else profile.id to link
+        _awaitingDecision.value = null
+    }
+
+    private fun current(profile: HostProfile): Boolean = connection.currentProfile()?.let {
+        it.id == profile.id && it.connectionUrl() == profile.connectionUrl() && it.channelToken == profile.channelToken
+    } == true
 
     fun start() {
-        scope.launch {
-            connection.state.collect { st ->
-                val profile = connection.currentProfile() ?: run {
-                    // 无活跃连接目标：清除待配对状态与握手标记
-                    handshakingFor = null
+        scope.launch(Dispatchers.Main.immediate) {
+            connection.state.collect { state ->
+                val profile = connection.currentProfile()
+                if (profile == null) {
+                    handshakeJob?.cancel()
                     _awaitingDecision.value = null
                     return@collect
                 }
-                if (st is DshConnection.State.Error && st.code == ConnectionErrorCode.AUTH_FAILED && profile.paired) {
-                    refreshPaired(profile)
-                } else if (st is DshConnection.State.Connected) {
-                    if (profile.paired) {
-                        refreshPaired(profile)
-                    } else if (handshakingFor != profile.id) {
-                        // 未配对：等待 UI 决策（配对码优先）。不再因为连接抖动清掉，
-                        // 保证配对码输入框能稳定停留、真正可输入（修复「闪一下就消失/无法输码」）。
-                        handshakingFor = null
-                        _awaitingDecision.value = profile.id
-                    }
-                } else {
-                    // 连接抖动（Connecting/Error/Disconnected）：只复位握手协程标记，
-                    // 保留 _awaitingDecision——配对框继续可用，配对成功 / 显式断开时再清除。
+                if (handshakingFor != null && handshakingFor != profile.id) {
+                    handshakeJob?.cancel()
                     handshakingFor = null
+                }
+                if (scan?.first != profile.id) scan = null
+                if (state is DshConnection.State.Connected) {
+                    if (profile.paired) refreshPaired(profile)
+                    else if (handshakingFor != profile.id) {
+                        val scanned = scan?.second
+                        scan = null
+                        if (scanned != null && scanned.expiresAt > System.currentTimeMillis()) {
+                            scope.launch(Dispatchers.Main.immediate) { chooseLegacyHandshake(scanned.ticket) }
+                        } else {
+                            if (scanned != null) _events.tryEmit("二维码已过期，请在电脑重新生成")
+                            _awaitingDecision.value = profile.id
+                        }
+                    }
+                } else if (state is DshConnection.State.Error && state.code == ConnectionErrorCode.AUTH_FAILED && profile.paired) {
+                    refreshPaired(profile)
                 }
             }
         }
     }
 
-    /** 配对码结果：ok=true 已配对；否则 message 为可展示的错误说明 */
     data class PairCodeResult(val ok: Boolean, val message: String?)
 
-    /** UI 选择「使用配对码配对」：verify 通过即配对 + 直接拿 token + 记录设备 */
+    private suspend fun finishPair(profile: HostProfile, rpc: HttpPairingRpc, token: String): Boolean {
+        if (!current(profile) || !Regex("[a-f0-9]{64}").matches(token)) return false
+        OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, token)
+        val info = try { rpc.deviceInfo() } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+        if (!current(profile)) return false
+        if (profile.computerId.isNotBlank() && info?.computerId != profile.computerId) {
+            OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, null)
+            _events.tryEmit("电脑身份与连接信息不一致，已断开，请重新扫码")
+            connection.disconnect()
+            return false
+        }
+        val updated = profile.copy(
+            paired = true, channelToken = token, deviceMac = "",
+            computerId = info?.computerId?.takeIf { it.isNotBlank() } ?: profile.computerId,
+            deviceModel = info?.name?.takeIf { it.isNotBlank() } ?: info?.model?.takeIf { it.isNotBlank() } ?: profile.deviceModel,
+        )
+        settingsStore.upsertProfile(updated)
+        if (!current(profile)) return false
+        _awaitingDecision.value = null
+        connection.syncCurrentProfile(updated)
+        _events.tryEmit("配对完成，已保存本手机的独立访问权限")
+        return true
+    }
+
     suspend fun pairWithCode(code: String): PairCodeResult {
         val profile = connection.currentProfile() ?: return PairCodeResult(false, "没有活跃连接")
         val rpc = HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first)
-        val res = runCatching {
-            rpc.codeVerify(
-                code.trim(),
-                settingsStore.ensureDeviceId(),
-                settingsStore.deviceName.first().ifBlank { android.os.Build.MODEL },
-            )
-        }.getOrNull() ?: return PairCodeResult(false, "配对请求失败（网络或服务器错误），请重试")
-        if (connection.currentProfile()?.id != profile.id) return PairCodeResult(false, "连接目标已改变，请重新配对")
-        if (res.ok && res.token?.matches(Regex("[a-f0-9]{64}")) == true) {
-            res.token?.takeIf { it.isNotBlank() }?.let { tok ->
-                OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, tok)
-            }
-            // token 已热生效，device/info 可通过鉴权
-            val info = runCatching { rpc.deviceInfo() }.getOrNull()
-            val updated = profile.copy(
-                paired = true,
-                channelToken = res.token ?: profile.channelToken,
-                deviceModel = info?.model?.takeIf { it.isNotBlank() } ?: profile.deviceModel,
-                deviceMac = info?.mac?.takeIf { it.isNotBlank() } ?: profile.deviceMac,
-            )
-            settingsStore.upsertProfile(updated)
-            connection.syncCurrentProfile(updated)
-            _awaitingDecision.value = null
-            _events.tryEmit(
-                if (info?.model?.isNotBlank() == true) "配对完成，已记录设备：${info.model}"
-                else "配对完成，已保存本手机的设备令牌"
-            )
-            return PairCodeResult(true, null)
+        val result = try {
+            rpc.codeVerify(code.trim(), settingsStore.ensureDeviceId(), settingsStore.deviceName.first().ifBlank { android.os.Build.MODEL })
+        } catch (e: CancellationException) { throw e } catch (_: Exception) {
+            return PairCodeResult(false, "配对请求失败，请检查电脑和服务器连接后重试")
         }
-        return PairCodeResult(false, when (res.error) {
-            "no_active_code" -> "请打开电脑的 DeepSeek Harness「设置 → 远程控制」，查看或重新生成配对码"
-            "code_locked" -> "配对码已锁定（错误次数过多），请在电脑的 DeepSeek Harness「设置 → 远程控制」中重新生成"
-            "code_mismatch" -> "配对码不正确" + (res.attemptsLeft?.let { "（还剩 $it 次机会）" } ?: "")
-            "plugin_old" -> "配对接口不可用：直连请检查电脑插件是否安装；服务器中转请检查服务器地址、主机 ID 和电脑插件状态"
-            else -> "配对失败" + (res.error?.let { "：$it" } ?: "")
+        if (!current(profile)) return PairCodeResult(false, "连接目标已改变，请重新配对")
+        if (result.ok && result.token != null) return if (finishPair(profile, rpc, result.token)) PairCodeResult(true, null)
+            else PairCodeResult(false, "未能确认电脑身份，请重新配对")
+        return PairCodeResult(false, when (result.error) {
+            "no_active_code" -> "请在电脑的 DeepSeek Harness「设置 → 远程控制」生成配对码"
+            "code_locked" -> "错误次数过多，请在电脑重新生成配对码"
+            "code_mismatch" -> "配对码不正确" + (result.attemptsLeft?.let { "（还剩 $it 次机会）" } ?: "")
+            "plugin_old" -> "配对接口不可用，请检查电脑插件版本和服务器连接状态"
+            else -> "配对失败，请重新生成配对码"
         })
     }
 
-    /** UI 选择「等待 PC 确认」（旧式握手：pair/request + PC 弹窗批准） */
-    suspend fun chooseLegacyHandshake() {
+    /** Both QR and manual approval use an independent secret to claim the credential. */
+    suspend fun chooseLegacyHandshake(ticket: String? = null) {
         val profile = connection.currentProfile() ?: return
-        if (handshakingFor == profile.id) return
+        if (handshakingFor != null) return
         handshakingFor = profile.id
-        val rpc = HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first)
-        val result = runCatching {
-            PairingManager(rpc, scope)
-                .ensurePaired(
-                    settingsStore.ensureDeviceId(),
-                    settingsStore.deviceName.first().ifBlank { android.os.Build.MODEL },
-                )
-        }.getOrElse { null }
-        when (result) {
-            null -> {
-                _awaitingDecision.value = profile.id
-                _events.tryEmit("配对请求失败（网络或服务器错误），下次连接时重试")
-            }
-            PairingOutcome.PAIRED, PairingOutcome.APPROVED -> {
-                // 配对通过后立即回查拿通道 token（Bearer 鉴权凭证），注册表热生效
-                val tok = if (result == PairingOutcome.PAIRED) profile.channelToken
-                    else runCatching { rpc.claim() }.getOrNull()
-                if (tok.isNullOrBlank() || connection.currentProfile()?.id != profile.id) {
-                    _events.tryEmit("未能领取设备凭证，请重新配对")
+        _waitingForApproval.value = profile.id
+        val job = currentCoroutineContext().job
+        handshakeJob = job
+        _awaitingDecision.value = null
+        val rpc = HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first, ticket)
+        _events.tryEmit("正在请求配对，请在电脑的 DeepSeek Harness「远程控制」中确认")
+        try {
+            val result = PairingManager(rpc, scope).ensurePaired(
+                settingsStore.ensureDeviceId(), settingsStore.deviceName.first().ifBlank { android.os.Build.MODEL },
+            )
+            if (!current(profile)) return
+            when (result) {
+                PairingOutcome.PAIRED, PairingOutcome.APPROVED -> {
+                    val token = if (result == PairingOutcome.PAIRED) profile.channelToken else rpc.claim()
+                    if (token.isNullOrBlank() || !finishPair(profile, rpc, token)) {
+                        _events.tryEmit("未能领取本手机的访问凭证，请重新配对")
+                        if (current(profile)) _awaitingDecision.value = profile.id
+                    }
+                }
+                PairingOutcome.SKIPPED -> {
+                    _events.tryEmit("电脑插件不支持此配对方式，请更新插件或使用配对码")
                     _awaitingDecision.value = profile.id
-                    handshakingFor = null
-                    return
                 }
-                if (!tok.isNullOrBlank()) {
-                    OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, tok)
-                }
-                // 首次连接：抓取主机机型与 MAC 写入设备记录（token 已热生效，device/info 可通过鉴权）
-                val info = runCatching { rpc.deviceInfo() }.getOrNull()
-                val updated = profile.copy(
-                    paired = true,
-                    channelToken = tok ?: profile.channelToken,
-                    deviceModel = info?.model?.takeIf { it.isNotBlank() } ?: profile.deviceModel,
-                    deviceMac = info?.mac?.takeIf { it.isNotBlank() } ?: profile.deviceMac,
-                )
-                settingsStore.upsertProfile(updated)
-                connection.syncCurrentProfile(updated)
-                _awaitingDecision.value = null
-                when {
-                    !tok.isNullOrBlank() -> _events.tryEmit(
-                        if (info?.model?.isNotBlank() == true) "配对完成，已记录设备：${info.model}"
-                        else "配对完成，已保存本手机的设备令牌"
-                    )
-                    else -> _events.tryEmit("配对完成")
+                PairingOutcome.DENIED, PairingOutcome.TIMEOUT -> {
+                    _events.tryEmit(if (result == PairingOutcome.DENIED) "电脑拒绝了本次配对，已断开" else "等待电脑确认超时，请重新配对")
+                    connection.disconnect()
                 }
             }
-            PairingOutcome.SKIPPED -> {
-                // 安全：空配对码/插件未确认时绝不跳过验证、绝不签发令牌。
-                // 保持待配对（awaitingDecision），引导用户用 PC 端自动生成的配对码完成配对。
-                _events.tryEmit("请使用电脑上显示的 6 位配对码完成配对")
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            if (current(profile)) {
+                _events.tryEmit(if (ticket != null) "扫码配对失败：连接信息可能已使用或过期，请在电脑重新生成" else "配对请求失败，请检查连接后重试")
                 _awaitingDecision.value = profile.id
             }
-            PairingOutcome.DENIED -> {
-                _awaitingDecision.value = null
-                _events.tryEmit("电脑拒绝了本次配对，连接已断开")
-                connection.disconnect()
-            }
-            PairingOutcome.TIMEOUT -> {
-                _awaitingDecision.value = null
-                _events.tryEmit("配对确认超时，请在电脑的 DeepSeek Harness「设置 → 远程控制」中确认请求；连接已断开")
-                connection.disconnect()
-            }
-        }
-        handshakingFor = null
+        } finally { if (handshakeJob === job) {
+            handshakingFor = null; handshakeJob = null; _waitingForApproval.value = null
+        } }
     }
 
-    /** 已配对 profile 的重连处理：回查配对状态、顺带刷新通道 token、设备（MAC）校验 */
     private suspend fun refreshPaired(profile: HostProfile) {
-        val still = runCatching {
-            HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first)
-                .check(settingsStore.ensureDeviceId())
-        }.getOrNull()
-        when {
-            // 回查失败保守视为仍配对（网络错不打扰、不触发重新握手）
-            still == null -> return
-            !still.paired -> {
-                // 已被 PC 撤销：重新等待配对决策（配对码优先）
-                val revoked = profile.copy(paired = false, channelToken = "")
-                OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, null)
-                settingsStore.upsertProfile(revoked)
-                connection.syncCurrentProfile(revoked)
-                _awaitingDecision.value = profile.id
-            }
-            else -> {
-                // 重连设备校验：MAC 不匹配（IP 被回收到他人主机）→ 断开
-                verifyDevice(profile)
-            }
-        }
-    }
-
-    /**
-     * 重连设备校验（已配对 profile）：
-     * - 旧插件（404）/网络错误 → null，降级不校验；
-     * - 首见（旧版本升级前配对的记录无 MAC）→ 记录机型与 MAC；
-     * - MAC 不一致 → 断开（该地址已被回收给别的设备）。
-     */
-    private suspend fun verifyDevice(profile: HostProfile) {
-        val info = runCatching {
-            HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first).deviceInfo()
-        }.getOrNull() ?: return
-        if (info.mac.isBlank() && info.model.isBlank()) return
-        if (profile.deviceMac.isBlank()) {
-            settingsStore.upsertProfile(profile.copy(deviceModel = info.model, deviceMac = info.mac))
+        val rpc = HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first)
+        val check = try { rpc.check(settingsStore.ensureDeviceId()) }
+            catch (e: CancellationException) { throw e } catch (_: Exception) { return }
+        if (!current(profile)) return
+        if (!check.paired) {
+            val revoked = profile.copy(paired = false, channelToken = "")
+            OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, null)
+            settingsStore.upsertProfile(revoked)
+            connection.syncCurrentProfile(revoked)
+            _awaitingDecision.value = profile.id
             return
         }
-        if (info.mac.isNotBlank() && !info.mac.equals(profile.deviceMac, ignoreCase = true)) {
-            _events.tryEmit(
-                "设备校验失败：该地址当前不是「${profile.deviceModel.ifBlank { "已配对" }}」，已断开（公网 IP 可能被回收）",
-            )
+        val info = try { rpc.deviceInfo() }
+            catch (e: CancellationException) { throw e } catch (_: Exception) { return }
+        if (info == null || !current(profile)) return
+        if (profile.computerId.isNotBlank() && info.computerId != profile.computerId) {
+            _events.tryEmit("电脑身份校验失败，已断开，请重新确认连接目标")
             connection.disconnect()
             return
         }
-        if (info.model.isNotBlank() && info.model != profile.deviceModel) {
-            settingsStore.upsertProfile(profile.copy(deviceModel = info.model))
+        val updated = profile.copy(
+            computerId = info.computerId.ifBlank { profile.computerId }, deviceMac = "",
+            deviceModel = info.name.ifBlank { info.model.ifBlank { profile.deviceModel } },
+        )
+        if (updated != profile) {
+            settingsStore.upsertProfile(updated)
+            if (current(profile)) connection.syncCurrentProfile(updated)
         }
     }
 }

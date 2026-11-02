@@ -19,7 +19,7 @@ async function until(fn, timeout = 5000) {
   const end = Date.now() + timeout;
   while (!fn()) { if (Date.now() > end) throw new Error('Condition timeout'); await new Promise(r => setTimeout(r, 20)); }
 }
-async function fixture(t, secure = false) {
+async function fixture(t, secure = false, automatic = false) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-relay-test-'));
   const previous = process.env.DSH_HOME; process.env.DSH_HOME = home;
   const cleanups = [];
@@ -63,7 +63,9 @@ async function fixture(t, secure = false) {
       '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1', '-keyout', key, '-out', caFile], { stdio: 'ignore', windowsHide: true });
     tls = { key: readFileSync(key), cert: readFileSync(caFile) };
   }
-  const relay = createRelayServer({ hosts: { desktop: createHash('sha256').update(token).digest('hex') }, tls, allowInsecureLoopback: !secure });
+  const relay = createRelayServer({ hosts: { desktop: createHash('sha256').update(token).digest('hex') },
+    registration: automatic ? { enabled: true, database: join(home, 'hosts.sqlite') } : undefined,
+    tls, allowInsecureLoopback: !secure });
   await listenLoopback(relay.server);
   const url = `${secure ? 'https' : 'http'}://127.0.0.1:${relay.server.address().port}`;
   async function json(base, path, body, auth, extra = {}) {
@@ -77,7 +79,9 @@ async function fixture(t, secure = false) {
     return { status: r.status, body: await r.json() };
   }
   async function configure(enabled = true, overrides = {}) {
-    return json(localUrl, '/api/remote-access/relay/config', { enabled, serverUrl: url, hostId: 'desktop', registrationToken: token, caFile, allowInsecureLoopback: !secure, ...overrides });
+    return json(localUrl, '/api/remote-access/relay/config', { enabled, serverUrl: url,
+      ...(automatic ? { registrationMode: 'automatic' } : { hostId: 'desktop', registrationToken: token }),
+      caFile, allowInsecureLoopback: !secure, ...overrides });
   }
   t.after(async () => {
     await configure(false);
@@ -88,15 +92,60 @@ async function fixture(t, secure = false) {
     rmSync(home, { recursive: true, force: true });
   });
   assert.equal((await configure()).body.ok, true);
-  await until(() => relay.online.has('desktop'));
-  const base = url + '/h/desktop';
+  await until(() => relay.online.size === 1);
+  const hostId = [...relay.online.keys()][0];
+  const base = url + '/h/' + hostId;
   async function pair(id) {
     const code = await json(localUrl, '/api/remote-access/pair/code/generate', {});
     const result = await json(base, '/api/remote-access/pair/code/verify', { deviceId: id, deviceName: id, code: code.body.code });
     assert.equal(result.body.ok, true); return result.body.token;
   }
-  return { home, relay, url, localUrl, base, json, pair, configure, tls, registrationToken: token, executions: () => executions };
+  return { home, relay, url, localUrl, base, hostId, json, pair, configure, tls, registrationToken: token, executions: () => executions };
 }
+
+test('自动注册与扫码：无服务器逐机配置，多手机独立确认、撤销、名称与身份分离', { skip: !backend && 'Set DSH_RELAY_BACKEND', timeout: 20000 }, async t => {
+  const f = await fixture(t, true, true);
+  const settings = await f.json(f.localUrl, '/api/remote-access/relay/config');
+  assert.equal(settings.body.registrationMode, 'automatic');
+  assert.equal(settings.body.registrationToken, undefined);
+  assert.match(f.hostId, /^[a-f0-9]{32}$/);
+  assert.equal((await f.json(f.base, '/api/remote-access/relay/pairing', {})).status, 401);
+  async function qr() {
+    const r = await f.json(f.localUrl, '/api/remote-access/relay/pairing', {});
+    assert.equal(r.body.ok, true); assert.match(r.body.image, /^data:image\/png;base64,/);
+    return JSON.parse(Buffer.from(r.body.link.split('#')[1], 'base64url').toString());
+  }
+  const first = await qr();
+  assert.equal(first.server, f.url); assert.equal(first.hostId, f.hostId);
+  assert.equal(first.registrationToken, undefined); assert.match(first.computerId, /^[a-f0-9-]{36}$/);
+  async function scan(id, link) {
+    const proof = randomBytes(32).toString('hex'), headers = { 'X-DSH-Pairing-Secret': proof };
+    const body = { deviceId: id, deviceName: 'Same phone name', ticket: link.ticket };
+    const request = await f.json(f.base, '/api/remote-access/pair/request', body, undefined, headers);
+    assert.equal(request.body.state, 'pending');
+    assert.equal((await f.json(f.base, '/api/remote-access/pair/claim', { deviceId: id }, undefined, headers)).body.ok, false);
+    assert.equal((await f.json(f.localUrl, '/api/remote-access/pair/respond', { deviceId: id, outcome: 'approve' })).body.ok, true);
+    const result = await f.json(f.base, '/api/remote-access/pair/claim', { deviceId: id }, undefined, headers);
+    assert.equal(result.body.ok, true);
+    return result.body.token;
+  }
+  const a = await scan('synthetic-phone-a', first);
+  const replay = await f.json(f.base, '/api/remote-access/pair/request', { deviceId: 'replay', ticket: first.ticket }, undefined,
+    { 'X-DSH-Pairing-Secret': randomBytes(32).toString('hex') });
+  assert.equal(replay.body.error, 'invalid_pairing_ticket');
+  const b = await scan('synthetic-phone-b', await qr()); assert.notEqual(a, b);
+  const info = (await f.json(f.base, '/api/remote-access/device/info', undefined, a)).body;
+  assert.equal(info.computerId, first.computerId); assert.equal(info.mac, '');
+  await f.configure(false);
+  await until(() => f.relay.online.size === 0);
+  await f.configure(true, { computerName: 'Renamed computer' });
+  await until(() => f.relay.online.has(f.hostId));
+  const renamed = (await f.json(f.base, '/api/remote-access/device/info', undefined, b)).body;
+  assert.equal(renamed.computerId, info.computerId); assert.equal(renamed.name, 'Renamed computer');
+  await f.json(f.localUrl, '/api/remote-access/pair/revoke', { deviceId: 'synthetic-phone-a' });
+  assert.equal((await f.json(f.base, '/api/remote-access/device/info', undefined, a)).status, 401);
+  assert.equal((await f.json(f.base, '/api/remote-access/device/info', undefined, b)).status, 200);
+});
 
 test('本机 HTTP 中转：配对、未授权拦截、流式上传、保留直连与主机隔离', { skip: !backend && 'Set DSH_RELAY_BACKEND to an isolated backend checkout', timeout: 20000 }, async t => {
   const f = await fixture(t);

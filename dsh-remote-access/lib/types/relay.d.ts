@@ -4,6 +4,7 @@ type Config = {
     serverUrl: string;
     hostId: string;
     registrationToken: string;
+    registrationMode: 'automatic' | 'manual';
     caFile: string;
     allowInsecureLoopback: boolean;
 };
@@ -13,7 +14,10 @@ export declare function createGateway(webServer: any): {
     gateway: http.Server<typeof http.IncomingMessage, typeof http.ServerResponse>;
     close(): Promise<void>;
 };
-export declare function createRelayManager(home: string, webServer: any, register: (route: any) => void): {
+export declare function createRelayManager(home: string, webServer: any, register: (route: any) => void, generatePairTicket?: () => {
+    ticket: string;
+    expiresAt: number;
+}): {
     start: () => Promise<void>;
     stop: () => Promise<void>;
     status: () => {

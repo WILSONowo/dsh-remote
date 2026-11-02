@@ -7,6 +7,17 @@
 
 旧版共享 `channel-token` 和按设备 ID 恢复的配对信息不再接受，升级后手机需要重新配对。独立设备凭证在电脑只保存摘要；人工配对必须凭请求方随机秘密领取。配对码十分钟有效、五次错误锁定、使用后作废。
 
-插件配置位于 `$DSH_HOME/remote-access/`，中转配置为 `relay.json`，设备摘要为 `devices-v2.json`。旧会话和其他 DeepSeek Harness 数据不会自动迁移或删除。第三方保险库等扩展功能仍要求电脑安装对应扩展。
+插件配置位于 `$DSH_HOME/remote-access/`，中转配置为 `relay.json`，设备摘要为 `devices-v2.json`，电脑随机安装身份和显示名称为 `identity.json`。旧会话和其他 DeepSeek Harness 数据不会自动迁移或删除。第三方保险库等扩展功能仍要求电脑安装对应扩展。
 
 应用内图标为 `app/src/main/res/drawable-nodpi/ic_dsh_desktop.png`，启动器与通知使用同一轮廓的矢量资源。可用 `scripts/import-desktop-icon.py` 从指定 PNG 重建，依赖 Pillow、NumPy 和 OpenCV；不自动读取任何本机安装目录。
+
+## 自动注册与扫码
+
+内测模式不使用账号或邀请。后端一次性配置 `registration.enabled` 和 SQLite 数据库路径后，电脑可通过 `POST /relay/v1/register` 自动注册；已有静态 `hosts` 配置继续有效。
+插件在联网前持久保存 32 字节随机凭证，请求使用 Bearer 头；后端仅保存凭证摘要。主机 ID 为 `SHA256("dsh-remote-host-v1:" + credential)` 的前 32 个十六进制字符，凭证由密码学随机源产生，不取自机器名或硬件。重复请求返回相同 ID，改名不更换身份，切换服务器会生成新的注册凭证。
+
+`dshremote://pair#<base64url JSON>` 是 App 内扫码或粘贴的连接格式，不依赖网页或 Android 系统深链接。v1 字段为 `v`、`server`、`hostId`、`computerId`、`name`、`ticket`、`expiresAt`（毫秒）。二维码在电脑本地生成，不调用第三方二维码服务。ticket 为 32 字节随机秘密，仅在电脑内存保存摘要，两分钟过期；它只能创建待确认请求，不能直接取得控制权。
+
+手机生成独立随机请求秘密，通过 `X-DSH-Pairing-Secret` 发送；请求携带 ticket，在电脑确认后经 `pair/claim` 领取手机凭证。临时连接信息不进入手机持久配置。二维码/连接信息不包含电脑注册凭证和手机长期令牌。多个手机分别配对、分别撤销。
+
+新插件 `device/info` 返回随机 `computerId` 和显示名称，不再采集硬件 MAC/机型；保留空 `mac` 和名称形式的 `model` 字段兼容旧客户端。新手机在持有有效设备凭证后记录和校验电脑身份；旧记录升级时清空 MAC 字段。旧手动中转和六位配对码流程保留，不自动删除已有配对。
