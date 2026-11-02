@@ -1,5 +1,12 @@
 package com.dsh.mobile.ui.screens
 
+import com.dsh.mobile.ui.components.ComposerPopup
+import com.dsh.mobile.ui.components.ComposerMenuItem
+import com.dsh.mobile.ui.components.MessageEditor
+import com.dsh.mobile.ui.components.ModelPickerMenu
+import com.dsh.mobile.ui.components.AccessModeMenu
+import com.dsh.mobile.ui.components.composerModelLabel
+
 import android.Manifest
 import android.app.Activity
 import android.content.ActivityNotFoundException
@@ -31,6 +38,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material3.*
@@ -41,6 +49,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -403,7 +412,7 @@ class SessionChatState(
             // 首屏只取最近 3 条消息：服务端把 assistant/chunk 全量回传（约占 payload 98%），
             // maxMessages=10 时载荷可达 1MB+，手机端传输+解码+拼接就是"加载慢"的来源。
             // Home 后台预取命中时零网络直接消费。
-            val head = (if (forceRefresh) null else HistoryMemoryCache.takePrefetch(sessionId))
+            val head = (if (forceRefresh) null else cache.takePrefetch(sessionId))
                 ?: connection.history(sessionId, maxMessages = if (forceRefresh) 15 else 3)
             val recovered = head.events.toMutableList()
             var more = head.hasMore
@@ -809,7 +818,9 @@ fun SessionScreen(
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
-    val state = remember(sessionId) { SessionChatState(scope, connection, sessionId, HistoryCache(context)) }
+    val computerScope = connection.currentProfile().computerScope()
+    val state = remember(computerScope, sessionId) { SessionChatState(scope, connection, sessionId, HistoryCache(context, computerScope)) }
+    val currentMode by state.currentMode.collectAsState()
     val items by state.items.collectAsState()
     val initialLoading by state.initialLoading.collectAsState()
     val title by state.title.collectAsState()
@@ -821,7 +832,7 @@ fun SessionScreen(
         it.sessionId == sessionId && (it is PendingItem.Approval || it is PendingItem.Question)
     }
 
-    var input by remember { mutableStateOf("") }
+    var input by rememberSaveable(computerScope, sessionId) { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var steerMode by remember { mutableStateOf(false) }
     // T6 插话反馈 banner：steer 发送瞬间显示 2s「⚡ 已插话」后自动消失（纯乐观，无服务端回执）
@@ -834,6 +845,9 @@ fun SessionScreen(
     var quickEditText by remember { mutableStateOf("") }
     var modelDialog by remember { mutableStateOf(false) }
     var modeDialog by remember { mutableStateOf(false) }
+    var modelLoading by remember { mutableStateOf(false) }
+    var modelBusy by remember { mutableStateOf(false) }
+    var modeBusy by remember { mutableStateOf(false) }
     var modelInfo by remember { mutableStateOf<SessionModelsValue?>(null) }
     var skillsDialog by remember { mutableStateOf(false) }
     var skills by remember { mutableStateOf<List<DshConnection.SkillEntry>>(emptyList()) }
@@ -844,13 +858,14 @@ fun SessionScreen(
     var commandsLoading by remember { mutableStateOf(false) }
     var actionError by remember { mutableStateOf<String?>(null) }
     var workspaceLabel by remember { mutableStateOf<String?>(null) }
-    var autoModelEnabled by remember { mutableStateOf(true) }
+    var autoModelEnabled by remember { mutableStateOf(false) }
     var streamNotice by remember { mutableStateOf<String?>(null) }
     var loadingMore by remember { mutableStateOf(false) }
     var loadingAll by remember { mutableStateOf(false) }
     var renameDialog by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
     // S7 导出会话：顶栏菜单 → history 拉取 → Markdown → cacheDir/exports → ACTION_SEND
+    var addMenu by remember { mutableStateOf(false) }
     var exportMenu by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     // focusSeq 定位：历史加载完成标志 + 短暂高亮的目标 seq
@@ -864,19 +879,10 @@ fun SessionScreen(
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
             try {
-                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    ?: return@launch
-                if (bytes.size > 4 * 1024 * 1024) {
-                    actionError = "图片超过 4MB"
-                    return@launch
-                }
-                val type = context.contentResolver.getType(uri) ?: "image/png"
-                if (type !in listOf("image/png", "image/jpeg", "image/webp", "image/gif")) {
-                    actionError = "不支持的图片格式: $type"
-                    return@launch
-                }
-                val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                pendingImages = pendingImages + DshConnection.ImagePart(type, b64)
+                val image = readImageAttachment(context.contentResolver, uri) ?: return@launch
+                pendingImages = pendingImages + image
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 actionError = e.message
             }
@@ -924,6 +930,7 @@ fun SessionScreen(
     LaunchedEffect(sessionId) {
         state.load()
         historyReady = true
+        modelInfo = connection.sessionModels(sessionId)
         // 会话所属工作区（只读展示，切换入口在首页新对话）
         runCatching {
             val ws = connection.workspaceList().items
@@ -1044,6 +1051,7 @@ fun SessionScreen(
         }
         if (target != cur.model) {
             connection.selectModel(sessionId, cur.provider, target, null)
+            modelInfo = connection.sessionModels(sessionId)
         }
     }
 
@@ -1143,7 +1151,7 @@ fun SessionScreen(
                     Text(
                         if (running) "运行中…" else "空闲",
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (running) DshBrand else MaterialTheme.colorScheme.outline,
+                        color = if (running) DshBrand else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     workspaceLabel?.let { ws ->
                         Text(
@@ -1158,39 +1166,10 @@ fun SessionScreen(
             },
             navigationIcon = {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
                 }
             },
             actions = {
-                IconButton(onClick = {
-                    skillsDialog = true
-                    skillsLoading = true
-                    scope.launch {
-                        skills = connection.skillsList(sessionId)
-                        skillsLoading = false
-                    }
-                }) {
-                    Icon(Icons.Default.MenuBook, null)
-                }
-                IconButton(onClick = {
-                    modelDialog = true
-                    scope.launch { modelInfo = connection.sessionModels(sessionId) }
-                }) {
-                    Icon(Icons.Default.SmartToy, null)
-                }
-                IconButton(onClick = { modeDialog = true }) {
-                    Icon(Icons.Default.Security, null)
-                }
-                IconButton(onClick = {
-                    commandsDialog = true
-                    commandsLoading = true
-                    scope.launch {
-                        commands = connection.commandsList(sessionId)
-                        commandsLoading = false
-                    }
-                }) {
-                    Icon(Icons.Default.Terminal, "斜杠命令")
-                }
                 // S7：导出会话（顶栏菜单）
                 Box {
                     IconButton(onClick = { exportMenu = true }) {
@@ -1210,7 +1189,7 @@ fun SessionScreen(
                 }
                 if (running) {
                     IconButton(onClick = { stopRun() }) {
-                        Icon(Icons.Default.Stop, null, tint = DshError)
+                        Icon(Icons.Default.Stop, "停止运行", tint = DshError)
                     }
                 }
             },
@@ -1394,8 +1373,8 @@ fun SessionScreen(
             }
         }
 
-        // 深蓝主题专属：输入栏上方底部纹章（dsh-deep-whale 皮肤装饰，低调居中）
-        if (DshThemeId == "blue") {
+        // 内置主题：输入栏上方底部纹章（dsh-deep-whale 皮肤装饰，低调居中）
+        if (DshThemeId == "blue" || DshThemeId == "warm") {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1464,200 +1443,106 @@ fun SessionScreen(
             }
         }
 
-        // 输入栏（ChatGPT/Claude 风格胶囊化；其余风格保持原样）
-        val modernInput = DshThemeStyle == ThemeStyle.CHATGPT || DshThemeStyle == ThemeStyle.CLAUDE
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            tonalElevation = if (modernInput) 0.dp else 3.dp,
-            shadowElevation = if (modernInput) 0.dp else 8.dp,
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .then(
-                        if (modernInput) {
-                            if (DshThemeStyle == ThemeStyle.CHATGPT) {
-                                Modifier
-                                    .navigationBarsPadding()
-                                    .padding(start = 16.dp, end = 16.dp, bottom = 16.dp, top = 4.dp)
-                                    .height(52.dp)
-                                    .clip(RoundedCornerShape(26.dp))
-                                    .background(MaterialTheme.colorScheme.surface)
-                                    .padding(horizontal = 12.dp)
-                            } else {
-                                // Claude：28px 超大圆角，自适应高度
-                                Modifier
-                                    .navigationBarsPadding()
-                                    .padding(start = 16.dp, end = 16.dp, bottom = 16.dp, top = 4.dp)
-                                    .clip(RoundedCornerShape(28.dp))
-                                    .background(MaterialTheme.colorScheme.surface)
-                                    .padding(horizontal = 12.dp, vertical = 4.dp)
+        // Draft above; add, permission, model, voice and send actions below.
+        Surface(modifier = Modifier.fillMaxWidth().imePadding().navigationBarsPadding(), color = Color.Transparent) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                MessageEditor(
+                    value = input, onValueChange = { input = it },
+                    placeholder = when (DshThemeStyle) {
+                        ThemeStyle.CODEX -> "> 消息…"
+                        ThemeStyle.CHATGPT -> "询问 DeepSeek Harness…"
+                        ThemeStyle.CLAUDE -> "给 DeepSeek Harness 发消息…"
+                        else -> "给大肥鱼发消息…"
+                    },
+                    shape = RoundedCornerShape(28.dp),
+                    canSend = input.isNotBlank() || pendingImages.isNotEmpty(), sending = sending, running = running,
+                    onSend = { send() }, onStop = { stopRun() },
+                    sendIcon = Icons.Default.ArrowUpward,
+                    interrupting = steerMode,
+                    permissionLabel = when (currentMode) {
+                        "read-only" -> "只读"
+                        "workspace-write" -> "工作区可写"
+                        "danger-full-access" -> "完全访问"
+                        else -> "权限"
+                    },
+                    permissionIcon = when (currentMode) {
+                        "read-only" -> Icons.Outlined.Lock
+                        "danger-full-access" -> Icons.Default.WarningAmber
+                        else -> Icons.Outlined.Shield
+                    },
+                    modelLabel = composerModelLabel(modelInfo),
+                    onPermissions = { modeDialog = true },
+                    onModel = {
+                        modelDialog = true
+                        modelLoading = true
+                        scope.launch {
+                            try { modelInfo = connection.sessionModels(sessionId) }
+                            finally { modelLoading = false }
+                        }
+                    },
+                    permissionMenu = {
+                        AccessModeMenu(modeDialog, currentMode, modeBusy, { modeDialog = false }) { value ->
+                            modeBusy = true
+                            scope.launch {
+                                try {
+                                    val response = connection.executeCommand(sessionId, "/permission $value")
+                                    val result = (response as? JsonObject)?.get("result") as? JsonObject
+                                    if (result?.get("kind")?.jsonPrimitive?.contentOrNull == "error") {
+                                        actionError = result["text"]?.jsonPrimitive?.contentOrNull ?: "命令执行失败"
+                                    } else {
+                                        state.currentMode.value = value
+                                        modeDialog = false
+                                    }
+                                } catch (e: Exception) { actionError = e.message }
+                                finally { modeBusy = false }
                             }
-                        } else {
-                            Modifier
-                                .padding(horizontal = 12.dp, vertical = 8.dp)
-                                .imePadding()
-                        },
-                    ),
-                verticalAlignment = if (modernInput) Alignment.CenterVertically else Alignment.Bottom,
-            ) {
-                IconButton(onClick = { imagePicker.launch("image/*") }) {
-                    Icon(Icons.Default.AttachFile, null)
-                }
-                // 语音输入：已授权直接拉起 RecognizerIntent；未授权先申请 RECORD_AUDIO
-                IconButton(onClick = {
-                    if (micGranted) startVoiceRecognition()
-                    else micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                }) {
-                    Icon(Icons.Rounded.Mic, "语音输入")
-                }
-                if (DshThemeStyle == ThemeStyle.CODEX) {
-                    Text(
-                        "❯",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = DshBrand,
-                        modifier = Modifier.padding(end = 4.dp),
-                    )
-                }
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    // width(0)+weight(1f)：消除 OutlinedTextField 默认最小宽度（约 280dp）对
-                    // 右侧按钮的挤压——长文本/窄屏/大字体下发送键不再被推出屏幕
-                    modifier = Modifier
-                        .width(0.dp)
-                        .weight(1f),
-                    placeholder = {
-                        Text(
-                            when {
-                                DshThemeStyle == ThemeStyle.CODEX -> "> 消息…"
-                                DshThemeStyle == ThemeStyle.CHATGPT -> "询问 DeepSeek Harness…"
-                                DshThemeStyle == ThemeStyle.CLAUDE -> "给 DeepSeek Harness 发消息…"
-                                else -> "给大肥鱼发消息…"
-                            },
-                        )
+                        }
                     },
-                    maxLines = when {
-                        DshThemeStyle == ThemeStyle.CHATGPT -> 1
-                        DshThemeStyle == ThemeStyle.CLAUDE -> 3
-                        else -> 4
+                    modelMenu = {
+                        ModelPickerMenu(modelDialog, modelInfo, modelLoading, modelBusy, { modelDialog = false },
+                            onRetry = {
+                                modelLoading = true
+                                scope.launch {
+                                    try { modelInfo = connection.sessionModels(sessionId) }
+                                    finally { modelLoading = false }
+                                }
+                            }, onApply = { provider, model, effort ->
+                                modelBusy = true
+                                scope.launch {
+                                    try {
+                                        connection.selectModel(sessionId, provider, model, effort)
+                                        modelInfo = connection.sessionModels(sessionId)
+                                        modelDialog = false
+                                    } catch (e: Exception) { actionError = e.message }
+                                    finally { modelBusy = false }
+                                }
+                            })
                     },
-                    shape = RoundedCornerShape(22.dp),
+                    onVoice = {
+                        if (micGranted) startVoiceRecognition()
+                        else micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    },
+                    onAdd = { addMenu = true },
+                    addMenu = {
+                        ComposerPopup(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                            ComposerMenuItem(text = { Text("添加图片") }, leadingIcon = { Icon(Icons.Outlined.AttachFile, null) },
+                                onClick = { addMenu = false; imagePicker.launch("image/*") })
+                            ComposerMenuItem(text = { Text("选择技能") }, leadingIcon = { Icon(Icons.Outlined.AutoAwesome, null) }, onClick = {
+                                addMenu = false; skillsDialog = true; skillsLoading = true
+                                scope.launch { try { skills = connection.skillsList(sessionId) } catch (e: Exception) { actionError = e.message } finally { skillsLoading = false } }
+                            })
+                            ComposerMenuItem(text = { Text("斜杠命令") }, leadingIcon = { Icon(Icons.Outlined.Terminal, null) }, onClick = {
+                                addMenu = false; commandsDialog = true; commandsLoading = true
+                                scope.launch { try { commands = connection.commandsList(sessionId) } catch (e: Exception) { actionError = e.message } finally { commandsLoading = false } }
+                            })
+                            ComposerMenuItem(text = { Text("插话") }, leadingIcon = { Icon(Icons.Outlined.Bolt, null) },
+                                trailingIcon = { if (steerMode) Icon(Icons.Default.Check, "已开启") },
+                                onClick = { steerMode = !steerMode; addMenu = false })
+                        }
+                    },
                 )
-                Spacer(Modifier.width(8.dp))
-                if (DshThemeStyle == ThemeStyle.CHATGPT || DshThemeStyle == ThemeStyle.CLAUDE) {
-                    // 麦克风位置映射为 ⚡ 插话图标（24px）
-                    Icon(
-                        Icons.Default.Bolt,
-                        "插话",
-                        Modifier
-                            .size(24.dp)
-                            .clickable { steerMode = !steerMode },
-                        tint = if (steerMode) DshBrand else MaterialTheme.colorScheme.onSurface,
-                    )
-                } else {
-                    FilterChip(
-                        selected = steerMode,
-                        onClick = { steerMode = !steerMode },
-                        label = {
-                            Text(
-                                "⚡ 插话",
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.labelMedium,
-                            )
-                        },
-                        modifier = Modifier
-                            .align(Alignment.CenterVertically)
-                            .widthIn(max = 92.dp),
-                    )
-                }
-                if (running) {
-                    FilledIconButton(
-                        onClick = { stopRun() },
-                        modifier = Modifier.size(
-                            when (DshThemeStyle) {
-                                ThemeStyle.CHATGPT, ThemeStyle.CLAUDE -> 40.dp
-                                else -> 46.dp
-                            },
-                        ),
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.error,
-                        ),
-                    ) {
-                        Icon(Icons.Default.Stop, null, tint = MaterialTheme.colorScheme.onError)
-                    }
-                } else {
-                    FilledIconButton(
-                        onClick = { send() },
-                        modifier = when (DshThemeStyle) {
-                            ThemeStyle.CHATGPT -> Modifier
-                                .size(40.dp)
-                                .background(DshBrand, CircleShape)
-                            ThemeStyle.CLAUDE -> Modifier
-                                .size(44.dp)
-                                .background(DshBrand, CircleShape)
-                            else -> Modifier
-                                .size(46.dp)
-                                .background(brandGradient(), CircleShape)
-                        },
-                        enabled = (input.isNotBlank() || pendingImages.isNotEmpty()) && !sending,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = Color.Transparent,
-                            contentColor = MaterialTheme.colorScheme.onPrimary,
-                        ),
-                    ) {
-                        if (sending) {
-                            CircularProgressIndicator(
-                                Modifier.size(18.dp),
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                strokeWidth = 2.dp,
-                            )
-                        } else if (DshThemeStyle == ThemeStyle.CLAUDE) {
-                            // Claude 规格：向上箭头
-                            Icon(Icons.Default.ArrowUpward, null, Modifier.size(20.dp))
-                        } else {
-                            Icon(Icons.Default.Send, null, Modifier.size(20.dp))
-                        }
-                    }
-                }
+
             }
-        }
-
-        // 模型选择
-        if (modelDialog) {
-            ModelPickerDialog(
-                info = modelInfo,
-                onDismiss = { modelDialog = false },
-                onApply = { provider, model, effort ->
-                    scope.launch {
-                        try {
-                            connection.selectModel(sessionId, provider, model, effort)
-                            modelDialog = false
-                        } catch (e: Exception) {
-                            actionError = e.message
-                        }
-                    }
-                },
-            )
-        }
-
-        // 审查严格度
-        if (modeDialog) {
-            AccessModeDialog(
-                current = state.currentMode.value,
-                onDismiss = { modeDialog = false },
-                onSelect = { value ->
-                    scope.launch {
-                        try {
-                            connection.executeCommand(sessionId, "/permission $value")
-                            modeDialog = false
-                        } catch (e: Exception) {
-                            actionError = e.message
-                        }
-                    }
-                },
-            )
         }
 
         // 技能选择
@@ -2191,152 +2076,6 @@ private fun NoticeRow(item: ChatItem.Notice, modifier: Modifier = Modifier) {
             else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-}
-
-// ──────────────────────────── 模型选择对话框 ────────────────────────────
-
-@Composable
-private fun ModelPickerDialog(
-    info: SessionModelsValue?,
-    onDismiss: () -> Unit,
-    onApply: (String, String, String?) -> Unit,
-) {
-    var provider by remember(info) { mutableStateOf(info?.current?.provider ?: "") }
-    var model by remember(info) { mutableStateOf(info?.current?.model ?: "") }
-    var effort by remember(info) { mutableStateOf(info?.current?.reasoningEffort) }
-
-    val groups = remember(info) {
-        runCatching { info?.groups?.jsonArray }.getOrNull()?.mapNotNull { it.jsonObject } ?: emptyList()
-    }
-    val currentGroup = groups.firstOrNull { it["id"]?.jsonPrimitive?.contentOrNull == provider }
-    val models = remember(groups, provider) {
-        runCatching { currentGroup?.get("models")?.jsonArray }.getOrNull()
-            ?.mapNotNull { it.jsonObject } ?: emptyList()
-    }
-    val currentModel = models.firstOrNull { it["id"]?.jsonPrimitive?.contentOrNull == model }
-    val efforts = remember(currentModel) {
-        runCatching {
-            currentModel?.get("reasoning")?.jsonObject?.get("efforts")?.jsonArray
-        }.getOrNull()?.mapNotNull { el ->
-            val o = el.jsonObject
-            val id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-            val name = o["name"]?.jsonPrimitive?.contentOrNull ?: id
-            id to name
-        } ?: emptyList()
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("切换模型") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 420.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text(
-                    "提供商",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (groups.isEmpty()) {
-                    Text("无法获取模型列表", style = MaterialTheme.typography.bodySmall)
-                } else {
-                    groups.forEach { g ->
-                        val gid = g["id"]?.jsonPrimitive?.contentOrNull ?: return@forEach
-                        val gname = g["name"]?.jsonPrimitive?.contentOrNull ?: gid
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            RadioButton(
-                                selected = provider == gid,
-                                onClick = {
-                                    provider = gid
-                                    model = ""
-                                    effort = null
-                                },
-                            )
-                            Text(gname, style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-                Text(
-                    "模型",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                models.forEach { m ->
-                    val mid = m["id"]?.jsonPrimitive?.contentOrNull ?: return@forEach
-                    val mname = m["name"]?.jsonPrimitive?.contentOrNull ?: mid
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(selected = model == mid, onClick = { model = mid })
-                        Text(mname, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-                if (efforts.isNotEmpty()) {
-                    Text(
-                        "思考程度",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    efforts.forEach { (id, name) ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            RadioButton(selected = effort == id, onClick = { effort = id })
-                            Text(name, style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onApply(provider, model, effort) },
-                enabled = provider.isNotBlank() && model.isNotBlank(),
-            ) { Text("切换") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
-}
-
-// ──────────────────────────── 审查严格度对话框 ────────────────────────────
-
-@Composable
-private fun AccessModeDialog(
-    current: String?,
-    onDismiss: () -> Unit,
-    onSelect: (String) -> Unit,
-) {
-    val options = listOf(
-        Triple("read-only", "只读", "只能读取文件，不能修改"),
-        Triple("workspace-write", "工作区可写", "可修改工作区内的文件"),
-        Triple("danger-full-access", "完全访问", "可执行任意操作（含敏感操作，谨慎使用）"),
-    )
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("审查严格度（访问模式）") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                options.forEach { (value, label, desc) ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelect(value) }
-                            .padding(vertical = 6.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            RadioButton(selected = current == value, onClick = { onSelect(value) })
-                            Text(label, style = MaterialTheme.typography.bodyMedium)
-                        }
-                        Text(
-                            desc,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
-    )
 }
 
 // ──────────────────────────── 技能选择对话框 ────────────────────────────

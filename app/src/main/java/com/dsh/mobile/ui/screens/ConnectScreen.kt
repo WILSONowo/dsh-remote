@@ -2,7 +2,6 @@ package com.dsh.mobile.ui.screens
 
 import android.app.Activity
 import android.content.Intent
-import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,17 +20,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.dsh.mobile.R
-import androidx.core.content.ContextCompat
 import com.dsh.mobile.DshApplication
 import com.dsh.mobile.data.*
-import com.dsh.mobile.service.DshConnectionService
 import com.dsh.mobile.ui.theme.DshBrand
 import com.dsh.mobile.ui.theme.DshSuccess
 import com.dsh.mobile.ui.theme.DshShape
-import com.journeyapps.barcodescanner.CaptureActivity
+import com.dsh.mobile.ui.scanner.QrScannerActivity
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -39,61 +37,21 @@ import kotlinx.coroutines.launch
 private fun deviceTitle(p: HostProfile): String =
     p.remark.ifBlank { p.deviceModel.ifBlank { "未命名设备" } }
 
-/** M1：发送文件到 PC（系统选文件 → fs/write 上传到插件 uploads 目录） */
-@Composable
-private fun UploadToPcCard(profile: HostProfile, connection: DshConnection) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var uploading by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf<String?>(null) }
-
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        scope.launch {
-            uploading = true
-            status = "读取文件…"
-            try {
-                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    ?: error("无法读取所选文件")
-                val name = uri.lastPathSegment?.takeIf { it.isNotBlank() } ?: "upload.bin"
-                status = "上传中… (${bytes.size / 1024} KB)"
-                val rpc = HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first)
-                val res = rpc.uploadFile(name, bytes)
-                status = if (res.ok) "已上传 ✓ ${res.path ?: ""}"
-                else "上传失败：" + (res.error ?: "未知错误")
-            } catch (e: Exception) {
-                status = "上传失败：" + (e.message ?: e.javaClass.simpleName)
-            } finally {
-                uploading = false
-            }
-        }
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = DshShape.card,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Column(Modifier.padding(14.dp)) {
-            Text("发送文件到电脑", style = MaterialTheme.typography.titleSmall)
-            Spacer(Modifier.height(6.dp))
-            Button(onClick = { picker.launch("*/*") }, enabled = !uploading) {
-                Text(if (uploading) "上传中…" else "选择文件")
-            }
-            status?.let {
-                Spacer(Modifier.height(6.dp))
-                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
-}
-
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ConnectScreen(
     connection: DshConnection,
     onEditHost: (String?) -> Unit = {},
+    startupPending: Boolean = false,
+    onStartupHandled: () -> Unit = {},
+    onConnecting: (String) -> Unit = {},
+    onOpenSessions: () -> Unit = {},
+    onDisconnect: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val versionName = remember {
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "?"
+    }
     val settingsStore = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
 
@@ -107,26 +65,11 @@ fun ConnectScreen(
     val connState by connection.state.collectAsState()
     var pendingDelete by remember { mutableStateOf<HostProfile?>(null) }
 
-    val sortedProfiles = profiles.sortedByDescending { it.lastUsedAt }
+    val sortedProfiles = remember(profiles) { profiles.sortedByDescending { it.lastUsedAt } }
     val activeProfile = profiles.firstOrNull { it.id == activeId }
 
-    val notificationPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { }
-
-    fun onConnectedActions() {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS)
-            != android.content.pm.PackageManager.PERMISSION_GRANTED
-        ) {
-            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-        }
-        runCatching {
-            ContextCompat.startForegroundService(context, Intent(context, DshConnectionService::class.java))
-        }
-    }
-
     fun connectTo(profile: HostProfile, link: PairingLink? = null) {
+        onConnecting(profile.id)
         scope.launch {
             val target = profile.copy(autoConnect = true)
             // 多设备记录共存：仅当前主机保留「启动自动连接」（记住上次使用），其余只取消标记、不删记录
@@ -142,7 +85,6 @@ fun ConnectScreen(
             connection.connect(target) { info ->
                 scope.launch { settingsStore.markAttempt(info.profileId, info.errorCode, info.hostVersion) }
             }
-            onConnectedActions()
         }
     }
 
@@ -176,7 +118,7 @@ fun ConnectScreen(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            scannerLauncher.launch(Intent(context, CaptureActivity::class.java))
+            scannerLauncher.launch(Intent(context, QrScannerActivity::class.java))
         } else {
             Toast.makeText(context, "需要相机权限才能扫码连接", Toast.LENGTH_SHORT).show()
         }
@@ -189,8 +131,10 @@ fun ConnectScreen(
     // —— 自动连接 ——
     LaunchedEffect(Unit) {
         settingsStore.ensureMigrated()
+        if (!startupPending) return@LaunchedEffect
+        onStartupHandled()
         val auto = settingsStore.profiles.first().firstOrNull { it.autoConnect }
-        if (auto != null) {
+        if (auto != null && connection.currentProfile() == null) {
             scope.launch { settingsStore.setActiveProfile(auto.id) }
             connectTo(auto)
         }
@@ -214,15 +158,24 @@ fun ConnectScreen(
     LaunchedEffect(awaitingId) {
         // 决策清除（断线/配对完成）后复位「本会话已关」标记，下次连接可再弹
         if (awaitingId == null) pairDismissedFor = null
+        else { pairCode = ""; pairError = null }
     }
     val showPairDialog = awaitingId != null && pairDismissedFor != awaitingId
 
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item {
         if (waitingId != null) {
             Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
-                Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("等待电脑确认：请在 DeepSeek Harness 的远程控制页面允许本手机连接。", modifier = Modifier.weight(1f))
-                    TextButton(onClick = { connection.disconnect() }) { Text("取消") }
+                Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                    Text("等待电脑确认：请在 DeepSeek Harness 的远程控制页面允许本设备连接。")
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        if (connection.currentProfile()?.connectionMode == "direct") TextButton(onClick = {
+                            pairDismissedFor = null
+                            appCtx?.pairingCoordinator?.resumePairing()
+                        }) { Text("改用配对码") }
+                        TextButton(onClick = onDisconnect) { Text("取消") }
+                    }
                 }
             }
         }
@@ -250,35 +203,29 @@ fun ConnectScreen(
             }
         }
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
+        }
             item {
-                Spacer(Modifier.height(18.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Image(
-                        painter = painterResource(R.drawable.ic_dsh_desktop),
-                        contentDescription = null,
-                        modifier = Modifier.size(36.dp),
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Column {
-                        Text("DSH Remote", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                        Text(
-                            "远程连接 DeepSeek Harness",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Spacer(Modifier.weight(1f))
-                    IconButton(onClick = { startScan() }) {
-                        Icon(Icons.Default.QrCodeScanner, contentDescription = "扫码连接", tint = DshBrand)
+                    Image(painterResource(R.drawable.ic_dsh_desktop), null, Modifier.size(48.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("DSH Remote", Modifier.alignByBaseline(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                            Text(" v$versionName", Modifier.alignByBaseline(), style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Text("远程连接 DeepSeek Harness", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { startScan() }) { Text("扫码连接电脑") }
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = { onEditHost(null) }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Add, null, Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("添加电脑")
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    TextButton(onClick = { startScan() }) { Text("扫码连接") }
                     TextButton(onClick = { showPaste = true; pasteError = null }) { Text("粘贴连接信息") }
                 }
             }
@@ -294,59 +241,87 @@ fun ConnectScreen(
                         ),
                     ) {
                         Column(Modifier.padding(14.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                val dotColor = when (connState) {
-                                    is DshConnection.State.Connected -> DshSuccess
-                                    is DshConnection.State.Error -> MaterialTheme.colorScheme.error
-                                    is DshConnection.State.Connecting -> DshBrand
-                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                                }
-                                Box(
-                                    Modifier.size(10.dp)
-                                        .background(dotColor, DshShape.pill),
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    deviceTitle(p),
-                                    style = MaterialTheme.typography.titleMedium,
-                                    maxLines = 1,
-                                )
-                                Spacer(Modifier.weight(1f))
-                                if (connState !is DshConnection.State.Connected &&
-                                    connState !is DshConnection.State.Connecting
-                                ) {
-                                    TextButton(onClick = { connectTo(p) }) { Text("连接") }
-                                }
-                                TextButton(onClick = { onEditHost(p.id) }) { Text("编辑") }
+                            val connected = connState as? DshConnection.State.Connected
+                            val dotColor = when (connState) {
+                                is DshConnection.State.Connected -> if (p.paired) DshSuccess else DshBrand
+                                is DshConnection.State.Error -> MaterialTheme.colorScheme.error
+                                is DshConnection.State.Connecting -> DshBrand
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
                             }
-                            Text(
-                                p.deviceModel.ifBlank { "配对后自动记录电脑名称" },
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                FlowRow(
+                                    modifier = Modifier.weight(1f),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Text(deviceTitle(p), style = MaterialTheme.typography.titleMedium)
+                                    Text(
+                                        connected?.hostVersion?.let { "版本 $it" } ?: "版本未知",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.align(Alignment.CenterVertically),
+                                    )
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Box(Modifier.size(8.dp).background(dotColor, DshShape.pill))
+                                    Text(
+                                        when (connState) {
+                                            is DshConnection.State.Connected -> if (p.paired) "已连接" else "待配对"
+                                            is DshConnection.State.Connecting -> "连接中…"
+                                            is DshConnection.State.Error -> "连接失败"
+                                            else -> "未连接"
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = dotColor,
+                                    )
+                                }
+                            }
+                            if (p.deviceModel.isNotBlank() && p.deviceModel != deviceTitle(p)) Text(
+                                p.deviceModel,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
-                            if (connState is DshConnection.State.Connected) {
-                                val connected = connState as DshConnection.State.Connected
-                                Spacer(Modifier.height(6.dp))
-                                Text(
-                                    "已连接" + (connected.hostVersion?.let { " · 主机版本 $it" } ?: " · 版本未知"),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = DshSuccess,
-                                )
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                if (connected != null && p.paired) {
+                                    Button(onClick = onOpenSessions) { Text("会话") }
+                                } else if (connState !is DshConnection.State.Connecting && connected == null) {
+                                    Button(onClick = { connectTo(p) }) { Text("连接") }
+                                }
+                                TextButton(onClick = { onEditHost(p.id) }) { Text("编辑") }
+                                Spacer(Modifier.weight(1f))
+                                if (connected != null) {
+                                    TextButton(
+                                        onClick = onDisconnect,
+                                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                                    ) { Text("断开连接") }
+                                }
+                            }
+                            if (connected != null) {
+                                if (!p.paired && waitingId == null) TextButton(onClick = {
+                                    pairDismissedFor = null; pairCode = ""; pairError = null
+                                    appCtx?.pairingCoordinator?.resumePairing()
+                                }) { Text("继续配对") }
                             }
                         }
                     }
                 }
             }
 
-            // M1：连接后可在首页直接上传文件到 PC
-            if (activeProfile != null && connState is DshConnection.State.Connected) {
-                item {
-                    UploadToPcCard(activeProfile!!, connection)
-                }
-            }
-
-            item {
+            if (profiles.any { it.id != activeId } || profiles.isEmpty()) item {
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "设备记录",
@@ -364,7 +339,7 @@ fun ConnectScreen(
                     )
                 }
             } else {
-                items(sortedProfiles, key = { it.id }) { p ->
+                items(sortedProfiles.filter { it.id != activeId }, key = { it.id }) { p ->
                     val isActive = p.id == activeId
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -387,7 +362,7 @@ fun ConnectScreen(
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(deviceTitle(p), style = MaterialTheme.typography.titleSmall, maxLines = 1)
+                                    Text(deviceTitle(p), modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     if (isActive) {
                                         Spacer(Modifier.width(6.dp))
                                         Text(
@@ -405,7 +380,7 @@ fun ConnectScreen(
                                         )
                                     }
                                 }
-                                Text(
+                                if (p.deviceModel != deviceTitle(p)) Text(
                                     if (p.deviceModel.isNotBlank()) p.deviceModel
                                     else "配对后自动记录电脑名称",
                                     style = MaterialTheme.typography.bodySmall,
@@ -422,45 +397,20 @@ fun ConnectScreen(
                                     }
                                 }
                             }
-                            IconButton(onClick = { onEditHost(p.id) }, modifier = Modifier.size(36.dp)) {
+                            IconButton(onClick = { onEditHost(p.id) }, modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Default.Edit, "编辑设备", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            IconButton(onClick = { pendingDelete = p }, modifier = Modifier.size(36.dp)) {
+                            IconButton(onClick = { pendingDelete = p }, modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Default.Delete, "删除记录", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
                 }
             }
-
-            item {
-                Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = { onEditHost(null) },
-                    modifier = Modifier.fillMaxWidth().height(52.dp),
-                    shape = DshShape.pill,
-                ) {
-                    Icon(Icons.Default.Add, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("添加电脑")
-                }
-                Spacer(Modifier.height(20.dp))
-                val versionName = remember {
-                    runCatching {
-                        context.packageManager.getPackageInfo(context.packageName, 0).versionName
-                    }.getOrNull() ?: "?"
-                }
-                Text(
-                    "DSH Remote v$versionName",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                )
-                Spacer(Modifier.height(16.dp))
-            }
         }
 
         // 删除设备记录（二次确认）：删活跃主机先断开前台连接
-        pendingDelete?.let { target ->
+    pendingDelete?.let { target ->
             AlertDialog(
                 onDismissRequest = { pendingDelete = null },
                 title = { Text("删除设备记录") },
@@ -485,7 +435,7 @@ fun ConnectScreen(
                 onDismissRequest = { showPaste = false; pastedLink = "" },
                 title = { Text("粘贴连接信息") },
                 text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("在电脑的 DeepSeek Harness「远程控制 → 添加手机」中复制临时连接信息。")
+                    Text("在电脑的 DeepSeek Harness「远程控制 → 添加 → 服务器连接」中复制临时连接信息。")
                     OutlinedTextField(value = pastedLink, onValueChange = { pastedLink = it.take(4096); pasteError = null },
                         label = { Text("临时连接信息") }, modifier = Modifier.fillMaxWidth())
                     pasteError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -526,9 +476,10 @@ fun ConnectScreen(
                 title = { Text("首次配对") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        activeProfile?.deviceModel?.takeIf { it.isNotBlank() }?.let { Text("电脑：$it") }
                         Text(
-                            if (relayPairing) "请在电脑的 DeepSeek Harness「远程控制 → 添加手机」生成二维码，再扫码或粘贴临时连接信息。中转不再支持手填主机 ID 或六位码配对。"
-                            else "在电脑的 DeepSeek Harness「设置 → 远程控制」中查看或生成 6 位配对码，输入后完成直连配对。",
+                            if (relayPairing) "请在电脑的 DeepSeek Harness「远程控制 → 添加 → 服务器连接」生成二维码，再扫码或粘贴临时连接信息。中转不再支持手填主机 ID 或六位码配对。"
+                            else "请确认连接的电脑，并输入其 DeepSeek Harness「远程控制 → 添加 → 配对码直连」页面显示的 6 位配对码。",
                         )
                         if (!relayPairing) OutlinedTextField(
                             value = pairCode,

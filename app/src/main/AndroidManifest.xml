@@ -54,12 +54,10 @@
                 android:resource="@xml/dsh_widget_info" />
         </receiver>
 
-        <!-- 扫码组件（zxing-android-embedded），使用 AppCompat 主题避免崩溃 -->
         <activity
-            android:name="com.journeyapps.barcodescanner.CaptureActivity"
-            android:screenOrientation="fullSensor"
-            android:theme="@style/zxing_CaptureTheme"
-            tools:replace="android:theme,android:screenOrientation" />
+            android:name=".ui.scanner.QrScannerActivity"
+            android:exported="false"
+            android:theme="@style/Theme.DSHMobile" />
 
         <!-- 应用内更新：下载的 APK 经 FileProvider 交给系统安装器 -->
         <provider

@@ -28,7 +28,7 @@ class DshConnection(private val appContext: Context? = null) {
     sealed class State {
         data object Disconnected : State()
         data class Connecting(val baseUrl: String) : State()
-        data class Connected(val baseUrl: String, val hostVersion: String? = null) : State()
+        data class Connected(val baseUrl: String, val hostVersion: String? = null, val profileId: String? = null) : State()
         data class Error(val message: String, val code: ConnectionErrorCode?, val profileId: String?) : State()
     }
 
@@ -157,9 +157,13 @@ class DshConnection(private val appContext: Context? = null) {
                         onAttempt?.invoke(AttemptInfo(profile.id, null, result.version))
                         // UNKNOWN（占位/缺失/无法解析）时 hostVersion 置 null → UI 显示「版本未知」
                         val hostVersion = if (verdict == VersionVerdict.OK) result.version else null
-                        _state.value = State.Connected(normalized, hostVersion)
-                        streamLoop("mux", "/api/events.mux")
-                        streamLoop("host", "/api/events.host")
+                        _state.value = State.Connected(normalized, hostVersion, profile.id)
+                        // Unpaired devices can probe the host but cannot open authenticated event streams.
+                        // Starting these before pairing races the dialog with an AUTH_FAILED state.
+                        if (profile.paired) {
+                            streamLoop("mux", "/api/events.mux")
+                            streamLoop("host", "/api/events.host")
+                        }
                         break
                     }
                     is ConnectionResult.Fail -> {
@@ -487,11 +491,12 @@ class DshConnection(private val appContext: Context? = null) {
             .url("$baseUrl/api/respond")
             .post(body)
             .build()
-        val response = withContext(Dispatchers.IO) { unaryClient.newCall(request).execute() }
-        response.use { resp ->
-            if (!resp.isSuccessful) {
-                val text = resp.body?.string().orEmpty()
-                throw ApiException("respond HTTP ${resp.code}: $text")
+        withContext(Dispatchers.IO) {
+            unaryClient.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val text = resp.body?.string().orEmpty()
+                    throw ApiException("respond HTTP ${resp.code}: $text")
+                }
             }
         }
     }

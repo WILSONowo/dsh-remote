@@ -77,6 +77,7 @@ object UpdateMirrors {
  */
 object UpdateChecker {
     private const val REPO = "WILSONowo/dsh-remote"
+    const val RELEASES_URL = "https://github.com/$REPO/releases"
     private const val API_LATEST = "https://api.github.com/repos/$REPO/releases/latest"
     private const val USER_AGENT = "DSH-Remote-Updater/1.0"
     /** 启动自动检查的最小间隔（24h），避免每次打开都打 GitHub */
@@ -99,10 +100,16 @@ object UpdateChecker {
             .build()
     }
 
+    private val versionPattern = Regex("""(\d+)\.(\d+)\.(\d+)""")
+
     /** "1.0.21" / "v1.0.21" → (1,0,21)；解析失败返回 null */
     fun parseVersion(text: String?): Triple<Int, Int, Int>? {
-        val m = Regex("""(\d+)\.(\d+)\.(\d+)""").find(text?.trim() ?: return null) ?: return null
-        return Triple(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3].toInt())
+        val m = versionPattern.find(text?.trim() ?: return null) ?: return null
+        return Triple(
+            m.groupValues[1].toIntOrNull() ?: return null,
+            m.groupValues[2].toIntOrNull() ?: return null,
+            m.groupValues[3].toIntOrNull() ?: return null,
+        )
     }
 
     /** latest 比 current 新（任一解析失败按"不可更新"处理） */

@@ -59,19 +59,25 @@ data class CachedHistory(
 object HistoryMemoryCache {
     private const val MAX_HISTORIES = 8
 
-    private val histories = object : LinkedHashMap<String, List<CachedItem>>(MAX_HISTORIES, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<CachedItem>>): Boolean =
+    private val histories = object : LinkedHashMap<String, CachedHistory>(MAX_HISTORIES, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedHistory>): Boolean =
             size > MAX_HISTORIES
     }
     private val prefetched = HashMap<String, HistoryValue>()
-    private var listCache: List<SessionSummary>? = null
-
-    @Synchronized fun history(id: String): List<CachedItem>? = histories[id]
-    @Synchronized fun putHistory(id: String, items: List<CachedItem>) {
-        if (items.isNotEmpty()) histories[id] = items
+    private val listCache = object : LinkedHashMap<String, List<SessionSummary>>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<SessionSummary>>) = size > 8
     }
-    @Synchronized fun sessionList(): List<SessionSummary>? = listCache
-    @Synchronized fun putSessionList(items: List<SessionSummary>?) { listCache = items }
+
+    @Synchronized fun history(id: String): List<CachedItem>? = histories[id]?.items
+    @Synchronized fun historyWithMeta(id: String): CachedHistory? = histories[id]
+    @Synchronized fun putHistory(id: String, items: List<CachedItem>, completeThroughSeq: Long? = null) {
+        if (items.isNotEmpty()) histories[id] = CachedHistory(0, items, completeThroughSeq)
+    }
+    @Synchronized fun sessionList(scope: String = "legacy"): List<SessionSummary>? = listCache[scope]
+    @Synchronized fun putSessionList(items: List<SessionSummary>?, scope: String = "legacy") {
+        if (items == null) listCache.remove(scope) else listCache[scope] = items
+    }
+    @Synchronized fun clearHistory(id: String) { histories.remove(id); prefetched.remove(id) }
     /** 取走预取（一次性消费）；无则返回 null */
     @Synchronized fun takePrefetch(id: String): HistoryValue? = prefetched.remove(id)
     @Synchronized fun putPrefetch(id: String, value: HistoryValue) {
@@ -84,14 +90,20 @@ object HistoryMemoryCache {
 /**
  * 冷热分离缓存层：
  * - 热：内存中最近条目（UI 状态流）
- * - 温：本文件 —— gzip 压缩的磁盘缓存（历史按会话、列表全局），秒开秒显
+ * - 温：本文件 —— gzip 压缩的磁盘缓存（历史和列表均按电脑隔离），秒开秒显
  * - 冷：服务器全量历史（loadMore 分页）
  * gzip 同时服务于"传输减少"：缓存命中时零网络；未命中时 OkHttp 已对响应启用透明 gzip。
  */
-class HistoryCache(context: Context) {
+class HistoryCache internal constructor(private val cacheRoot: File, private val scope: String) {
+    constructor(context: Context, scope: String = "legacy") : this(context.cacheDir, scope)
+    private val directory = if (scope == "legacy") cacheRoot else File(cacheRoot, "computers/${cacheKey(scope)}")
+    fun memoryKey(sessionId: String): String = "$scope:${cacheKey(sessionId)}"
+    fun hasHistory(sessionId: String): Boolean = HistoryMemoryCache.history(memoryKey(sessionId)) != null
+    fun putPrefetch(sessionId: String, value: HistoryValue) = HistoryMemoryCache.putPrefetch(memoryKey(sessionId), value)
+    fun takePrefetch(sessionId: String): HistoryValue? = HistoryMemoryCache.takePrefetch(memoryKey(sessionId))
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-    private val historyDir = File(context.cacheDir, "history")
-    private val listFile = File(context.cacheDir, "session-list.json.gz")
+    private val historyDir = File(directory, "history")
+    private val listFile = File(directory, "session-list.json.gz")
 
     // ── 会话历史 ──
 
@@ -99,8 +111,8 @@ class HistoryCache(context: Context) {
 
     /** 读缓存并携带完整加载水位（loadAll 的 seq 增量标记）。 */
     fun loadHistoryWithMeta(sessionId: String): CachedHistory? {
-        // 内存热缓存优先（零解码）；未命中才读盘解压（水位只存盘上，命中内存时条目必然同源）
-        HistoryMemoryCache.history(sessionId)?.let { return CachedHistory(0L, it, memoryComplete[sessionId]) }
+        // 内存热缓存优先（零解码）；未命中才读盘解压（完整水位与条目一起缓存）
+        HistoryMemoryCache.historyWithMeta(memoryKey(sessionId))?.let { return it }
         val f = historyFile(sessionId)
         if (!f.exists() || f.length() > 8 * 1024 * 1024) return null
         val doc = runCatching {
@@ -108,19 +120,14 @@ class HistoryCache(context: Context) {
                 json.decodeFromString<CachedHistory>(it.readBytes().toString(Charsets.UTF_8))
             }
         }.getOrNull() ?: return null
-        HistoryMemoryCache.putHistory(sessionId, doc.items)
-        memoryComplete[sessionId] = doc.completeThroughSeq
+        HistoryMemoryCache.putHistory(memoryKey(sessionId), doc.items, doc.completeThroughSeq)
         return doc
     }
-
-    /** 内存中的完整水位（与会话条目同生命周期，磁盘读入时刷新） */
-    private val memoryComplete = HashMap<String, Long?>()
 
     fun saveHistory(sessionId: String, items: List<CachedItem>, completeThroughSeq: Long? = null) {
         if (items.isEmpty()) return
         // 内存即时生效（返回再进零解码，含图片 base64），磁盘延迟由调用方防抖控制
-        HistoryMemoryCache.putHistory(sessionId, items)
-        memoryComplete[sessionId] = completeThroughSeq
+        HistoryMemoryCache.putHistory(memoryKey(sessionId), items, completeThroughSeq)
         // 温缓存截断：仅普通尾部缓存限 120 条（省空间）；完整水位非空 = 覆盖到最老，
         // 截断会破坏 [completeThroughSeq, 最新] 区间完整性 → 全量落盘（图片 base64 仍剥离）
         val capped = (if (completeThroughSeq != null) items else items.takeLast(120)).map {
@@ -144,6 +151,14 @@ class HistoryCache(context: Context) {
      */
     fun prune(ttlDays: Int = 7, listTtlDays: Int = 1) {
         runCatching {
+            if (scope == "legacy") {
+                File(cacheRoot, "computers").listFiles()?.filter { it.isDirectory }?.forEach { dir ->
+                    dir.walkBottomUp().filter { it.isFile }.forEach { file ->
+                        val ttl = if (file.name == "session-list.json.gz") listTtlDays else ttlDays
+                        if (System.currentTimeMillis() - file.lastModified() > ttl * 86400000L) file.delete()
+                    }
+                }
+            }
             val now = System.currentTimeMillis()
             val historyTtl = ttlDays * 24L * 3600 * 1000
             val listTtl = listTtlDays * 24L * 3600 * 1000
@@ -156,26 +171,28 @@ class HistoryCache(context: Context) {
 
     fun clearHistory(sessionId: String) {
         historyFile(sessionId).delete()
+        HistoryMemoryCache.clearHistory(memoryKey(sessionId))
     }
 
-    // ── 会话列表（全局，短 TTL 语义由调用方控制） ──
+    // ── 会话列表（按电脑隔离，短 TTL 语义由调用方控制） ──
 
     fun loadSessionList(): List<SessionSummary>? {
         // 内存热缓存优先
-        HistoryMemoryCache.sessionList()?.let { return it }
+        HistoryMemoryCache.sessionList(scope)?.let { return it }
         if (!listFile.exists() || listFile.length() > 1 * 1024 * 1024) return null
         val items = runCatching {
             GZIPInputStream(listFile.inputStream()).use {
                 json.decodeFromString<SessionListValue>(it.readBytes().toString(Charsets.UTF_8)).items
             }
         }.getOrNull()
-        if (items != null) HistoryMemoryCache.putSessionList(items)
+        if (items != null) HistoryMemoryCache.putSessionList(items, scope)
         return items
     }
 
     fun saveSessionList(items: List<SessionSummary>) {
-        HistoryMemoryCache.putSessionList(items)
+        HistoryMemoryCache.putSessionList(items, scope)
         runCatching {
+            directory.mkdirs()
             val payload = json.encodeToString(SessionListValue.serializer(), SessionListValue(items))
             GZIPOutputStream(listFile.outputStream()).use {
                 it.write(payload.toByteArray(Charsets.UTF_8))
@@ -184,5 +201,5 @@ class HistoryCache(context: Context) {
     }
 
     private fun historyFile(sessionId: String): File =
-        File(historyDir, sessionId.replace(Regex("[^A-Za-z0-9_-]"), "_") + ".json.gz")
+        File(historyDir, cacheKey(sessionId) + ".json.gz")
 }

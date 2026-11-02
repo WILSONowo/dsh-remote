@@ -1,7 +1,10 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { computerIdentity, deviceName } from './identity.js';
+import { computerIdentity, deviceName, defaultComputerName } from './identity.js';
+import QRCode from 'qrcode';
+import { networkInterfaces } from 'node:os';
+import { createWakeLock } from './wake.js';
 // Only the in-process relay gateway can set this marker. HTTP headers cannot impersonate it.
 export const RELAY_REQUEST = Symbol('dsh.relay.request');
 export const DEVICE_ID = Symbol('dsh.device.id');
@@ -49,9 +52,16 @@ export function isLocalAdmin(req) {
         return false;
     }
 }
-export function createSecurity(home, register) {
+export function createSecurity(home, register, options = {}) {
     const directory = join(home, 'remote-access');
     const file = join(directory, 'devices-v2.json');
+    const settingsFile = join(directory, 'settings.json');
+    let settings = existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile, 'utf8')) : { allowConnections: true, keepAwake: false };
+    if (typeof settings.allowConnections !== 'boolean' || typeof settings.keepAwake !== 'boolean')
+        throw new Error('Invalid remote access settings');
+    const wake = options.wake || createWakeLock();
+    const syncWake = () => wake.setEnabled(settings.allowConnections && settings.keepAwake);
+    let lastSeenTimer;
     // Legacy paired.json / channel-token are deliberately not accepted as credentials.
     let devices = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).devices : [];
     if (!Array.isArray(devices) || devices.some(d => !VALID_ID.test(d.deviceId) || !/^[a-f0-9]{64}$/.test(d.tokenHash))) {
@@ -67,6 +77,16 @@ export function createSecurity(home, register) {
         }
         finally {
             rmSync(tmp, { force: true });
+        }
+    };
+    const touch = (device) => {
+        device.lastConnectedAt = Date.now();
+        if (!lastSeenTimer) {
+            lastSeenTimer = setTimeout(() => { lastSeenTimer = undefined; try {
+                save(devices);
+            }
+            catch { /* Access must not fail because activity metadata could not be saved. */ } }, 30000);
+            lastSeenTimer.unref();
         }
     };
     const active = new Map();
@@ -89,18 +109,22 @@ export function createSecurity(home, register) {
             req[DEVICE_ID] = device.deviceId;
         return device || undefined;
     };
-    const bootstrap = new Set(['pair/request', 'pair/status', 'pair/check', 'pair/claim', 'pair/code/verify'].map(p => '/api/remote-access/' + p));
-    const adminPaths = new Set(['pair/respond', 'pair/list', 'pair/rename', 'computer/rename', 'pair/revoke', 'pair/code/generate', 'pair/code/current', 'trusted-hosts', 'relay/config', 'relay/pairing'].map(p => '/api/remote-access/' + p));
+    const bootstrap = new Set(['pair/request', 'pair/status', 'pair/check', 'pair/claim', 'pair/code/verify', 'discovery/info'].map(p => '/api/remote-access/' + p));
+    const adminPaths = new Set(['access/settings', 'direct/info', 'direct/qr', 'discovery/start', 'discovery/renew', 'discovery/stop', 'pair/respond', 'pair/list', 'pair/rename', 'computer/rename', 'pair/revoke', 'pair/code/generate', 'pair/code/current', 'trusted-hosts', 'relay/config', 'relay/pairing'].map(p => '/api/remote-access/' + p));
     const authorize = (req) => {
         const path = new URL(req.url, 'http://localhost').pathname;
         // Static desktop UI and browser login remain owned by the host.
         if (path !== '/api' && !path.startsWith('/api/'))
             return true;
-        const device = authenticate(req);
         if (isLocalAdmin(req))
             return true;
+        if (!settings.allowConnections)
+            return false;
+        const device = authenticate(req);
         if (adminPaths.has(path))
             return false;
+        if (device)
+            touch(device);
         if (bootstrap.has(path) || path === '/api/host.describe')
             return true;
         return !!device;
@@ -122,6 +146,8 @@ export function createSecurity(home, register) {
     const pending = new Map();
     let scanTicket;
     const generatePairTicket = () => {
+        if (!settings.allowConnections)
+            throw new Error('connections_disabled');
         const ticket = fresh(), expiresAt = Date.now() + 120000;
         scanTicket = { hash: hash(ticket), expiresAt };
         return { ticket, expiresAt };
@@ -134,6 +160,35 @@ export function createSecurity(home, register) {
     };
     let code;
     const makeCode = () => code = { value: String(randomInt(1000000)).padStart(6, '0'), expires: Date.now() + 600000, attempts: 0 };
+    let discovery;
+    let discoveryTimer;
+    const stopDiscovery = () => {
+        const previous = discovery;
+        discovery = undefined;
+        clearTimeout(discoveryTimer);
+        discoveryTimer = undefined;
+        if (previous) {
+            code = undefined;
+            try {
+                previous.stop();
+            }
+            catch { /* Discovery cleanup must not interrupt credential issuance. */ }
+        }
+    };
+    const activeDiscovery = () => {
+        if (discovery && (!code || code.expires <= Date.now() || code.attempts >= 5 || discovery.lease <= Date.now()))
+            stopDiscovery();
+        return discovery;
+    };
+    const renewDiscovery = () => {
+        discovery.lease = Date.now() + 30000;
+        clearTimeout(discoveryTimer);
+        discoveryTimer = setTimeout(stopDiscovery, Math.max(0, Math.min(code.expires, discovery.lease) - Date.now()));
+        discoveryTimer.unref();
+    };
+    const discoveryResult = () => ({ ok: true, session: discovery.session, name: discovery.name,
+        code: code.value, expiresInSec: Math.max(0, Math.ceil((code.expires - Date.now()) / 1000)),
+        discoveryFailed: discovery.failed });
     const audit = [];
     const record = (action, deviceId) => { audit.push({ ts: Date.now(), action, deviceId }); if (audit.length > 200)
         audit.shift(); };
@@ -141,8 +196,10 @@ export function createSecurity(home, register) {
     const registerApi = (path, method, fn) => register({
         kind: 'exact', path: '/api/remote-access/' + path,
         handler: async (req, res) => {
-            if (req.method !== method)
+            if (!(Array.isArray(method) ? method.includes(req.method || '') : req.method === method))
                 return reply(res, 405, { error: 'method_not_allowed' });
+            if (!settings.allowConnections && !isLocalAdmin(req))
+                return reply(res, 503, { ok: false, error: 'connections_disabled' });
             if (!authorize(req))
                 return reply(res, 401, { error: 'unauthorized' });
             if (!isLocalAdmin(req) && bootstrap.has('/api/remote-access/' + path)) {
@@ -157,8 +214,10 @@ export function createSecurity(home, register) {
                 rates.set(key, rate);
             }
             try {
-                const body = method === 'POST' ? await bodyJson(req) : {};
-                const value = fn(req, body, new URL(req.url, 'http://localhost'));
+                const body = req.method === 'POST' ? await bodyJson(req) : {};
+                if (!settings.allowConnections && !isLocalAdmin(req))
+                    return reply(res, 503, { ok: false, error: 'connections_disabled' });
+                const value = await fn(req, body, new URL(req.url, 'http://localhost'));
                 return reply(res, 200, value);
             }
             catch (e) {
@@ -170,7 +229,7 @@ export function createSecurity(home, register) {
     const identity = (body) => {
         if (typeof body.deviceId !== 'string' || !VALID_ID.test(body.deviceId))
             throw new Error('invalid_device');
-        return { id: body.deviceId, name: String(body.deviceName || '手机').slice(0, 64) };
+        return { id: body.deviceId, name: String(body.deviceName || '设备').slice(0, 64) };
     };
     const secret = (req) => {
         const s = String(req.headers['x-dsh-pairing-secret'] || '');
@@ -178,6 +237,91 @@ export function createSecurity(home, register) {
             throw new Error('invalid_secret');
         return s;
     };
+    const publicSettings = () => ({ ok: true, ...settings, wake: wake.status() });
+    registerApi('access/settings', ['GET', 'POST'], (req, body) => {
+        if (req.method === 'GET')
+            return publicSettings();
+        if (Object.keys(body).some(k => !['allowConnections', 'keepAwake'].includes(k)) || Object.values(body).some(v => typeof v !== 'boolean'))
+            throw new Error('invalid_body');
+        const next = { ...settings, ...body };
+        if (body.keepAwake === true && !wake.status().supported)
+            return { ok: false, error: 'wake_unsupported' };
+        mkdirSync(directory, { recursive: true, mode: 0o700 });
+        writeFileSync(settingsFile + '.tmp', JSON.stringify(next), { mode: 0o600 });
+        renameSync(settingsFile + '.tmp', settingsFile);
+        const changed = settings.allowConnections !== next.allowConnections;
+        settings = next;
+        if (!settings.allowConnections) {
+            stopDiscovery();
+            pending.clear();
+            scanTicket = undefined;
+            code = undefined;
+            for (const id of active.keys())
+                disconnect(id);
+        }
+        syncWake();
+        if (changed)
+            options.onAccessChange?.(settings.allowConnections);
+        return publicSettings();
+    });
+    registerApi('direct/info', 'GET', req => {
+        const port = req.socket.localPort;
+        const protocol = req.socket.encrypted ? 'https' : 'http';
+        const addresses = port ? Object.values(networkInterfaces()).flatMap(list => (list || [])
+            .filter(n => !n.internal && n.family === 'IPv4')
+            .map(n => `${protocol}://${n.address}:${port}`)) : [];
+        return { ok: true, addresses: [...new Set(addresses)] };
+    });
+    registerApi('direct/qr', 'POST', async (_, body) => {
+        if (typeof body.address !== 'string' || body.address.length > 2048)
+            throw new Error('invalid_body');
+        let address;
+        try {
+            address = new URL(body.address);
+        }
+        catch {
+            throw new Error('invalid_body');
+        }
+        if (!['http:', 'https:'].includes(address.protocol) || !address.hostname || address.username || address.password || address.search || address.hash)
+            throw new Error('invalid_body');
+        const link = address.href.replace(/\/$/, '');
+        return { ok: true, link, image: await QRCode.toDataURL(link, { errorCorrectionLevel: 'M', margin: 4, scale: 8 }) };
+    });
+    registerApi('discovery/start', 'POST', req => {
+        if (!settings.allowConnections)
+            return { ok: false, error: 'connections_disabled' };
+        if (!options.publishDiscovery || !req.socket.localPort)
+            return { ok: false, error: 'discovery_unavailable' };
+        stopDiscovery();
+        makeCode();
+        const session = randomBytes(16).toString('hex'), name = computerIdentity(home).name;
+        discovery = { session, name, lease: 0, failed: false, stop: () => { } };
+        try {
+            discovery.stop = options.publishDiscovery({ session, name, port: req.socket.localPort, tls: !!req.socket.encrypted }, () => { if (discovery?.session === session)
+                discovery.failed = true; });
+        }
+        catch {
+            discovery.failed = true;
+        }
+        renewDiscovery();
+        return discoveryResult();
+    });
+    registerApi('discovery/renew', 'POST', (_, body) => {
+        if (!activeDiscovery() || body.session !== discovery.session)
+            return { ok: false, error: 'discovery_expired' };
+        renewDiscovery();
+        return discoveryResult();
+    });
+    registerApi('discovery/stop', 'POST', (_, body) => {
+        if (body.session === discovery?.session)
+            stopDiscovery();
+        return { ok: true };
+    });
+    registerApi('discovery/info', 'GET', (req, _, url) => {
+        if (req[RELAY_REQUEST] || !activeDiscovery() || url.searchParams.get('session') !== discovery.session)
+            return { ok: false, error: 'discovery_expired' };
+        return { ok: true, v: 1, session: discovery.session, name: discovery.name };
+    });
     registerApi('pair/request', 'POST', (req, b) => {
         const { id, name } = identity(b);
         if (authenticate(req)?.deviceId === id)
@@ -195,7 +339,7 @@ export function createSecurity(home, register) {
             if (typeof b.ticket !== 'string' || !/^[a-f0-9]{64}$/.test(b.ticket) || !scanTicket || scanTicket.expiresAt <= Date.now() || !equal(hash(b.ticket), scanTicket.hash)) {
                 return { ok: false, state: 'expired', error: 'invalid_pairing_ticket' };
             }
-            scanTicket = undefined; // One phone per QR. The computer still must approve.
+            scanTicket = undefined; // One device per QR. The computer still must approve.
         }
         if (!old)
             pending.set(id, { deviceId: id, name, secretHash: hash(s), at: Date.now(), state: 'pending' });
@@ -210,6 +354,8 @@ export function createSecurity(home, register) {
         return { ok: true, state: p && equal(p.secretHash, hash(secret(req))) ? p.state : 'none' };
     });
     registerApi('pair/respond', 'POST', (_, b) => {
+        if (!settings.allowConnections)
+            return { ok: false, error: 'connections_disabled' };
         const p = pendingNow(String(b.deviceId));
         if (!p)
             return { ok: false, error: 'no_pending_request' };
@@ -228,8 +374,8 @@ export function createSecurity(home, register) {
     registerApi('pair/check', 'GET', (req, _, url) => ({
         ok: true, paired: authenticate(req)?.deviceId === url.searchParams.get('deviceId'),
     }));
-    registerApi('pair/list', 'GET', () => ({ ok: true, computer: computerIdentity(home), devices: devices.map(({ tokenHash, ...d }) => d) }));
-    registerApi('computer/rename', 'POST', (_, b) => ({ ok: true, computer: computerIdentity(home, deviceName(b.name)) }));
+    registerApi('pair/list', 'GET', () => ({ ok: true, computer: { ...computerIdentity(home), defaultName: defaultComputerName() }, devices: devices.map(({ tokenHash, ...d }) => d) }));
+    registerApi('computer/rename', 'POST', (_, b) => ({ ok: true, computer: computerIdentity(home, b.reset === true ? null : deviceName(b.name)) }));
     registerApi('pair/rename', 'POST', (_, b) => {
         const { id } = identity(b), name = deviceName(b.name);
         if (!devices.some(d => d.deviceId === id))
@@ -248,21 +394,32 @@ export function createSecurity(home, register) {
     });
     for (const [path, method] of [['generate', 'POST'], ['current', 'GET']])
         registerApi('pair/code/' + path, method, () => {
-            if (path === 'generate' || !code || code.expires < Date.now() || code.attempts >= 5)
+            if (!settings.allowConnections)
+                return { ok: false, error: 'connections_disabled' };
+            if (path === 'generate' || !code || code.expires < Date.now() || code.attempts >= 5) {
+                stopDiscovery();
                 makeCode();
+            }
             return { ok: true, code: code.value, expiresInSec: Math.max(0, Math.floor((code.expires - Date.now()) / 1000)), maxAttempts: 5 };
         });
     registerApi('pair/code/verify', 'POST', (req, b) => {
         if (req[RELAY_REQUEST])
             return { ok: false, error: 'relay_requires_scan' };
         const { id, name } = identity(b);
+        if (b.discoverySession !== undefined && (!activeDiscovery() || b.discoverySession !== discovery.session))
+            return { ok: false, error: 'discovery_expired' };
         if (!code || code.expires < Date.now())
             return { ok: false, error: 'no_active_code' };
         if (code.attempts >= 5)
             return { ok: false, error: 'code_locked' };
-        if (!equal(String(b.code || ''), code.value))
-            return { ok: false, error: 'code_mismatch', attemptsLeft: 5 - ++code.attempts };
+        if (!equal(String(b.code || ''), code.value)) {
+            const attemptsLeft = 5 - ++code.attempts;
+            if (!attemptsLeft)
+                stopDiscovery();
+            return { ok: false, error: 'code_mismatch', attemptsLeft };
+        }
         const token = issue(id, name);
+        stopDiscovery();
         code = undefined;
         pending.delete(id);
         record('pair', id);
@@ -290,6 +447,23 @@ export function createSecurity(home, register) {
         return { ok: true, revokedAt: Date.now() };
     });
     registerApi('token/audit', 'GET', req => ({ ok: true, events: audit.filter(e => isLocalAdmin(req) || e.deviceId === req[DEVICE_ID]).slice(-50) }));
-    return { authorize, track, generatePairTicket, dispose: () => { scanTicket = undefined; for (const id of active.keys())
-            disconnect(id); } };
+    syncWake();
+    return { authorize, track, generatePairTicket, isEnabled: () => settings.allowConnections,
+        remoteBlocked: (req) => !settings.allowConnections && /^\/api(?:\/|$)/.test(new URL(req.url, 'http://localhost').pathname) && !isLocalAdmin(req),
+        dispose: () => {
+            stopDiscovery();
+            wake.dispose();
+            clearTimeout(lastSeenTimer);
+            if (lastSeenTimer) {
+                try {
+                    save(devices);
+                }
+                catch { }
+            }
+            pending.clear();
+            scanTicket = undefined;
+            code = undefined;
+            for (const id of active.keys())
+                disconnect(id);
+        } };
 }

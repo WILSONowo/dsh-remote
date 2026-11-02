@@ -28,8 +28,25 @@ class PairingCoordinator(
     private var handshakingFor: String? = null
     private var handshakeJob: Job? = null
     private var scan: Pair<String, PairingLink>? = null
+    private var discovery: Pair<String, String>? = null
+
+    fun prepareDiscovery(profile: HostProfile, session: String) {
+        handshakeJob?.cancel(); handshakingFor = null; handshakeJob = null
+        _waitingForApproval.value = null; _awaitingDecision.value = null; scan = null
+        discovery = profile.id to session
+    }
+
+    /** Reopen a dismissed dialog, or switch from computer approval to code entry. */
+    fun resumePairing() {
+        val profile = connection.currentProfile() ?: return
+        if (profile.paired) return
+        handshakeJob?.cancel(); handshakeJob = null; handshakingFor = null
+        _waitingForApproval.value = null
+        _awaitingDecision.value = profile.id
+    }
 
     fun prepareScan(profile: HostProfile, link: PairingLink) {
+        discovery = null
         handshakeJob?.cancel()
         handshakingFor = null
         _waitingForApproval.value = null
@@ -55,6 +72,7 @@ class PairingCoordinator(
                     handshakingFor = null
                 }
                 if (scan?.first != profile.id) scan = null
+                if (discovery?.first != profile.id) discovery = null
                 if (state is DshConnection.State.Connected) {
                     if (profile.paired) refreshPaired(profile)
                     else if (handshakingFor != profile.id) {
@@ -95,6 +113,7 @@ class PairingCoordinator(
         settingsStore.upsertProfile(updated)
         if (!current(profile)) return false
         _awaitingDecision.value = null
+        discovery = null
         connection.syncCurrentProfile(updated)
         _events.tryEmit("配对完成，已保存本手机的独立访问权限")
         return true
@@ -105,7 +124,8 @@ class PairingCoordinator(
         if (profile.connectionMode == "relay") return PairCodeResult(false, "中转连接请扫码或粘贴电脑生成的临时连接信息")
         val rpc = HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first)
         val result = try {
-            rpc.codeVerify(code.trim(), settingsStore.ensureDeviceId(), settingsStore.deviceName.first().ifBlank { android.os.Build.MODEL })
+            rpc.codeVerify(code.trim(), settingsStore.ensureDeviceId(), settingsStore.deviceName.first().ifBlank { android.os.Build.MODEL },
+                discovery?.takeIf { it.first == profile.id }?.second)
         } catch (e: CancellationException) { throw e } catch (_: Exception) {
             return PairCodeResult(false, "配对请求失败，请检查电脑和服务器连接后重试")
         }
@@ -113,7 +133,8 @@ class PairingCoordinator(
         if (result.ok && result.token != null) return if (finishPair(profile, rpc, result.token)) PairCodeResult(true, null)
             else PairCodeResult(false, "未能确认电脑身份，请重新配对")
         return PairCodeResult(false, when (result.error) {
-            "no_active_code" -> "请在电脑的 DeepSeek Harness「设置 → 远程控制」生成配对码"
+            "discovery_expired" -> "电脑的配对页面已关闭、已使用或过期，请重新打开并搜索电脑"
+            "no_active_code" -> "请在电脑的 DeepSeek Harness「远程控制 → 添加 → 配对码直连」生成配对码"
             "code_locked" -> "错误次数过多，请在电脑重新生成配对码"
             "code_mismatch" -> "配对码不正确" + (result.attemptsLeft?.let { "（还剩 $it 次机会）" } ?: "")
             "plugin_old" -> "配对接口不可用，请检查电脑插件版本和服务器连接状态"

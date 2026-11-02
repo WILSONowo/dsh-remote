@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { encodePairingLink } from '../lib/pairing-link.js';
 // Actual host controls, locale and theme with synthetic API data. Loopback only.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const sdk = process.env.DSH_TEST_RUNTIME;
@@ -18,7 +19,7 @@ bundle = bundle.slice(0, boot) + `\nexport const modules=${registry[1]}();`;
 const themeSource = readFileSync(join(sdk, 'dsh-client-ui-theme/lib/client.js'), 'utf8');
 const themeCss = [...themeSource.matchAll(/var \w+_css_default = ("(?:[^"\\]|\\.)*");/g)].map(x => JSON.parse(x[1])).join('\n');
 const QRCode = createRequire(join(root, 'package.json'))('qrcode');
-const qr = await QRCode.toDataURL('dshremote://synthetic-preview-only');
+const sample = JSON.parse(readFileSync(join(root, '../app/src/test/resources/pairing-compact.json'), 'utf8'));
 const bootScript = `
 import { modules } from '/assets/fixture-runtime.js';
 const loaded = {};
@@ -30,22 +31,31 @@ const locale=new loaded['@deepseek-ai/dsh-client-locale'].LocaleRuntime({emit() 
 let registration, Settings;
 loaded['dsh-remote-access'].apply({locale,effect(fn) {disposers.push(fn());},slots:{inject(name,fn){disposers.push(fn());},register(meta,component){registration=meta;Settings=component;return()=>{};}}});
 const nativeFetch=window.fetch.bind(window);
-let config={ok:true,enabled:false,serverUrl:'https://relay.example.test',caFile:'',state:'disabled',detail:''};
-let computer={id:'11111111-1111-4111-8111-111111111111',name:'Studio computer'};
-let devices=[],hosts=[],pending=null,failNext=false;
+let config={ok:true,enabled:true,serverUrl:'https://relay.example.test',caFile:'',state:'connected',detail:''};
+let computer={id:'11111111-1111-4111-8111-111111111111',name:'Studio computer',defaultName:'Synthetic-PC'};
+let devices=[{deviceId:'sample-a',name:'Android device',lastConnectedAt:Date.now()-3600000},{deviceId:'sample-b',name:'Android tablet',lastConnectedAt:Date.now()-10800000}],hosts=[],pending=null,failNext=false,missingSettings=false;
+let discovery=null;
+let access={ok:true,allowConnections:true,keepAwake:false,wake:{supported:true,state:'off'}};
 window.fetch=async(url,options={})=>{
  if(!String(url).startsWith('/api/remote-access/'))return nativeFetch(url,options);
  const route=String(url).split('/api/remote-access/')[1], b=options.body?JSON.parse(options.body):null;
  let value={ok:true};
+ if(route==='access/settings'&&missingSettings)return new Response('Not found',{status:404});
  if(failNext){failNext=false;return new Response(JSON.stringify({ok:false,error:'synthetic failure'}),{status:503});}
- if(route==='relay/config'){if(b)config={...config,...b,state:b.enabled?'connected':'disabled'};value=config;}
- else if(route==='relay/pairing')value={ok:true,link:'dshremote://synthetic-preview-only',image:${JSON.stringify(qr)},expiresAt:Date.now()+120000};
+ if(route==='access/settings'){if(b){access={...access,...b};access.wake.state=access.keepAwake&&access.allowConnections?'active':'off';if(!access.allowConnections)pending=null;config.state=config.enabled?(access.allowConnections?'connected':'paused'):'disabled';}value=access;}
+ else if(route==='direct/info')value={ok:true,addresses:['http://192.0.2.10:3000','http://192.0.2.20:3000','http://192.0.2.30:3000']};
+ else if(route==='relay/config'){if(b)config={...config,...b,state:b.enabled?(access.allowConnections?'connected':'paused'):'disabled'};value=config;}
+ else if(route==='direct/qr')return nativeFetch('/fixture/qr',{method:'POST',body:JSON.stringify({address:b.address})});
+ else if(route==='discovery/start'){discovery={ok:true,session:'a'.repeat(32),name:computer.name,code:'482615',expiresInSec:600};value=discovery;}
+ else if(route==='discovery/renew')value=discovery||{ok:false,error:'discovery_expired'};
+ else if(route==='discovery/stop')discovery=null;
+ else if(route==='relay/pairing')return nativeFetch('/fixture/qr',{method:'POST',body:'{}'});
  else if(route.startsWith('pair/code/'))value={ok:true,code:route.endsWith('generate')?'987654':'123456',expiresInSec:600};
  else if(route==='pair/list')value={ok:true,computer,devices};
- else if(route==='computer/rename')computer={...computer,name:b.name};
+ else if(route==='computer/rename')computer={...computer,name:b.reset?computer.defaultName:b.name};
  else if(route==='pair/rename')devices=devices.map(d=>d.deviceId===b.deviceId?{...d,name:b.name}:d);
  else if(route==='pair/status')value={ok:true,state:pending?'pending':'none',pendingDevice:pending};
- else if(route==='pair/respond'){if(b.outcome==='approve')devices=[...devices,pending];pending=null;}
+ else if(route==='pair/respond'){if(b.outcome==='approve')devices=[...devices,{...pending,lastConnectedAt:Date.now()}];pending=null;}
  else if(route==='pair/revoke')devices=devices.filter(d=>d.deviceId!==b.deviceId);
  else if(route==='trusted-hosts'){if(b){if(b.host.includes('://'))value={ok:false,error:'invalid_host'};else hosts=b.action==='add'?[...hosts,b.host]:hosts.filter(x=>x!==b.host);}if(value.ok)value={ok:true,hosts};}
  return new Response(JSON.stringify(value),{status:value.ok?200:400,headers:{'Content-Type':'application/json'}});
@@ -54,8 +64,9 @@ function Preview(){React.useSyncExternalStore(fn=>locale.subscribe(fn),()=>local
  return h(React.Fragment,{},h('div',{className:'preview-controls'},
  h('button',{onClick:()=>locale.setLocale('en')},'English'),h('button',{onClick:()=>locale.setLocale('zh')},'中文'),
  h('button',{onClick:()=>document.body.toggleAttribute('data-ds-dark-theme')},'Theme'),
- h('button',{onClick:()=>{pending={deviceId:'synthetic-phone',name:'Sample phone'};}},'Pair request'),
+ h('button',{onClick:()=>{pending={deviceId:'synthetic-device',name:'Sample device'};}},'Pair request'),
  h('button',{onClick:()=>{config={...config,state:'error',detail:'无法读取 CA 证书'};}},'Connection error'),
+ h('button',{onClick:()=>{missingSettings=!missingSettings;}},'Toggle missing settings'),
  h('button',{onClick:()=>{failNext=true;}},'Fail next request')),
  h('div',{className:'preview-shell'},h('nav',{},h('h2',{},locale.getLocale().active==='zh'?'设置':'Settings'),
  h('p',{},locale.getLocale().active==='zh'?'通用':'General'),h('p',{className:'selected'},registration.label())),
@@ -65,9 +76,19 @@ modules['react-dom/client'].createRoot(document.getElementById('root')).render(h
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Remote settings · synthetic preview</title>
 ${files.filter(x=>x.endsWith('.css')).map(x=>`<link rel="stylesheet" href="/assets/${x}">`).join('')}
 <style>${themeCss}
-body{font:14px/22px var(--dsw-font-family),sans-serif;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);margin:0}.preview-controls{padding:16px;display:flex;gap:10px;flex-wrap:wrap}.preview-controls button{font:inherit;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:4px 10px;cursor:pointer}.preview-shell{display:flex;width:800px;max-width:calc(100vw - 32px);margin:8px auto 24px;border-radius:var(--dsw-radius-panel);background:var(--dsw-alias-bg-layer-2);min-height:740px}nav{width:188px;flex:none;padding:24px 12px;box-sizing:border-box}nav h2{font-size:16px;font-weight:500;margin:0 12px 28px}nav p{padding:9px 12px;border-radius:var(--dsw-radius-md)}nav .selected{background:var(--dsw-specific-sidebar-nav-item-active)}main{flex:1;min-width:0;padding:54px 24px 24px}@media(max-width:640px){nav{display:none}main{padding:24px 20px}.preview-shell{width:auto}}
+body{font:14px/22px var(--dsw-font-family),sans-serif;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);margin:0}.preview-controls{padding:16px;display:flex;gap:10px;flex-wrap:wrap}.preview-controls button{font:inherit;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:4px 10px;cursor:pointer}.preview-shell{display:flex;width:940px;max-width:calc(100vw - 32px);margin:8px auto 24px;border-radius:var(--dsw-radius-panel);background:var(--dsw-alias-bg-layer-2);min-height:740px}nav{width:188px;flex:none;padding:24px 12px;box-sizing:border-box}nav h2{font-size:16px;font-weight:500;margin:0 12px 28px}nav p{padding:9px 12px;border-radius:var(--dsw-radius-md)}nav .selected{background:var(--dsw-specific-sidebar-nav-item-active)}main{flex:1;min-width:0;padding:54px 24px 24px}@media(max-width:640px){nav{display:none}main{padding:24px 20px}.preview-shell{width:auto}}
 </style></head><body data-ds-dark-theme><div id="root"></div><script type="module" src="/fixture.js"></script></body></html>`;
-const server=http.createServer((req,res)=>{
+const server=http.createServer(async(req,res)=>{
+ if(req.url==='/fixture/qr'&&req.method==='POST'){
+  try {
+   let body='';for await(const chunk of req){body+=chunk;if(body.length>2048)throw new Error('too_large');}
+   const {address}=JSON.parse(body),expiresAt=Date.now()+120000;
+   if(address&&!/^http:\/\/192\.0\.2\.(10|20|30):3000$/.test(address))throw new Error('invalid_fixture_address');
+   const link=address||encodePairingLink({...sample.payload,expiresAt});
+   const image=await QRCode.toDataURL(link,{errorCorrectionLevel:'M',margin:4,scale:8});
+   res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify({ok:true,link,image,expiresAt}));
+  }catch{res.writeHead(400);res.end();}return;
+ }
  let content,type='text/javascript'; const path=new URL(req.url,'http://localhost').pathname;
  if(path==='/'){content=html;type='text/html';}
  else if(path==='/fixture.js')content=bootScript;

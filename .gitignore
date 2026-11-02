@@ -48,3 +48,7 @@ plugin-secret.json
 *.p12
 *.pfx
 server.json
+
+# Python test tooling
+__pycache__/
+*.py[cod]

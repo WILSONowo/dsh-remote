@@ -1,3 +1,4 @@
+import { decodePairingTestLink } from './pairing-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -229,7 +230,7 @@ test('0.2.1-rc.5 actual WebServer/Connection: plugin mounting, native auth, rela
   assert.equal(relay.online.size, 1);
   const hostId = [...relay.online.keys()][0];
   const qr = (await post(base + '/api/remote-access/relay/pairing', {})).body;
-  const ticket = JSON.parse(Buffer.from(qr.link.split('#')[1], 'base64url')).ticket;
+  const ticket = decodePairingTestLink(qr.link).ticket;
   const proof = { 'X-DSH-Pairing-Secret': randomBytes(32).toString('hex') };
   assert.equal((await post(relayUrl + '/h/' + hostId + '/api/remote-access/pair/request', { deviceId: 'sdk-phone', ticket }, undefined, proof)).body.state, 'pending');
   await post(base + '/api/remote-access/pair/respond', { deviceId: 'sdk-phone', outcome: 'approve' });
@@ -239,6 +240,12 @@ test('0.2.1-rc.5 actual WebServer/Connection: plugin mounting, native auth, rela
   assert.equal(result.body.result.ok, true, JSON.stringify(result));
   assert.equal(result.body.result.value.items[0].sessionId, 'relay-sdk');
   assert.equal((await post(relayUrl + '/h/' + hostId + '/api/remote-access/pair/code/generate', {}, token)).status, 401);
+  await post(base + '/api/remote-access/access/settings', { allowConnections: false });
+  assert.equal((await get('/api/session/list', 'fixture=browser')).status, 503, 'native auth must not bypass disabled remote access');
+  assert.equal((await get('/assets/test.js')).status, 200);
+  assert.equal((await fetch(base + '/api/remote-access/access/settings')).status, 200, 'local settings must remain available');
+  await post(base + '/api/remote-access/access/settings', { allowConnections: true });
+  assert.equal(await (await get('/api/session/list', 'fixture=browser')).text(), 'native browser');
   await mounted.dispose();
   assert.equal(ctx.webServer.prefixes.get('/api'), native, 'surviving host routes must not retain unloaded auth closures');
   assert.equal(ctx.webServer.exact.get('/assets/test.js'), staticRoute);

@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createWakeLock } from './wake.js';
+import type { DiscoveryPublisher } from './discovery.js';
 export declare const RELAY_REQUEST: unique symbol;
 export declare const DEVICE_ID: unique symbol;
 export declare const VALID_ID: RegExp;
@@ -14,7 +16,11 @@ type Route = {
 export declare const reply: (res: ServerResponse, status: number, body: unknown) => void;
 export declare function bodyJson(req: IncomingMessage, limit?: number): Promise<any>;
 export declare function isLocalAdmin(req: Request): boolean;
-export declare function createSecurity(home: string, register: (route: Route) => void): {
+export declare function createSecurity(home: string, register: (route: Route) => void, options?: {
+    onAccessChange?: (enabled: boolean) => void;
+    wake?: ReturnType<typeof createWakeLock>;
+    publishDiscovery?: DiscoveryPublisher;
+}): {
     authorize: (req: Request) => boolean;
     track: (req: Request, target: {
         once: Function;
@@ -24,6 +30,8 @@ export declare function createSecurity(home: string, register: (route: Route) =>
         ticket: string;
         expiresAt: number;
     };
+    isEnabled: () => any;
+    remoteBlocked: (req: Request) => boolean;
     dispose: () => void;
 };
 export {};

@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -25,6 +26,7 @@ class ApprovalCenter(
     private val listSessionsFn: suspend () -> List<SessionSummary>,
     private val historyFn: suspend (sessionId: String) -> HistoryValue,
     private val scope: CoroutineScope,
+    private val targetKey: () -> String? = { null },
 ) {
     companion object {
         /** 历史恢复窗口：最近 N 个活跃会话（spec §5.2） */
@@ -39,9 +41,22 @@ class ApprovalCenter(
         listSessionsFn = connection::listSessions,
         historyFn = { connection.history(it) },
         scope = scope,
+        targetKey = { connection.currentProfile()?.computerScope() },
     )
 
     private val mutex = Mutex()
+    private var currentTarget: String? = targetKey()
+
+    private suspend fun syncTarget() {
+        mutex.withLock {
+            val next = targetKey()
+            if (next != currentTarget) {
+                currentTarget = next
+                _items.value = emptyList()
+                resolvedTombstones = emptySet()
+            }
+        }
+    }
     private val _items = MutableStateFlow<List<PendingItem>>(emptyList())
 
     /** 已解决项的墓碑（键同 itemKey 格式），阻止乐观回滚「复活」并发已解决的项。 */
@@ -53,9 +68,10 @@ class ApprovalCenter(
         _items.map { it.size }.stateIn(scope, SharingStarted.Eagerly, 0)
 
     init {
-        scope.launch { events.collect { onEvent(it) } }
+        scope.launch { events.collect { syncTarget(); onEvent(it) } }
         scope.launch {
-            state.distinctUntilChanged().collect { s ->
+            state.distinctUntilChanged().collectLatest { s ->
+                syncTarget()
                 if (s is DshConnection.State.Connected) recover()
             }
         }
@@ -118,15 +134,19 @@ class ApprovalCenter(
 
     /** 连接成功后扫描最近 5 个会话历史；实时优先，失败静默（spec §5.2/§7） */
     private suspend fun recover() {
+        val target = currentTarget
+        val summaries = runCatching { listSessionsFn() }.getOrElse { return }
+        val recovered = mutableListOf<PendingItem>()
+        for (s in summaries.sortedByDescending { it.updatedAt }.take(RECOVERY_SESSION_LIMIT)) {
+            if (target != targetKey()) return
+            val hv = runCatching { historyFn(s.sessionId) }.getOrNull() ?: continue
+            recovered += scanHistoryEvents(s.sessionId, hv.events)
+        }
         mutex.withLock {
-            val summaries = runCatching { listSessionsFn() }.getOrElse { return }
-            val recent = summaries.sortedByDescending { it.updatedAt }.take(RECOVERY_SESSION_LIMIT)
+            if (target != targetKey()) return
             val merged = _items.value.toMutableList()
-            for (s in recent) {
-                val hv = runCatching { historyFn(s.sessionId) }.getOrNull() ?: continue
-                for (item in scanHistoryEvents(s.sessionId, hv.events)) {
-                    if (itemKey(item) !in resolvedTombstones && merged.none { itemKey(it) == itemKey(item) }) merged += item
-                }
+            for (item in recovered) {
+                if (itemKey(item) !in resolvedTombstones && merged.none { itemKey(it) == itemKey(item) }) merged += item
             }
             _items.value = sortPendingItems(merged)
         }
@@ -135,14 +155,17 @@ class ApprovalCenter(
     // ── 应答（乐观更新 + 失败回滚，spec §5.2）──
 
     private suspend fun answerApprovalItem(sessionId: String, approvalId: String, outcome: String) {
+        syncTarget()
+        val target = currentTarget
         val item = items.value.filterIsInstance<PendingItem.Approval>()
             .firstOrNull { it.sessionId == sessionId && it.approvalId == approvalId } ?: return
         mutate { l -> l.removeAll { it is PendingItem.Approval && it.sessionId == sessionId && it.approvalId == approvalId } }
+        if (target != targetKey()) return
         try {
             answerApprovalFn(sessionId, approvalId, outcome)
         } catch (e: Exception) {
             mutate { l ->
-                if (itemKey(item) !in resolvedTombstones && l.none { itemKey(it) == itemKey(item) }) l += item
+                if (target == targetKey() && itemKey(item) !in resolvedTombstones && l.none { itemKey(it) == itemKey(item) }) l += item
             }
             throw e
         }
@@ -155,14 +178,17 @@ class ApprovalCenter(
         answerApprovalItem(sessionId, approvalId, "rejected")
 
     suspend fun answerQuestions(sessionId: String, answers: List<DshConnection.QuestionAnswer>) {
+        syncTarget()
+        val target = currentTarget
         val item = items.value.filterIsInstance<PendingItem.Question>()
             .firstOrNull { it.sessionId == sessionId } ?: return
         mutate { l -> l.removeAll { it is PendingItem.Question && it.sessionId == sessionId } }
+        if (target != targetKey()) return
         try {
             answerQuestionsFn(sessionId, answers)
         } catch (e: Exception) {
             mutate { l ->
-                if (itemKey(item) !in resolvedTombstones && l.none { itemKey(it) == itemKey(item) }) l += item
+                if (target == targetKey() && itemKey(item) !in resolvedTombstones && l.none { itemKey(it) == itemKey(item) }) l += item
             }
             throw e
         }
@@ -171,29 +197,38 @@ class ApprovalCenter(
     suspend fun skipQuestions(sessionId: String) = answerQuestions(sessionId, emptyList())
 
     suspend fun allowAllApprovals(): List<String> {
+        syncTarget()
+        val target = currentTarget
         val snaps = items.value.filterIsInstance<PendingItem.Approval>()
             .map { it.sessionId to it.approvalId }
         val failures = mutableListOf<String>()
         for ((sid, aid) in snaps) {
+            if (target != targetKey()) break
             try { allow(sid, aid) } catch (e: CancellationException) { throw e } catch (e: Exception) { failures += e.message ?: "unknown" }
         }
         return failures
     }
 
     suspend fun rejectAllApprovals(): List<String> {
+        syncTarget()
+        val target = currentTarget
         val snaps = items.value.filterIsInstance<PendingItem.Approval>()
             .map { it.sessionId to it.approvalId }
         val failures = mutableListOf<String>()
         for ((sid, aid) in snaps) {
+            if (target != targetKey()) break
             try { reject(sid, aid) } catch (e: CancellationException) { throw e } catch (e: Exception) { failures += e.message ?: "unknown" }
         }
         return failures
     }
 
     suspend fun skipAllQuestions(): List<String> {
+        syncTarget()
+        val target = currentTarget
         val sessions = items.value.filterIsInstance<PendingItem.Question>().map { it.sessionId }
         val failures = mutableListOf<String>()
         for (sid in sessions) {
+            if (target != targetKey()) break
             try { skipQuestions(sid) } catch (e: CancellationException) { throw e } catch (e: Exception) { failures += e.message ?: "unknown" }
         }
         return failures

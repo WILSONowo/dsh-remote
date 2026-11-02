@@ -16,7 +16,9 @@
 后端一次性配置 `registration.enabled` 和 SQLite 数据库路径后，电脑可通过 `POST /relay/v1/register` 自动注册；后端 2.0.0 起拒绝静态 `hosts` 字段，注册数据库为必填配置。
 插件在联网前持久保存 32 字节随机凭证，请求使用 Bearer 头；后端仅保存凭证摘要。主机 ID 为 `SHA256("dsh-remote-host-v1:" + credential)` 的前 32 个十六进制字符，凭证由密码学随机源产生，不取自机器名或硬件。重复请求返回相同 ID，改名不更换身份，切换服务器会生成新的注册凭证。
 
-`dshremote://pair#<base64url JSON>` 是 App 内扫码或粘贴的连接格式，不依赖网页或 Android 系统深链接。v1 字段为 `v`、`server`、`hostId`、`computerId`、`name`、`ticket`、`expiresAt`（毫秒）。二维码在电脑本地生成，不调用第三方二维码服务。ticket 为 32 字节随机秘密，仅在电脑内存保存摘要，两分钟过期；它只能创建待确认请求，不能直接取得控制权。
+扫码和粘贴使用 App 内的 `dshremote://pair#…` 连接格式，不依赖网页或 Android 系统深链接。新插件生成紧凑格式 `dshremote://pair#2.<base64url>`，需要配套更新 App；新版 App 同时接受原有 v1 JSON 格式。已有配对记录不受影响，服务器后端无需改动。
+
+v2 解码后的字节顺序为：8 字节有效期（Unix 毫秒）、16 字节主机 ID、16 字节电脑 UUID、32 字节完整 ticket，随后为服务器地址和电脑名称；两个字符串均使用 2 字节长度前缀及 UTF-8 编码，所有整数为大端序。地址最多 2048 字节，名称最多 256 字节且校验不超过 64 个字符，不接受尾随数据。协议跨端测试共用合成向量 `app/src/test/resources/pairing-compact.json`。v1 字段为 `v`、`server`、`hostId`、`computerId`、`name`、`ticket`、`expiresAt`（毫秒）。二维码在电脑本地生成，不调用第三方二维码服务。ticket 为 32 字节随机秘密，仅在电脑内存保存摘要，两分钟过期；它只能创建待确认请求，不能直接取得控制权。
 
 手机生成独立随机请求秘密，通过 `X-DSH-Pairing-Secret` 发送；请求携带 ticket，在电脑确认后经 `pair/claim` 领取手机凭证。临时连接信息不进入手机持久配置。二维码/连接信息不包含电脑注册凭证和手机长期令牌。多个手机分别配对、分别撤销。
 

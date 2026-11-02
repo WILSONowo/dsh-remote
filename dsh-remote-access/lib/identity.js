@@ -8,6 +8,7 @@ export function deviceName(name) {
     return name.trim();
 }
 /** Installation identity is random; a display-name change never changes identity. */
+export const defaultComputerName = () => hostname().replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 64) || 'Computer';
 export function computerIdentity(home, name) {
     const directory = join(home, 'remote-access'), file = join(directory, 'identity.json');
     const exists = existsSync(file);
@@ -18,9 +19,11 @@ export function computerIdentity(home, name) {
     // Upgrade the old generic default without replacing an existing custom name or identity.
     if (!value.nameSource)
         value.nameSource = value.name === '电脑' ? 'automatic' : 'custom';
+    if (name === null)
+        value.nameSource = 'automatic';
     if (value.nameSource === 'automatic')
-        value.name = hostname().replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 64) || 'Computer';
-    if (name !== undefined) {
+        value.name = defaultComputerName();
+    if (name !== undefined && name !== null) {
         value.name = deviceName(name);
         value.nameSource = 'custom';
     }

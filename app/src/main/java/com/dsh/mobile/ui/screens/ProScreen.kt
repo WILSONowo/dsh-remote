@@ -11,13 +11,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import com.dsh.mobile.data.ProPlan
 import com.dsh.mobile.data.ProTokenBank
-import kotlinx.coroutines.flow.collectLatest
 
 /**
  * 假 Pro 订阅中心（趣味彩蛋）：
@@ -59,7 +57,7 @@ fun ProScreen(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp),
+                .padding(horizontal = 20.dp, vertical = 12.dp),
         ) {
             // ── 状态卡 ──
             Surface(

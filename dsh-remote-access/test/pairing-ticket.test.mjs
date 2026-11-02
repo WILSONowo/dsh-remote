@@ -58,8 +58,12 @@ test('installation identity survives rename and reload; server changes get new r
     systemName = 'Synthetic-PC-3';
     assert.equal(initial.id, renamed.id);
     assert.deepEqual(computerIdentity(home), renamed);
-    for (const name of ['', '  ', 'x'.repeat(65), 'bad\nname', null, 42]) assert.throws(() => computerIdentity(home, name));
+    for (const name of ['', '  ', 'x'.repeat(65), 'bad\nname', 42]) assert.throws(() => computerIdentity(home, name));
     assert.deepEqual(computerIdentity(home), renamed);
+    const reset = computerIdentity(home, null);
+    assert.deepEqual(reset, { id: initial.id, name: systemName });
+    systemName = 'Synthetic-PC-4';
+    assert.deepEqual(computerIdentity(home), { id: initial.id, name: systemName });
     const file = join(home, 'remote-access', 'identity.json');
     writeFileSync(file, JSON.stringify({ id: initial.id, name: '电脑' }));
     assert.deepEqual(computerIdentity(home), { id: initial.id, name: systemName });

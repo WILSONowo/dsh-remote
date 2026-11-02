@@ -6,9 +6,11 @@ import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
+import com.dsh.mobile.ui.components.*
+import androidx.compose.ui.text.font.FontWeight
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -23,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,8 +70,12 @@ fun SettingsScreen(
     onUpgrade: () -> Unit,
     onOpenMarket: () -> Unit,
     onDisconnect: () -> Unit,
+    onConnections: () -> Unit = {},
 ) {
     val connState by connection.state.collectAsState()
+    val remoteReady = connState is DshConnection.State.Connected && connection.currentProfile()?.paired == true
+    var category by rememberSaveable { mutableStateOf<String?>(null) }
+    val categoryScroll = rememberScrollState()
     val context = LocalContext.current
     val settingsStore = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
@@ -77,14 +84,24 @@ fun SettingsScreen(
     var notifyApprovals by remember { mutableStateOf(true) }
     var notifyCompletion by remember { mutableStateOf(true) }
     var themeMode by remember { mutableStateOf("blue") }
-    var autoModel by remember { mutableStateOf(true) }
+    var autoModel by remember { mutableStateOf(false) }
     var uiFont by remember { mutableStateOf("") }
     var codeFont by remember { mutableStateOf("") }
     var fontPicker by remember { mutableStateOf<String?>(null) } // "ui" / "code"
     var showLicenses by remember { mutableStateOf(false) }
     var notifGranted by remember { mutableStateOf(true) }
     var themeImportError by remember { mutableStateOf<String?>(null) }
-    var showAppearanceDetail by remember { mutableStateOf(false) }
+    var showAppearanceDetail by rememberSaveable { mutableStateOf(false) }
+    var showThemePicker by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(category, showAppearanceDetail) { categoryScroll.scrollTo(0) }
+    fun goBack() {
+        when {
+            showAppearanceDetail -> showAppearanceDetail = false
+            category != null -> category = null
+            else -> onBack()
+        }
+    }
+    BackHandler(enabled = category != null || showAppearanceDetail) { goBack() }
     var biometricEnabled by remember { mutableStateOf(false) }
     var deviceName by remember { mutableStateOf("") }
     val customThemes by ThemeRepository.themes.collectAsState()
@@ -99,21 +116,24 @@ fun SettingsScreen(
     val themePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         themeImportError = null
-        val bytes = runCatching {
-            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull()
-        if (bytes == null || bytes.isEmpty()) {
-            themeImportError = "无法读取主题文件"
-            return@rememberLauncherForActivityResult
+        scope.launch {
+            val imported = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val bytes = runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                }.getOrNull()
+                if (bytes == null || bytes.isEmpty()) null to false
+                else ThemeRepository.importPayload(bytes, context) to true
+            }
+            val (def, readable) = imported
+            if (!readable) {
+                themeImportError = "无法读取主题文件"
+            } else if (def == null) {
+                themeImportError = "主题格式无效（zip 包需含 theme.json；JSON 需完整色板，格式见 docs/theme-package-format.md）"
+            } else {
+                themeMode = def.id
+                settingsStore.setThemeMode(def.id)
+            }
         }
-        // 自动识别：PK 魔数 = zip 主题包，否则按 JSON 文本
-        val def = ThemeRepository.importPayload(bytes, context)
-        if (def == null) {
-            themeImportError = "主题格式无效（zip 包需含 theme.json；JSON 需完整色板，格式见 docs/theme-package-format.md）"
-            return@rememberLauncherForActivityResult
-        }
-        themeMode = def.id
-        scope.launch { settingsStore.setThemeMode(def.id) }
     }
 
     LaunchedEffect(Unit) {
@@ -183,10 +203,11 @@ fun SettingsScreen(
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
-            title = { Text("设置") },
+            title = { Text(if (showAppearanceDetail) "更多外观设置" else category ?: "设置",
+                style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold) },
             navigationIcon = {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
+                IconButton(onClick = ::goBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
                 }
             },
         )
@@ -194,34 +215,53 @@ fun SettingsScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
+                .imePadding()
+                .verticalScroll(categoryScroll)
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("外观", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        "主题模式",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ThemeRegistry.available(customThemes).forEach { t ->
-                            FilterChip(
-                                selected = themeMode == t.id,
-                                onClick = {
-                                    themeMode = t.id
-                                    scope.launch { settingsStore.setThemeMode(t.id) }
-                                },
-                                label = { Text(t.name) },
-                            )
-                        }
-                    }
-                    if (customThemes.isNotEmpty()) {
+            if (category == null) {
+                SettingsGroup {
+                    SettingsRow("外观", { category = "外观" }, icon = Icons.Default.Palette,
+                        value = ThemeRegistry.available(customThemes).firstOrNull { it.id == themeMode }?.name)
+                    SettingsRow("会话", { category = "会话" }, icon = Icons.Default.ChatBubbleOutline)
+                    SettingsRow("提醒", { category = "提醒" }, icon = Icons.Default.NotificationsNone)
+                    SettingsRow("安全", { category = "安全" }, icon = Icons.Default.Shield)
+                }
+                SettingsGroup {
+                    SettingsRow("连接", { category = "连接" }, icon = Icons.Default.Devices)
+                    SettingsRow("保险库", { category = "保险库" }, icon = Icons.Default.Lock)
+                    SettingsRow("MCP 服务", { category = "MCP 服务" }, icon = Icons.Default.Extension)
+                }
+                SettingsGroup {
+                    SettingsRow("关于", { category = "关于" }, icon = Icons.Default.Info)
+                }
+            }
+            if (category == "会话") {
+                SettingsGroup {
+                    SettingsToggle("自适应模型", "按任务难度自动选 Flash / Pro（短问答→Flash，复杂任务→Pro）",
+                        autoModel, { autoModel = it; scope.launch { settingsStore.setAutoModel(it) } })
+                }
+            }
+            if (category == "外观" && !showAppearanceDetail) {
+                SettingsGroup {
+                    SettingsRow("主题模式", { showThemePicker = true },
+                        value = ThemeRegistry.available(customThemes).firstOrNull { it.id == themeMode }?.name)
+                    SettingsRow("界面字体", { fontPicker = "ui" }, value = UI_FONTS.firstOrNull { it.second == uiFont }?.first ?: "默认")
+                    SettingsRow("代码字体", { fontPicker = "code" }, value = CODE_FONTS.firstOrNull { it.second == codeFont }?.first ?: "默认")
+                }
+                SettingsGroup {
+                    SettingsRow(if (appearance.bgUri != null) "更换背景图" else "选择背景图", { bgPicker.launch(arrayOf("image/*")) })
+                    if (appearance.bgUri != null) SettingsRow("移除", { persist(appearance.copy(bgUri = null)) })
+                    SettingsRow("更多外观设置", { showAppearanceDetail = true })
+                }
+                SettingsGroup {
+                    SettingsRow("导入主题 (zip/json)", { themePicker.launch(arrayOf("application/zip", "application/json", "text/plain", "application/octet-stream")) })
+                    SettingsRow("主题市场", onOpenMarket)
+                }
+                themeImportError?.let { Text(it, color = DshError, style = MaterialTheme.typography.bodySmall) }
+                if (customThemes.isNotEmpty()) SettingsGroup {
+                    Column(Modifier.padding(16.dp)) {
                         customThemes.forEach { t ->
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 val preview = remember(t.id) {
@@ -264,372 +304,65 @@ fun SettingsScreen(
                             }
                         }
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedButton(onClick = { themePicker.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/json", "text/plain", "application/octet-stream")) }) {
-                            Icon(Icons.Default.FileOpen, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("导入主题 (zip/json)")
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        OutlinedButton(onClick = onOpenMarket) {
-                            Icon(Icons.Default.Storefront, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("主题市场")
-                        }
-                        themeImportError?.let {
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                it,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = DshError,
-                            )
-                        }
-                    }
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                    )
-                    // 字体设置（对齐 dsh-font 概念：界面字体 + 代码字体分离，即选即生效）
-                    Text(
-                        "字体",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { fontPicker = "ui" }
-                            .padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text("界面字体", style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            UI_FONTS.firstOrNull { it.second == uiFont }?.first ?: "默认",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = DshBrand,
-                        )
-                    }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { fontPicker = "code" }
-                            .padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text("代码字体", style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            CODE_FONTS.firstOrNull { it.second == codeFont }?.first ?: "默认",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = DshBrand,
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { bgPicker.launch(arrayOf("image/*")) }) {
-                            Icon(Icons.Default.Image, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(if (appearance.bgUri != null) "更换背景图" else "选择背景图")
-                        }
-                        if (appearance.bgUri != null) {
-                            OutlinedButton(onClick = { persist(appearance.copy(bgUri = null)) }) {
-                                Text("移除")
-                            }
-                        }
-                    }
-
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("自适应模型", style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                "按任务难度自动选 Flash / Pro（短问答→Flash，复杂任务→Pro）",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Switch(
-                            checked = autoModel,
-                            onCheckedChange = {
-                                autoModel = it
-                                scope.launch { settingsStore.setAutoModel(it) }
-                            },
-                        )
-                    }
-
-                    // 具体外观细节默认折叠，避免设置页冗杂
-                    if (showAppearanceDetail) {
-                        HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 4.dp),
-                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                        )
-                        Text(
-                            "一键预设",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(
-                                BgPreset("通透玻璃", 80f, 4f, 0.2f, 1.1f),
-                                BgPreset("电影质感", 40f, 0f, 0.55f, 1.2f),
-                                BgPreset("纯净原图", 95f, 0f, 0.08f, 1f),
-                                BgPreset("柔和梦境", 65f, 12f, 0.25f, 1.05f),
-                            ).forEach { (name, glass, blur, dim, saturate) ->
-                                AssistChip(
-                                    onClick = {
-                                        persist(
-                                            appearance.copy(
-                                                bgOpacity = 1f,
-                                                bgBlur = blur,
-                                                bgDim = dim,
-                                                bgSaturate = saturate,
-                                                panelGlass = glass,
-                                            ),
-                                        )
-                                    },
-                                    label = { Text(name, style = MaterialTheme.typography.labelSmall) },
-                                )
-                            }
-                        }
-                        Text(
-                            "图像不透明度：${(appearance.bgOpacity * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Slider(
-                            value = appearance.bgOpacity,
-                            onValueChange = { persist(appearance.copy(bgOpacity = it)) },
-                            valueRange = 0.05f..1f,
-                        )
-                        Text(
-                            "模糊：${appearance.bgBlur.toInt()}px",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Slider(
-                            value = appearance.bgBlur,
-                            onValueChange = { persist(appearance.copy(bgBlur = it)) },
-                            valueRange = 0f..30f,
-                        )
-                        Text(
-                            "蒙层浓度：${(appearance.bgDim * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Slider(
-                            value = appearance.bgDim,
-                            onValueChange = { persist(appearance.copy(bgDim = it)) },
-                            valueRange = 0f..0.85f,
-                        )
-                        Text(
-                            "饱和度：${(appearance.bgSaturate * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Slider(
-                            value = appearance.bgSaturate,
-                            onValueChange = { persist(appearance.copy(bgSaturate = it)) },
-                            valueRange = 0.5f..1.5f,
-                        )
-                        Text(
-                            "面板通透：${appearance.panelGlass.toInt()}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Slider(
-                            value = appearance.panelGlass,
-                            onValueChange = { persist(appearance.copy(panelGlass = it)) },
-                            valueRange = 0f..100f,
-                        )
-                        Text(
-                            "屏幕亮度：${(appearance.brightness * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Slider(
-                            value = appearance.brightness,
-                            onValueChange = { persist(appearance.copy(brightness = it)) },
-                            valueRange = 0.4f..1f,
-                        )
-                        Text(
-                            "背景图满清晰度显示，蒙层独立压暗/提亮保证文字可读；面板通透越高界面越透明。亮度调低 = 夜间模式（整屏变暗，不挡操作）",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-
-                    // 折叠开关：卡片最底部的向下/向上小箭头
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                    )
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showAppearanceDetail = !showAppearanceDetail },
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center,
-                    ) {
-                        Text(
-                            if (showAppearanceDetail) "收起外观细节" else "更多外观设置",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Icon(
-                            if (showAppearanceDetail) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            null,
-                            Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
                 }
             }
-
-            Text("提醒", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("后台审批提醒", style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                "App 在后台时，桌面端请求审批/确认会推送横幅通知（通知栏常驻一个连接小图标）",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Switch(
-                            checked = backgroundNotify,
-                            onCheckedChange = { setBackgroundNotify(it) },
-                        )
-                    }
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("审批与确认提醒", style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                "桌面端请求工具审批/确认时横幅提醒（需上方总开关开启）",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Switch(
-                            checked = notifyApprovals,
-                            onCheckedChange = { setNotifyApprovals(it) },
-                        )
-                    }
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("任务完成提醒", style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                "会话任务执行完成时提醒（独立系统渠道，可单独调铃声/勿扰）",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Switch(
-                            checked = notifyCompletion,
-                            onCheckedChange = { setNotifyCompletion(it) },
-                        )
-                    }
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            if (notifGranted) "通知权限：已开启" else "通知权限：未开启（审批/确认/完成不会弹通知）",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (notifGranted) DshSuccess else MaterialTheme.colorScheme.error,
-                        )
-                        if (!notifGranted) {
-                            TextButton(onClick = { notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }) {
-                                Text("授权")
-                            }
-                        }
-                    }
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                    ) {
-                        TextButton(onClick = { openChannelSettings() }) {
-                            Text("通知渠道设置")
+            if (category == "外观" && showAppearanceDetail) {
+                Text("一键预设", Modifier.padding(start = 8.dp), style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SettingsGroup {
+                    FlowRow(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(
+                            BgPreset("通透玻璃", 80f, 4f, 0.2f, 1.1f),
+                            BgPreset("电影质感", 40f, 0f, 0.55f, 1.2f),
+                            BgPreset("纯净原图", 95f, 0f, 0.08f, 1f),
+                            BgPreset("柔和梦境", 65f, 12f, 0.25f, 1.05f),
+                        ).forEach { (name, glass, blur, dim, saturate) ->
+                            AssistChip(onClick = { persist(appearance.copy(bgOpacity = 1f, bgBlur = blur,
+                                bgDim = dim, bgSaturate = saturate, panelGlass = glass)) }, label = { Text(name) })
                         }
                     }
                 }
-            }
+                SettingsGroup {
+                    SettingsSlider("图像不透明度", "${(appearance.bgOpacity * 100).toInt()}%", appearance.bgOpacity, 0.05f..1f) { persist(appearance.copy(bgOpacity = it)) }
+                    SettingsSlider("模糊", "${appearance.bgBlur.toInt()}px", appearance.bgBlur, 0f..30f) { persist(appearance.copy(bgBlur = it)) }
+                    SettingsSlider("蒙层浓度", "${(appearance.bgDim * 100).toInt()}%", appearance.bgDim, 0f..0.85f) { persist(appearance.copy(bgDim = it)) }
+                    SettingsSlider("饱和度", "${(appearance.bgSaturate * 100).toInt()}%", appearance.bgSaturate, 0.5f..1.5f) { persist(appearance.copy(bgSaturate = it)) }
+                }
+                SettingsGroup {
+                    SettingsSlider("面板通透", "${appearance.panelGlass.toInt()}%", appearance.panelGlass, 0f..100f) { persist(appearance.copy(panelGlass = it)) }
+                    SettingsSlider("屏幕亮度", "${(appearance.brightness * 100).toInt()}%", appearance.brightness, 0.4f..1f) { persist(appearance.copy(brightness = it)) }
+                }
 
-            Text("安全", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("生物锁", style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                if (biometricAvailable) "回到前台需生物识别验证后才能操控电脑" else "此设备无可用生物识别",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Switch(
-                            checked = biometricAvailable && biometricEnabled,
-                            enabled = biometricAvailable,
-                            onCheckedChange = {
-                                biometricEnabled = it
-                                scope.launch { settingsStore.setBiometricLock(it) }
-                            },
-                        )
+            }
+            if (category == "提醒") {
+                SettingsGroup {
+                    SettingsToggle("后台审批提醒", "App 在后台时，桌面端请求审批/确认会推送横幅通知（通知栏常驻一个连接小图标）",
+                        backgroundNotify, ::setBackgroundNotify)
+                    SettingsToggle("审批与确认提醒", "桌面端请求工具审批/确认时横幅提醒（需上方总开关开启）",
+                        notifyApprovals, ::setNotifyApprovals)
+                    SettingsToggle("任务完成提醒", "会话任务执行完成时提醒（独立系统渠道，可单独调铃声/勿扰）",
+                        notifyCompletion, ::setNotifyCompletion)
+                }
+                SettingsGroup {
+                    Column(Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
+                        Text(if (notifGranted) "通知权限：已开启" else "通知权限：未开启（审批/确认/完成不会弹通知）",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (notifGranted) DshSuccess else MaterialTheme.colorScheme.error)
+                        if (!notifGranted) TextButton(onClick = { notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("授权") }
                     }
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                    )
+                    SettingsRow("通知渠道设置", ::openChannelSettings)
+                }
+            }
+            if (category == "安全") {
+                SettingsGroup {
+                    SettingsToggle("生物锁", if (biometricAvailable) "回到前台需生物识别验证后才能操控电脑" else "此设备无可用生物识别",
+                        biometricAvailable && biometricEnabled, {
+                            biometricEnabled = it
+                            scope.launch { settingsStore.setBiometricLock(it) }
+                        }, enabled = biometricAvailable)
+                }
+                SettingsGroup {
+                    Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = deviceName,
                         onValueChange = {
@@ -646,11 +379,11 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    }
                 }
             }
-
-            Text("连接", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
+            if (category == "连接") {
+            SettingsGroup {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
@@ -670,7 +403,7 @@ fun SettingsScreen(
                         Spacer(Modifier.width(10.dp))
                         Text(
                             when (connState) {
-                                is DshConnection.State.Connected -> "已连接 " + (connState as DshConnection.State.Connected).baseUrl
+                                is DshConnection.State.Connected -> "已连接 " + connection.currentProfile()?.let { it.remark.ifBlank { it.deviceModel } }.orEmpty()
                                 is DshConnection.State.Error -> "连接错误"
                                 is DshConnection.State.Connecting -> "连接中…"
                                 else -> "未连接"
@@ -682,7 +415,7 @@ fun SettingsScreen(
                     OutlinedButton(
                         onClick = onDisconnect,
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = connState is DshConnection.State.Connected,
+                        enabled = connState !is DshConnection.State.Disconnected,
                     ) {
                         Icon(Icons.Default.PowerSettingsNew, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
@@ -692,14 +425,14 @@ fun SettingsScreen(
             }
 
             Text("连接说明", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
+            SettingsGroup {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        "1. 直连：选择「直连」，填写电脑的 DeepSeek Harness 地址（如 192.168.1.100:8787）。手机需要能访问该地址。\n" +
-                            "2. 自建中转：维护者一次性部署后端并启用自动注册。电脑插件填写 HTTPS 服务器地址和电脑名称，启用在线服务，身份与凭证自动保存。\n" +
-                            "3. 电脑点击「添加手机」，手机首页扫码或粘贴临时连接信息，再在电脑确认。每台手机分别配对，不需要手填主机 ID 或凭证。\n" +
-                            "4. 直连可在电脑的 DeepSeek Harness「设置 → 远程控制」生成 6 位配对码，在手机输入；也可选择「等待电脑确认」。旧手动中转记录需删除后重新扫码。\n" +
-                            "5. 服务器中转必须校验 HTTPS 证书，自签名证书需导入 CA。中转服务器能读取转发内容，请使用可信服务器；电脑需保持在线。",
+                        "1. IP 直连：选择「IP 直连」，填写电脑的 DeepSeek Harness 地址（如 192.168.1.100:8787）。手机需要能访问该地址。\n" +
+                            "2. 服务器：电脑插件填写 HTTPS 服务器地址并保存。开启「允许连接」后，电脑身份自动注册。\n" +
+                            "3. 电脑点击「添加 → 服务器连接」，手机首页扫码或粘贴临时连接信息，再在电脑确认。每台手机分别配对，不需要手填主机 ID 或凭证。\n" +
+                            "4. 配对码直连：电脑打开「远程控制 → 添加 → 配对码直连」，设备在「添加电脑 → 配对码直连」自动搜索，选择电脑并输入 6 位码。需在同一局域网；搜索不到时可用 IP 直连或扫码。旧手动服务器记录需删除后重新扫码。\n" +
+                            "5. 服务器连接必须校验 HTTPS 证书，自签名证书需导入 CA。服务器能读取转发内容，请使用可信服务器；电脑需保持在线。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         lineHeight = MaterialTheme.typography.bodySmall.lineHeight * 1.6,
@@ -708,10 +441,16 @@ fun SettingsScreen(
             }
 
             Text("远程控制", style = MaterialTheme.typography.titleMedium)
-            M4TokenSection(connection, settingsStore, scope)
+            if (remoteReady) M4TokenSection(connection, settingsStore, scope)
+            else OutlinedButton(onClick = onConnections) { Text("连接") }
 
-            Text("关于", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
+            }
+            if (category == "关于") {
+            SettingsGroup {
+                SettingsRow("Pro 订阅（趣味彩蛋）", onUpgrade, value = "¥0.00", icon = Icons.Default.WorkspacePremium)
+            }
+            Text("关于应用", style = MaterialTheme.typography.titleMedium)
+            SettingsGroup {
                 Column(modifier = Modifier.padding(16.dp)) {
                     // 版本号从系统包信息读取，避免硬编码不同步
                     val versionName = remember {
@@ -721,35 +460,9 @@ fun SettingsScreen(
                     }
                     SettingInfoRow("应用", "DSH Remote v$versionName")
                     UpdateSection(currentVersion = versionName, context = context, scope = scope)
-                    // 趣味彩蛋入口：假 Pro 订阅中心
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onUpgrade() }
-                            .padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Default.WorkspacePremium,
-                                null,
-                                Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                "Pro 订阅（趣味彩蛋）",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Text(
-                            "¥0.00",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
+                    SettingInfoRow("更新地址", "WILSONowo/dsh-remote", onClick = {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(UpdateChecker.RELEASES_URL)))
+                    })
                     SettingInfoRow("协议", "dsh-api (client-request / WS+SSE mux)")
                     SettingInfoRow("后端", "DeepSeek Harness")
                     SettingInfoRow("主题", "DeepSeek Harness 浅色/深色 · 背景图/蒙层/面板通透可调")
@@ -759,8 +472,14 @@ fun SettingsScreen(
             // 保险库（dsh-encrypt 联动）：手机端输入密码解锁 PC 端凭证保险库——与 web 端走同一路由
             // （/api/credentials.unlock），密码本地 SHA3-256 后仅上传摘要，明文不上行；
             // 解锁为进程全局状态，手机解锁后 PC web 端同步解锁。未装 dsh-encrypt → 「不可用」。
+            }
+            if (category == "保险库") {
+            if (!remoteReady) {
+                Text("未连接", style = MaterialTheme.typography.bodyMedium)
+                OutlinedButton(onClick = onConnections) { Text("连接") }
+            } else {
             Text("保险库", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
+            SettingsGroup {
                 Column(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -845,8 +564,15 @@ fun SettingsScreen(
 
             // MCP 服务（S5）：PC 插件 mcp/list 枚举的 MCP 服务与工具（serverName + 工具数徽章；
             // 上游无连接态 API，status 恒 unknown → 显示「连接状态未知」）；未连接/空 → 「无 MCP 服务」
+            }
+            }
+            if (category == "MCP 服务") {
+            if (!remoteReady) {
+                Text("未连接", style = MaterialTheme.typography.bodyMedium)
+                OutlinedButton(onClick = onConnections) { Text("连接") }
+            } else {
             Text("MCP 服务", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
+            SettingsGroup {
                 Column(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -906,7 +632,7 @@ fun SettingsScreen(
             }
 
             Text("MCP 资源 / 提示词", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
+            SettingsGroup {
                 val connected = connState is DshConnection.State.Connected
                 var resList by remember { mutableStateOf<List<McpResourceServer>?>(null) }
                 var promList by remember { mutableStateOf<List<McpPromptServer>?>(null) }
@@ -940,8 +666,11 @@ fun SettingsScreen(
                 }
             }
 
+            }
+            }
+            if (category == "关于") {
             Text("开发人员", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
+            SettingsGroup {
                 Column(modifier = Modifier.padding(16.dp)) {
                     SettingInfoRow("上游作者", "残星会·虚质空间分部 达妮娅同学、Yauntyours")
                     SettingInfoRow("上游作者 B站", "最喜欢达妮娅了")
@@ -958,6 +687,7 @@ fun SettingsScreen(
                     )
                     TextButton(onClick = { showLicenses = true }) { Text("查看许可与素材署名") }
                 }
+            }
             }
         }
     }
@@ -981,12 +711,23 @@ fun SettingsScreen(
         )
     }
 
+    if (showThemePicker) SettingsChoiceDialog(
+        title = "主题模式", options = ThemeRegistry.available(customThemes).map { it.name to it.id }, current = themeMode,
+        onDismiss = { showThemePicker = false }, onPick = {
+            themeMode = it; scope.launch { settingsStore.setThemeMode(it) }; showThemePicker = false
+        })
+
     // 字体选择对话框（UI 字体 / 代码字体）
     fontPicker?.let { kind ->
-        FontPickerDialog(
+        SettingsChoiceDialog(
             title = if (kind == "ui") "界面字体" else "代码字体",
             options = if (kind == "ui") UI_FONTS else CODE_FONTS,
             current = if (kind == "ui") uiFont else codeFont,
+            fontForOption = { family ->
+                if (family.isEmpty()) null else runCatching {
+                    androidx.compose.ui.text.font.FontFamily(android.graphics.Typeface.create(family, android.graphics.Typeface.NORMAL))
+                }.getOrNull()
+            },
             onDismiss = { fontPicker = null },
             onPick = { family ->
                 if (kind == "ui") {
@@ -1040,7 +781,7 @@ private fun M4TokenSection(
 
     fun rpc(): HttpPairingRpc? = profile?.let { HttpPairingRpc(connection, OkHttpClientFactory.build(it).first) }
 
-    Card(modifier = Modifier.fillMaxWidth()) {
+    SettingsGroup {
         Column(modifier = Modifier.padding(16.dp)) {
             Text("令牌管理", style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.height(4.dp))
@@ -1120,53 +861,6 @@ private fun M4TokenSection(
     }
 }
 
-@Composable
-private fun FontPickerDialog(
-    title: String,
-    options: List<Pair<String, String>>,
-    current: String,
-    onDismiss: () -> Unit,
-    onPick: (String) -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 420.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                options.forEach { (label, family) ->
-                    val font = if (family.isEmpty()) null
-                    else runCatching {
-                        androidx.compose.ui.text.font.FontFamily(
-                            android.graphics.Typeface.create(family, android.graphics.Typeface.NORMAL),
-                        )
-                    }.getOrNull()
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onPick(family) }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioButton(selected = current == family, onClick = { onPick(family) })
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            label,
-                            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = font),
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
-    )
-}
-
-/** 背景一键预设（与桌面端 dsh-beautify 同名模板对齐） */
 private data class BgPreset(
     val name: String,
     val glass: Float,
@@ -1176,12 +870,15 @@ private data class BgPreset(
 )
 
 @Composable
-private fun SettingInfoRow(label: String, value: String) {
+private fun SettingInfoRow(label: String, value: String, onClick: (() -> Unit)? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .heightIn(min = 48.dp)
+            .padding(vertical = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             label,
@@ -1190,7 +887,9 @@ private fun SettingInfoRow(label: String, value: String) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(value, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
-            textAlign = androidx.compose.ui.text.style.TextAlign.End)
+            textAlign = androidx.compose.ui.text.style.TextAlign.End,
+            color = if (onClick != null) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+            maxLines = if (onClick != null) 1 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1259,7 +958,7 @@ private fun UpdateSection(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .heightIn(min = 48.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {

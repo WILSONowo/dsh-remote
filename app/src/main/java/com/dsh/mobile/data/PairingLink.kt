@@ -3,6 +3,8 @@ package com.dsh.mobile.data
 import java.net.URI
 import java.util.Base64
 import java.util.UUID
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -35,7 +37,9 @@ data class PairingLink(
             val uri = URI(raw.trim())
             require(uri.scheme == "dshremote" && uri.host == "pair" && uri.userInfo == null &&
                 uri.port == -1 && uri.path.isNullOrEmpty() && uri.query == null) { "请扫描电脑插件生成的配对二维码" }
-            val payload = Json.decodeFromString<PairingLink>(String(Base64.getUrlDecoder().decode(uri.rawFragment), Charsets.UTF_8))
+            val fragment = requireNotNull(uri.rawFragment) { "缺少连接信息" }
+            val payload = if (fragment.startsWith("2.")) decodeCompact(fragment.substring(2))
+                else Json.decodeFromString<PairingLink>(String(Base64.getUrlDecoder().decode(fragment), Charsets.UTF_8))
             require(payload.v == 1) { "连接信息版本不支持，请更新 App" }
             require(payload.expiresAt > now && payload.expiresAt - now <= 300_000) { "连接信息已过期或时间异常，请在电脑重新生成并检查两端时间" }
             require(Regex("[a-f0-9]{64}").matches(payload.ticket)) { "连接信息无效" }
@@ -43,6 +47,31 @@ data class PairingLink(
             require(payload.name.isNotBlank() && payload.name.length <= 64 && payload.name.none { it.code < 32 || it.code == 127 }) { "电脑名称无效" }
             payload.profile().connectionUrl() // Enforce strict HTTPS and opaque host-ID validation.
             return payload
+        }
+
+        /** Big-endian v2 fields: expiry, host ID bytes, computer UUID bytes, ticket, length-prefixed UTF-8 strings. */
+        private fun decodeCompact(encoded: String): PairingLink {
+            require(encoded.matches(Regex("[A-Za-z0-9_-]+"))) { "连接信息编码无效" }
+            val bytes = Base64.getUrlDecoder().decode(encoded)
+            require(bytes.size in 76..2380) { "连接信息长度无效" }
+            val buffer = ByteBuffer.wrap(bytes)
+            fun hex(size: Int): String = ByteArray(size).also { buffer.get(it) }.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            fun text(maxBytes: Int): String {
+                require(buffer.remaining() >= 2) { "连接信息不完整" }
+                val length = buffer.short.toInt() and 0xffff
+                require(length in 1..maxBytes && length <= buffer.remaining()) { "连接信息长度无效" }
+                val value = ByteArray(length).also { buffer.get(it) }
+                return Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(value)).toString()
+            }
+            val expiry = buffer.long
+            val host = hex(16)
+            val computer = hex(16).let { "${it.substring(0, 8)}-${it.substring(8, 12)}-${it.substring(12, 16)}-${it.substring(16, 20)}-${it.substring(20)}" }
+            val ticket = hex(32)
+            val server = text(2048)
+            val name = text(256)
+            require(!buffer.hasRemaining()) { "连接信息包含额外内容" }
+            return PairingLink(1, server, host, computer, name, ticket, expiry)
         }
     }
 }

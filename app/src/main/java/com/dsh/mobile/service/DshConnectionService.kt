@@ -1,5 +1,8 @@
 package com.dsh.mobile.service
 
+import kotlinx.coroutines.flow.combine
+import com.dsh.mobile.data.computerScope
+
 import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -109,9 +112,13 @@ class DshConnectionService : Service() {
                 return@launch
             }
             // 跟随活跃主机：切换即重启 watcher（单活跃语义）
-            settings.activeProfileId
-                .distinctUntilChanged()
-                .collect { activeId ->
+            combine(settings.activeProfileId, settings.profiles) { activeId, profiles ->
+                profiles.firstOrNull { it.id == activeId }
+            }.distinctUntilChanged { old, new ->
+                fun comparable(p: com.dsh.mobile.data.HostProfile?) = p?.copy(lastUsedAt = 0,
+                    lastErrorCode = null, remark = "", deviceModel = "", autoConnect = false)
+                comparable(old) == comparable(new)
+            }.collect { profile ->
                     eventsJob?.cancel()
                     stateJob?.cancel()
                     pairingJob?.cancel()
@@ -119,14 +126,13 @@ class DshConnectionService : Service() {
                     watcher = null
                     seenApprovals.clear()
                     seenQuestions.clear()
+                    notificationIds.values.forEach { notificationManager().cancel(it) }
                     notificationIds.clear()
                     sessionActive.clear()
                     completionJobs.values.forEach { it.cancel() }
                     completionJobs.clear()
 
-                    val profile = if (activeId == null) null else
-                        settings.profiles.first().firstOrNull { it.id == activeId }
-                    if (profile == null || runCatching { profile.connectionUrl() }.isFailure) {
+                    if (profile == null || !profile.paired || runCatching { profile.connectionUrl() }.isFailure) {
                         updateForegroundText("未选择活跃主机")
                         return@collect
                     }
@@ -279,7 +285,11 @@ class DshConnectionService : Service() {
         val manager = notificationManager()
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            if (sessionId != null) putExtra("open_session", sessionId)
+            if (sessionId != null) {
+                putExtra("open_session", sessionId)
+                putExtra("open_profile", watcher?.currentProfile()?.id)
+                putExtra("open_computer", watcher?.currentProfile().computerScope())
+            }
         }
         val notification = Notification.Builder(this, channelId)
             .setContentTitle(title)
@@ -289,7 +299,7 @@ class DshConnectionService : Service() {
             .setPriority(Notification.PRIORITY_HIGH)
             .setContentIntent(
                 PendingIntent.getActivity(
-                    this, (1000 + sessionId.hashCode()).coerceAtLeast(0),
+                    this, (watcher?.currentProfile().computerScope() + sessionId).hashCode() and Int.MAX_VALUE,
                     intent,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 )

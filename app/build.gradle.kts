@@ -11,21 +11,24 @@ val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
+val uiTestBuild = providers.gradleProperty("DSH_UI_TEST_BUILD").orNull == "true"
+
 val releaseStoreFile = localProps.getProperty("release.storeFile")
 val hasReleaseSigning = !releaseStoreFile.isNullOrBlank()
 
 // 版本号统管：由根 gradle.properties 提供（避免散落硬编码，CI 可按 tag 覆盖）
 val dsvVersionName =
-    (project.findProperty("DSH_VERSION_NAME") as String?)?.takeIf { it.isNotBlank() } ?: "1.8.1"
+    (project.findProperty("DSH_VERSION_NAME") as String?)?.takeIf { it.isNotBlank() } ?: "3.2.0"
 val dsvVersionCode =
-    ((project.findProperty("DSH_VERSION_CODE") as String?)?.takeIf { it.isNotBlank() } ?: "60").toInt()
+    ((project.findProperty("DSH_VERSION_CODE") as String?)?.takeIf { it.isNotBlank() } ?: "64").toInt()
 
 android {
     namespace = "com.dsh.mobile"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.dsh.mobile"
+        applicationId = if (uiTestBuild) "com.dsh.mobile.uitest" else "com.dsh.mobile"
+        buildConfigField("boolean", "UI_TEST_BUILD", uiTestBuild.toString())
         minSdk = 29
         targetSdk = 36
         versionCode = dsvVersionCode
@@ -71,8 +74,17 @@ android {
         jvmTarget = "17"
     }
 
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+        unitTests.all {
+            it.systemProperty("robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2")
+            it.maxHeapSize = "2g"
+        }
+    }
+
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -93,10 +105,16 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.coroutines.android)
-    implementation(libs.zxing.android.embedded)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.mlkit.barcode)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.biometric)
     debugImplementation(libs.androidx.ui.tooling)
+    testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
 }

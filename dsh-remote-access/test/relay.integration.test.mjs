@@ -1,3 +1,4 @@
+import { decodePairingTestLink } from './pairing-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -94,7 +95,7 @@ async function fixture(t, secure = false) {
   const base = url + '/h/' + hostId;
   async function pair(id) {
     const qr = await json(localUrl, '/api/remote-access/relay/pairing', {});
-    const ticket = JSON.parse(Buffer.from(qr.body.link.split('#')[1], 'base64url')).ticket;
+    const ticket = decodePairingTestLink(qr.body.link).ticket;
     const headers = { 'X-DSH-Pairing-Secret': randomBytes(32).toString('hex') };
     assert.equal((await json(base, '/api/remote-access/pair/request', { deviceId: id, deviceName: id, ticket }, undefined, headers)).body.state, 'pending');
     await json(localUrl, '/api/remote-access/pair/respond', { deviceId: id, outcome: 'approve' });
@@ -119,7 +120,7 @@ test('自动注册与扫码：无服务器逐机配置，多手机独立确认�
   async function qr() {
     const r = await f.json(f.localUrl, '/api/remote-access/relay/pairing', {});
     assert.equal(r.body.ok, true); assert.match(r.body.image, /^data:image\/png;base64,/);
-    return JSON.parse(Buffer.from(r.body.link.split('#')[1], 'base64url').toString());
+    return decodePairingTestLink(r.body.link);
   }
   const first = await qr();
   assert.equal(first.server, f.url); assert.equal(first.hostId, f.hostId);
@@ -250,4 +251,30 @@ test('中转断线会关闭活动请求，重连不重放写操作；禁用中�
   await f.configure(false); await until(() => !f.relay.online.has(f.hostId));
   assert.equal((await fetch(f.base + '/api/echo')).status, 503);
   assert.equal(await (await fetch(f.localUrl + '/api/echo', { method: 'POST', headers: { ...headers, 'X-Forwarded-For': 'remote' }, body: 'direct' })).text(), 'direct');
+});
+
+
+test('global switch disconnects direct and server streams, stops registration, and reuses existing pairings', { skip: !backend && 'Set DSH_RELAY_BACKEND', timeout: 20000 }, async t => {
+  const f = await fixture(t), token = await f.pair('switch-phone');
+  const headers = { Authorization: 'Bearer ' + token, 'X-Forwarded-For': 'synthetic-remote' };
+  const ws = new WebSocket(f.localUrl.replace('http:', 'ws:') + '/api/events.mux', { headers });
+  await once(ws, 'open'); t.after(() => ws.terminate());
+  const controller = new AbortController(); t.after(() => controller.abort());
+  const sse = await fetch(f.base + '/api/events.host', { headers: { Authorization: 'Bearer ' + token }, signal: controller.signal });
+  const reader = sse.body.getReader(); await reader.read();
+  const wsClosed = once(ws, 'close');
+  assert.equal((await f.json(f.localUrl, '/api/remote-access/access/settings', { allowConnections: false })).body.allowConnections, false);
+  await wsClosed; await until(() => f.relay.online.size === 0);
+  await assert.rejects(async () => { while (!(await reader.read()).done) {} throw new Error('ended'); });
+  assert.equal((await f.json(f.localUrl, '/api/remote-access/device/info', undefined, token, { 'X-Forwarded-For': 'synthetic-remote' })).status, 503);
+  assert.equal((await f.json(f.localUrl, '/api/remote-access/pair/request', { deviceId: 'blocked' }, undefined, { 'X-Forwarded-For': 'synthetic-remote' })).status, 503);
+  assert.equal((await f.json(f.localUrl, '/api/remote-access/relay/pairing', {})).status, 409);
+  const before = (await f.json(f.localUrl, '/api/remote-access/pair/list')).body.devices;
+  assert.equal(before.length, 1); assert.ok(before[0].lastConnectedAt);
+  // Saving server settings while disabled cannot bring the server channel online.
+  await f.configure(true); assert.equal(f.relay.online.size, 0);
+  await f.json(f.localUrl, '/api/remote-access/access/settings', { allowConnections: true });
+  await until(() => f.relay.online.has(f.hostId));
+  assert.equal((await f.json(f.base, '/api/remote-access/device/info', undefined, token)).status, 200);
+  assert.equal((await f.json(f.localUrl, '/api/remote-access/device/info', undefined, token, { 'X-Forwarded-For': 'synthetic-remote' })).status, 200);
 });

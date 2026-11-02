@@ -281,9 +281,29 @@ class SettingsStore(
         }
     }
 
-    /** 自适应模型：按任务难度自动选择 Flash / Pro（默认开） */
+    fun workspaceId(scope: String): Flow<String> = context.dataStore.data.map {
+        it[stringPreferencesKey("workspace_$scope")] ?: ""
+    }
+
+    suspend fun setWorkspaceId(id: String, scope: String) {
+        context.dataStore.edit { it[stringPreferencesKey("workspace_$scope")] = id }
+    }
+
+    fun pinnedSessionIds(scope: String): Flow<Set<String>> = context.dataStore.data.map {
+        decodePinnedIds(it[stringPreferencesKey("pinned_$scope")])
+    }
+
+    suspend fun setPinned(id: String, pinned: Boolean, scope: String) {
+        context.dataStore.edit {
+            val key = stringPreferencesKey("pinned_$scope")
+            val ids = decodePinnedIds(it[key])
+            it[key] = encodePinnedIds(if (pinned) ids + id else ids - id)
+        }
+    }
+
+    /** 自适应模型：按任务难度自动选择 Flash / Pro（默认关） */
     val autoModel: Flow<Boolean> = context.dataStore.data.map { prefs ->
-        prefs[AUTO_MODEL_KEY] ?: true
+        prefs[AUTO_MODEL_KEY] ?: false
     }
 
     suspend fun setAutoModel(enabled: Boolean) {
@@ -361,7 +381,8 @@ internal fun encryptProfileForStorage(p: HostProfile, box: SecretBox): HostProfi
     }
     // 通道 token 与代理密码同规格加密（空值跳过；已是密文形态不再二次加密）
     val tk = p.channelToken
-    if (!tk.isBlank() && !isCiphertextShape(tk)) {
+    // A 64-character hex access token is also valid Base64 syntax; it is still plaintext.
+    if (tk.isNotBlank() && (tk.matches(Regex("[a-f0-9]{64}")) || !isCiphertextShape(tk))) {
         out = out.copy(channelToken = box.encrypt(tk))
     }
     return out

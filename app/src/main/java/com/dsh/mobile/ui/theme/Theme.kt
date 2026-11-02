@@ -87,13 +87,31 @@ fun surfaceAlphaFor(glass: Float, isBg: Boolean = true): Triple<Float, Float, Fl
     return Triple(bgAlpha, l1Alpha, l2Alpha)
 }
 
+/** Keep accent text readable on cards while retaining the theme hue. */
+internal fun readableAccent(color: Color, surface: Color): Color {
+    fun contrast(candidate: Color): Float {
+        val a = candidate.luminance() + 0.05f
+        val b = surface.luminance() + 0.05f
+        return maxOf(a, b) / minOf(a, b)
+    }
+    if (contrast(color) >= 4.5f) return color
+    val target = if (surface.luminance() < 0.179f) Color.White else Color.Black
+    var low = 0f
+    var high = 1f
+    repeat(16) {
+        val middle = (low + high) / 2
+        if (contrast(lerp(color, target, middle)) >= 4.5f) high = middle else low = middle
+    }
+    return lerp(color, target, high)
+}
+
 fun applyPalette(theme: ThemeDef, bgActive: Boolean = false, glass: Float = 0f) {
     val (bgA, l1A, l2A) = surfaceAlphaFor(glass, bgActive)
     val c = theme.colors
     DshPalette.bg = c.background.copy(alpha = bgA)
     DshPalette.surface = c.surface.copy(alpha = l1A)
     DshPalette.surfaceHigh = c.surfaceHigh.copy(alpha = l2A)
-    DshPalette.brand = c.brand; DshPalette.brandSoft = c.brandSoft
+    DshPalette.brand = readableAccent(c.brand, c.surfaceHigh); DshPalette.brandSoft = c.brandSoft
     DshPalette.border = c.border; DshPalette.success = c.success
     DshPalette.warn = c.warn; DshPalette.error = c.error
     DshBackground = DshPalette.bg; DshSurface = DshPalette.surface
@@ -340,14 +358,11 @@ private fun dshShapes(style: ThemeStyle): Shapes = when (style) {
     )
 }
 
-/** 品牌色高亮（夜之城 NC 黄 × 霓虹青类）：亮底主按钮/渐变按钮的前景用纯黑，白字看不清 */
-private fun brandBright(theme: ThemeDef): Boolean =
-    theme.colors.brand.luminance() > 0.5f || theme.colors.brandSoft.luminance() > 0.5f
-
 private fun dshColorScheme(theme: ThemeDef, bgActive: Boolean = false, glass: Float = 0f): ColorScheme {
     val (bgA, l1A, l2A) = surfaceAlphaFor(glass, bgActive)
     val c = theme.colors
     val style = theme.style
+    val accent = readableAccent(c.brand, c.surfaceHigh)
     val background = c.background.copy(alpha = bgA)
     val surface = c.surface.copy(alpha = l1A)
     val surfaceVariant = c.surfaceHigh.copy(alpha = l2A)
@@ -355,7 +370,7 @@ private fun dshColorScheme(theme: ThemeDef, bgActive: Boolean = false, glass: Fl
     val lightContainer = if (style == ThemeStyle.DEEPLOOK) Color(0xFF0D1B2A) else Color(0xFFDCE7FB)
     val lightOnContainer = if (style == ThemeStyle.DEEPLOOK) Color(0xFFFFFFFF) else Color(0xFF12275C)
     return if (theme.light) lightColorScheme(
-        primary = c.brand, onPrimary = if (brandBright(theme)) Color(0xFF000000) else Color(0xFFFFFFFF),
+        primary = accent, onPrimary = if (accent.luminance() > 0.179f) Color.Black else Color.White,
         primaryContainer = lightContainer, onPrimaryContainer = lightOnContainer,
         secondary = c.brandSoft, onSecondary = Color(0xFFFFFFFF),
         tertiary = c.warn, onTertiary = Color(0xFF2B2003),
@@ -364,9 +379,14 @@ private fun dshColorScheme(theme: ThemeDef, bgActive: Boolean = false, glass: Fl
         background = background, onBackground = c.textPrimary,
         surface = surface, onSurface = c.textPrimary,
         surfaceVariant = surfaceVariant, onSurfaceVariant = c.textSecondary,
+        surfaceDim = background, surfaceBright = surfaceVariant,
+        surfaceContainerLowest = background, surfaceContainerLow = surface,
+        surfaceContainer = surface, surfaceContainerHigh = surfaceVariant,
+        surfaceContainerHighest = surfaceVariant,
+        secondaryContainer = lerp(c.surface, c.brand, 0.20f), onSecondaryContainer = c.textPrimary,
         outline = c.border, outlineVariant = Color(0xFFE4EAF3),
     ) else darkColorScheme(
-        primary = c.brand, onPrimary = if (brandBright(theme)) Color(0xFF000000) else Color(0xFF0D1B2A),
+        primary = accent, onPrimary = if (accent.luminance() > 0.179f) Color.Black else Color.White,
         // 容器色从品牌色推导（surface 与 brand 插值）：原硬编码蓝 #1B3A6B 会让
         // Claude 的陶土橙 / ChatGPT 的中性黑等非蓝主题的用户气泡与容器漏出蓝色。
         // 蓝鲸主题下插值结果 ≈ 原 #1B3A6B，视觉不变；其余主题容器色自动随品牌调。
@@ -379,6 +399,11 @@ private fun dshColorScheme(theme: ThemeDef, bgActive: Boolean = false, glass: Fl
         background = background, onBackground = c.textPrimary,
         surface = surface, onSurface = c.textPrimary,
         surfaceVariant = surfaceVariant, onSurfaceVariant = c.textSecondary,
+        surfaceDim = background, surfaceBright = surfaceVariant,
+        surfaceContainerLowest = background, surfaceContainerLow = surface,
+        surfaceContainer = surface, surfaceContainerHigh = surfaceVariant,
+        surfaceContainerHighest = surfaceVariant,
+        secondaryContainer = lerp(c.surface, c.brand, 0.20f), onSecondaryContainer = c.textPrimary,
         outline = c.border, outlineVariant = Color(0xFF23354B),
     )
 }

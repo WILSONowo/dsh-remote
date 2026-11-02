@@ -1,7 +1,6 @@
 package com.dsh.mobile.ui.screens
 
 import android.net.Uri
-import android.util.Base64
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -17,6 +16,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import com.dsh.mobile.ui.components.NewTaskEditor
+import com.dsh.mobile.ui.components.RecentSessionControls
+import com.dsh.mobile.ui.components.rememberVoiceInput
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,6 +32,7 @@ import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,6 +40,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -69,7 +75,7 @@ import kotlinx.serialization.json.*
 import java.text.SimpleDateFormat
 import java.util.*
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
     connection: DshConnection,
@@ -80,11 +86,15 @@ fun HomeScreen(
     onUpgrade: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
+    val recentListState = rememberLazyListState()
+    val compactHeight = LocalConfiguration.current.screenHeightDp < 600
+    val computerScope = connection.currentProfile().computerScope()
     val scope = rememberCoroutineScope()
     var sessions by remember { mutableStateOf<List<SessionSummary>>(emptyList()) }
     var presets by remember { mutableStateOf<List<Pair<String, String>>>(listOf("cordis" to "Cordis")) }
     var preset by remember { mutableStateOf("cordis") }
-    var input by remember { mutableStateOf("") }
+    var input by rememberSaveable(computerScope) { mutableStateOf("") }
+    val voiceInput = rememberVoiceInput { text -> input = if (input.isBlank()) text else input.trimEnd() + " " + text }
     var sending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
     var presetMenu by remember { mutableStateOf(false) }
@@ -100,9 +110,9 @@ fun HomeScreen(
     var stdSearchQuery by remember { mutableStateOf("") }
     val context = LocalContext.current
     val settingsStore = remember { SettingsStore(context) }
-    val cache = remember { HistoryCache(context) }
+    val cache = remember(computerScope) { HistoryCache(context, computerScope) }
     // 置顶会话 id（本地 pin；列表排序置顶在前，长按菜单可切换）
-    val pinnedIds by settingsStore.pinnedSessionIds.collectAsState(initial = emptySet())
+    val pinnedIds by settingsStore.pinnedSessionIds(computerScope).collectAsState(initial = emptySet())
 
     // —— 新对话工作区选择 ——
     var selectedWorkspaceId by remember { mutableStateOf("") }
@@ -187,19 +197,10 @@ fun HomeScreen(
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
             try {
-                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    ?: return@launch
-                if (bytes.size > 4 * 1024 * 1024) {
-                    sendError = "图片超过 4MB"
-                    return@launch
-                }
-                val type = context.contentResolver.getType(uri) ?: "image/png"
-                if (type !in listOf("image/png", "image/jpeg", "image/webp", "image/gif")) {
-                    sendError = "不支持的图片格式: $type"
-                    return@launch
-                }
-                val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                pendingImages = pendingImages + DshConnection.ImagePart(type, b64)
+                val image = readImageAttachment(context.contentResolver, uri) ?: return@launch
+                pendingImages = pendingImages + image
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 sendError = e.message
             }
@@ -213,9 +214,9 @@ fun HomeScreen(
     fun prefetchRecent(list: List<SessionSummary>) {
         scope.launch(Dispatchers.Default) {
             list.take(3).forEach { s ->
-                if (HistoryMemoryCache.history(s.sessionId) == null) {
+                if (!cache.hasHistory(s.sessionId)) {
                     runCatching { connection.history(s.sessionId, maxMessages = 3) }
-                        .getOrNull()?.let { HistoryMemoryCache.putPrefetch(s.sessionId, it) }
+                        .getOrNull()?.let { cache.putPrefetch(s.sessionId, it) }
                 }
             }
         }
@@ -256,7 +257,7 @@ fun HomeScreen(
     LaunchedEffect(Unit) {
         refreshSessions()
         refreshArchived()
-        selectedWorkspaceId = settingsStore.workspaceId.first()
+        selectedWorkspaceId = settingsStore.workspaceId(computerScope).first()
         presets = try {
             val p = connection.agentPresets()
             if (p.isNotEmpty()) p else listOf("cordis" to "Cordis")
@@ -277,6 +278,8 @@ fun HomeScreen(
     val stdFiltered = remember(sessions, pinnedIds, stdSearchQuery) {
         filterSessions(sortSessionsWithPinned(sessions, pinnedIds), stdSearchQuery)
     }
+
+    var recentLimit by remember(stdSearchQuery) { mutableIntStateOf(5) }
 
     // 事件驱动的列表刷新（断线重连成功后立即补拉，避免列表停留在空态）
     LaunchedEffect(Unit) {
@@ -380,12 +383,12 @@ fun HomeScreen(
                     },
                     onPickDefault = {
                         selectedWorkspaceId = ""
-                        scope.launch { settingsStore.setWorkspaceId("") }
+                        scope.launch { settingsStore.setWorkspaceId("", computerScope) }
                         workspaceSheet = false
                     },
                     onPickWorkspace = { id ->
                         selectedWorkspaceId = id
-                        scope.launch { settingsStore.setWorkspaceId(id) }
+                        scope.launch { settingsStore.setWorkspaceId(id, computerScope) }
                         workspaceSheet = false
                     },
                     onCreateWorkspace = { path, title ->
@@ -552,6 +555,8 @@ fun HomeScreen(
                 onPresetMenuChange = { presetMenu = it },
                 pendingImages = pendingImages,
                 onPickImage = { imagePicker.launch("image/*") },
+                onVoice = voiceInput,
+                onPresetSelect = { preset = it },
                 onRemoveImage = { i -> pendingImages = pendingImages.filterIndexed { j, _ -> j != i } },
                 onSessionClick = onSessionClick,
                 onSettings = onSettings,
@@ -579,7 +584,7 @@ fun HomeScreen(
                     }
                 },
                 pinnedIds = pinnedIds,
-                onTogglePin = { id -> scope.launch { settingsStore.setPinned(id, id !in pinnedIds) } },
+                onTogglePin = { id -> scope.launch { settingsStore.setPinned(id, id !in pinnedIds, computerScope) } },
                 onArchive = { s -> archiveTarget = s },
             )
             archiveDialogOverlay()
@@ -605,6 +610,8 @@ fun HomeScreen(
                 onPresetMenuChange = { presetMenu = it },
                 pendingImages = pendingImages,
                 onPickImage = { imagePicker.launch("image/*") },
+                onVoice = voiceInput,
+                onPresetSelect = { preset = it },
                 onRemoveImage = { i -> pendingImages = pendingImages.filterIndexed { j, _ -> j != i } },
                 onNewChat = {
                     input = ""
@@ -636,7 +643,7 @@ fun HomeScreen(
                     }
                 },
                 pinnedIds = pinnedIds,
-                onTogglePin = { id -> scope.launch { settingsStore.setPinned(id, id !in pinnedIds) } },
+                onTogglePin = { id -> scope.launch { settingsStore.setPinned(id, id !in pinnedIds, computerScope) } },
                 onArchive = { s -> archiveTarget = s },
             )
             archiveDialogOverlay()
@@ -664,6 +671,8 @@ fun HomeScreen(
                 onPresetMenuChange = { presetMenu = it },
                 pendingImages = pendingImages,
                 onPickImage = { imagePicker.launch("image/*") },
+                onVoice = voiceInput,
+                onPresetSelect = { preset = it },
                 onRemoveImage = { i -> pendingImages = pendingImages.filterIndexed { j, _ -> j != i } },
                 onSessionClick = onSessionClick,
                 onSettings = onSettings,
@@ -674,7 +683,7 @@ fun HomeScreen(
                     refreshArchived()
                 },
                 pinnedIds = pinnedIds,
-                onTogglePin = { id -> scope.launch { settingsStore.setPinned(id, id !in pinnedIds) } },
+                onTogglePin = { id -> scope.launch { settingsStore.setPinned(id, id !in pinnedIds, computerScope) } },
                 onArchive = { s -> archiveTarget = s },
             )
             // 工作区选择面板覆盖层（DeepLook 分支不渲染 Scaffold，这里单独挂载）
@@ -685,12 +694,108 @@ fun HomeScreen(
         return
     }
 
+    val recentTools: @Composable () -> Unit = {
+        Surface(color = if (DshThemeId == "blue" && recentListState.firstVisibleItemIndex == 0) Color.Transparent
+            else MaterialTheme.colorScheme.background.copy(alpha = 0.96f),
+            contentColor = MaterialTheme.colorScheme.onBackground) {
+            Column(Modifier.fillMaxWidth().testTag("recent_session_tools")) {
+                Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = if (compactHeight) 0.dp else 8.dp, bottom = if (compactHeight) 0.dp else 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("最近会话", style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    IconButton(onClick = {
+                        stdSearchActive = !stdSearchActive
+                        if (!stdSearchActive) stdSearchQuery = ""
+                    }) {
+                        Icon(Icons.Rounded.Search, if (stdSearchActive) "关闭搜索" else "搜索会话")
+                    }
+                    IconButton(onClick = { refreshSessions() }) {
+                        Icon(Icons.Default.Refresh, "刷新")
+                    }
+                }
+                if (stdSearchActive) {
+                    SessionSearchField(query = stdSearchQuery, onQueryChange = { stdSearchQuery = it },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 8.dp)
+                            .testTag("home_session_search"))
+                }
+                listError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 16.dp))
+                }
+            }
+        }
+    }
+
     Scaffold(
+        containerColor = if (DshThemeId == "blue") Color.Transparent else MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        bottomBar = {
+            Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 16.dp, vertical = 8.dp)
+                .testTag("home_task_dock")) {
+                // —— 工作区选择 chip（新对话创建在该工作区，对齐 Web 的 Session Intent hero）——
+                val wsSelected = workspaces.firstOrNull { it.workspaceId == selectedWorkspaceId }
+                val wsLabel = when {
+                    selectedWorkspaceId.isBlank() -> "默认工作区"
+                    wsSelected != null -> wsSelected.title.ifBlank { wsSelected.path }
+                    else -> "工作区 ${selectedWorkspaceId.take(8)}"
+                }
+                AssistChip(
+                    onClick = { workspaceSheet = true },
+                    modifier = Modifier.heightIn(min = 44.dp).widthIn(max = 320.dp).testTag("home_workspace_picker"),
+                    shape = RoundedCornerShape(14.dp),
+                    label = {
+                        Text(
+                            wsLabel,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    },
+                    leadingIcon = {
+                        if (DshThemeId == "blue" || DshThemeId == "warm") {
+                            Image(androidx.compose.ui.res.painterResource(R.drawable.maid_shield), null,
+                                Modifier.size(24.dp).testTag("workspace_theme_decoration"))
+                        } else {
+                            Icon(Icons.Default.Folder, null, Modifier.size(20.dp), tint = DshBrand)
+                        }
+                    },
+                    trailingIcon = {
+                        Icon(Icons.Default.ArrowDropDown, null, Modifier.size(20.dp))
+                    },
+                )
+                Spacer(Modifier.height(10.dp))
+
+                // 待发送图片
+                if (pendingImages.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        pendingImages.forEachIndexed { i, _ ->
+                            AssistChip(
+                                onClick = { pendingImages = pendingImages.filterIndexed { j, _ -> j != i } },
+                                label = { Text("图片 ${i + 1}") },
+                                trailingIcon = {
+                                    Icon(Icons.Default.Close, null, Modifier.size(14.dp))
+                                },
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+
+                NewTaskEditor(input, { input = it },
+                    if (DshThemeStyle == ThemeStyle.CODEX) "> 输入任务指令…" else "描述你的任务…",
+                    sending, input.isNotBlank() || pendingImages.isNotEmpty(), { send() }, voiceInput,
+                    preset, presets, { preset = it }, { imagePicker.launch("image/*") }, sendError)
+            }
+        },
         topBar = {
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("DeepSeek Harness", fontWeight = FontWeight.Bold)
+                        Text("DeepSeek Harness", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Spacer(Modifier.width(10.dp))
                         val dot = when (connState) {
                             is DshConnection.State.Connected -> DshSuccess
@@ -705,21 +810,16 @@ fun HomeScreen(
                 },
                 actions = {
                     PendingBell(pendingCount = pendingCount, onPending = onPending)
-                    IconButton(onClick = { stdSearchActive = !stdSearchActive }) {
-                        Icon(Icons.Rounded.Search, if (stdSearchActive) "关闭搜索" else "搜索会话")
-                    }
-                    IconButton(onClick = onSettings) {
-                        Icon(Icons.Default.Settings, null)
-                    }
                 },
             )
         },
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
+        LazyColumn(
+            state = recentListState,
+            modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).testTag("home_recent_list"),
+            contentPadding = PaddingValues(bottom = 24.dp),
         ) {
+            item(key = "greeting") {
             // —— 新任务输入卡（Trae 首页风格）——
             Column(
                 modifier = Modifier
@@ -766,15 +866,15 @@ fun HomeScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    // 深蓝主题专属：鲸鱼娘女仆立绘（dsh-deep-whale 皮肤资产，CC BY-NC-SA 4.0）
-                    if (DshThemeId == "blue") {
+                    // 内置主题：鲸鱼娘女仆立绘（dsh-deep-whale 皮肤资产，CC BY-NC-SA 4.0）
+                    if (DshThemeId == "blue" || DshThemeId == "warm") {
                         Spacer(Modifier.width(8.dp))
                         Image(
                             painter = androidx.compose.ui.res.painterResource(R.drawable.maid_left),
                             contentDescription = "鲸鱼娘",
                             modifier = Modifier
-                                .width(96.dp)
-                                .height(130.dp)
+                                .width(if (compactHeight) 64.dp else 128.dp)
+                                .height(if (compactHeight) 87.dp else 174.dp)
                                 .graphicsLayer { alpha = 0.95f },
                             contentScale = ContentScale.Fit,
                         )
@@ -810,224 +910,18 @@ fun HomeScreen(
                 }
                 Spacer(Modifier.height(10.dp))
 
-                // —— 工作区选择 chip（新对话创建在该工作区，对齐 Web 的 Session Intent hero）——
-                val wsSelected = workspaces.firstOrNull { it.workspaceId == selectedWorkspaceId }
-                val wsLabel = when {
-                    selectedWorkspaceId.isBlank() -> "默认工作区"
-                    wsSelected != null -> wsSelected.title.ifBlank { wsSelected.path }
-                    else -> "工作区 ${selectedWorkspaceId.take(8)}"
-                }
-                AssistChip(
-                    onClick = { workspaceSheet = true },
-                    label = {
-                        Text(
-                            wsLabel,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(
-                            Icons.Default.Folder,
-                            null,
-                            Modifier.size(16.dp),
-                            tint = DshBrand,
-                        )
-                    },
-                    trailingIcon = {
-                        Icon(Icons.Default.ArrowDropDown, null, Modifier.size(16.dp))
-                    },
-                )
-                Spacer(Modifier.height(10.dp))
 
-                // 待发送图片
-                if (pendingImages.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        pendingImages.forEachIndexed { i, _ ->
-                            AssistChip(
-                                onClick = { pendingImages = pendingImages.filterIndexed { j, _ -> j != i } },
-                                label = { Text("图片 ${i + 1}") },
-                                trailingIcon = {
-                                    Icon(Icons.Default.Close, null, Modifier.size(14.dp))
-                                },
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(6.dp))
-                }
 
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    // 品牌淡色描边：卡片有设计感但不抢内容
-                    border = BorderStroke(1.dp, DshBrand.copy(alpha = if (DshThemeStyle == ThemeStyle.CODEX) 0.45f else 0.22f)),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(Modifier.padding(12.dp)) {
-                        // 卡片头行：任务标签 + 预设选择（对齐 Web 端 hero 卡结构）
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            // 深蓝主题专属：工作区盾徽（dsh-deep-whale 皮肤装饰）
-                            if (DshThemeId == "blue") {
-                                Image(
-                                    painter = androidx.compose.ui.res.painterResource(R.drawable.maid_shield),
-                                    contentDescription = null,
-                                    modifier = Modifier.size(15.dp),
-                                )
-                                Spacer(Modifier.width(6.dp))
-                            }
-                            Text(
-                                if (DshThemeStyle == ThemeStyle.CODEX) "❯ 新任务"
-                                else if (DshThemeStyle == ThemeStyle.CYBERPUNK) "◈ 新任务"
-                                else "新任务",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = DshBrand,
-                            )
-                            Spacer(Modifier.weight(1f))
-                            // 预设选择（限宽：预设名过长时发送键不被挤出屏幕）
-                            Box {
-                                AssistChip(
-                                    onClick = { presetMenu = true },
-                                    modifier = Modifier.widthIn(max = 150.dp),
-                                    label = {
-                                        Text(
-                                            presets.firstOrNull { it.first == preset }?.second ?: preset,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            style = MaterialTheme.typography.labelMedium,
-                                        )
-                                    },
-                                    leadingIcon = {
-                                        Icon(
-                                            Icons.Default.SmartToy,
-                                            null,
-                                            Modifier.size(16.dp),
-                                            tint = DshBrand,
-                                        )
-                                    },
-                                )
-                                DropdownMenu(
-                                    expanded = presetMenu,
-                                    onDismissRequest = { presetMenu = false },
-                                ) {
-                                    presets.forEach { (id, name) ->
-                                        DropdownMenuItem(
-                                            text = { Text(name) },
-                                            onClick = {
-                                                preset = id
-                                                presetMenu = false
-                                            },
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        Spacer(Modifier.height(6.dp))
-                        OutlinedTextField(
-                            value = input,
-                            onValueChange = { input = it },
-                            modifier = Modifier.fillMaxWidth(),
-                            placeholder = {
-                                Text(
-                                    if (DshThemeStyle == ThemeStyle.CODEX) "> 输入任务指令…" else "描述你的任务…",
-                                )
-                            },
-                            minLines = 3,
-                            maxLines = 6,
-                            shape = RoundedCornerShape(12.dp),
-                            keyboardOptions = KeyboardOptions.Default,
-                        )
-                        sendError?.let {
-                            Text(
-                                it,
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(top = 6.dp),
-                            )
-                        }
-                        Spacer(Modifier.height(10.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            // 图片附件
-                            IconButton(onClick = { imagePicker.launch("image/*") }) {
-                                Icon(Icons.Default.AttachFile, null)
-                            }
-                            Spacer(Modifier.weight(1f))
-                            Button(
-                                onClick = { send() },
-                                enabled = (input.isNotBlank() || pendingImages.isNotEmpty()) && !sending,
-                                shape = RoundedCornerShape(14.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color.Transparent,
-                                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                                ),
-                                modifier = Modifier.background(brandGradient(), RoundedCornerShape(14.dp)),
-                            ) {
-                                if (sending) {
-                                    CircularProgressIndicator(
-                                        Modifier.size(18.dp),
-                                        color = MaterialTheme.colorScheme.onPrimary,
-                                        strokeWidth = 2.dp,
-                                    )
-                                } else {
-                                    Icon(Icons.Default.Send, null, Modifier.size(18.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("发送")
-                                }
-                            }
-                        }
-                    }
-                }
             }
 
-            // —— 最近会话 ——
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "最近会话",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = { refreshSessions() }) {
-                    Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("刷新")
-                }
             }
-
-            if (stdSearchActive) {
-                SessionSearchField(
-                    query = stdSearchQuery,
-                    onQueryChange = { stdSearchQuery = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                )
+            if (compactHeight) {
+                item(key = "recent_header") { recentTools() }
+            } else {
+                stickyHeader(key = "recent_header") { recentTools() }
             }
-
-            listError?.let {
-                Text(
-                    it,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-            }
-
             if (sessions.isEmpty() && archivedIds.isEmpty()) {
+                item(key = "empty") {
                 Box(
                     Modifier
                         .fillMaxWidth()
@@ -1035,8 +929,8 @@ fun HomeScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        if (DshThemeId == "blue") {
-                            // 深蓝主题专属：鲸鱼娘立绘空态
+                        if (DshThemeId == "blue" || DshThemeId == "warm") {
+                            // 内置主题：鲸鱼娘立绘空态
                             Image(
                                 painter = androidx.compose.ui.res.painterResource(R.drawable.maid_left),
                                 contentDescription = "鲸鱼娘",
@@ -1045,7 +939,7 @@ fun HomeScreen(
                             )
                             Spacer(Modifier.height(6.dp))
                             Text(
-                                "还没有会话，从上面的输入框开始第一个任务吧",
+                                "还没有会话，从下面的输入框开始第一个任务吧",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -1065,18 +959,15 @@ fun HomeScreen(
                             }
                             Spacer(Modifier.height(12.dp))
                             Text(
-                                if (DshThemeStyle == ThemeStyle.CYBERPUNK) "— NIGHT CITY // 2077 —" else "还没有会话，从上面的输入框开始第一个任务吧",
+                                if (DshThemeStyle == ThemeStyle.CYBERPUNK) "— NIGHT CITY // 2077 —" else "还没有会话，从下面的输入框开始第一个任务吧",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
                 }
+                }
             } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
-                ) {
                     if (stdFiltered.isEmpty() && stdSearchQuery.isNotBlank()) {
                         item(key = "no_match") {
                             Text(
@@ -1087,8 +978,8 @@ fun HomeScreen(
                             )
                         }
                     }
-                    items(stdFiltered, key = { "s_" + it.sessionId }) { s ->
-                        Box {
+                    items(stdFiltered.take(recentLimit), key = { "s_" + it.sessionId }) { s ->
+                        Box(Modifier.padding(horizontal = 12.dp)) {
                             SessionCard(
                                 session = s,
                                 pinned = s.sessionId in pinnedIds,
@@ -1101,10 +992,18 @@ fun HomeScreen(
                                 expanded = menuTarget == s.sessionId,
                                 onDismiss = { menuTarget = null },
                                 onTogglePin = {
-                                    scope.launch { settingsStore.setPinned(s.sessionId, s.sessionId !in pinnedIds) }
+                                    scope.launch { settingsStore.setPinned(s.sessionId, s.sessionId !in pinnedIds, computerScope) }
                                 },
                                 onArchive = { archiveTarget = s },
                             )
+                        }
+                    }
+                    if (recentLimit < stdFiltered.size || recentLimit > 5) {
+                        item(key = "recent_more") {
+                            RecentSessionControls(stdFiltered.size, recentLimit, { recentLimit += 5 }, {
+                                recentLimit = 5
+                                scope.launch { recentListState.scrollToItem(1) }
+                            })
                         }
                     }
                     if (archivedIds.isNotEmpty()) {
@@ -1144,7 +1043,6 @@ fun HomeScreen(
 
             // 工作区选择面板（对齐 Web WorkspacePicker：默认 / 已有工作区 / 新建）
             workspaceSheetOverlay()
-        }
     }
 }
 
@@ -1161,7 +1059,7 @@ private fun PendingBell(
                 if (pendingCount > 0) Badge { Text(pendingCount.toString()) }
             },
         ) {
-            Icon(Icons.Default.Notifications, contentDescription = "待办中心", tint = tint)
+            Icon(Icons.Default.Notifications, contentDescription = "待办中心", tint = if (tint == Color.Unspecified) MaterialTheme.colorScheme.onSurface else tint)
         }
     }
 }
@@ -1686,33 +1584,16 @@ private fun SessionCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
             .combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 10.dp),
+                .heightIn(min = 56.dp)
+                .padding(horizontal = 4.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Twitter 风格圆形首字头像（Codex 风格下改方形终端块）
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .background(
-                        if (DshThemeStyle == ThemeStyle.CODEX) DshBrand.copy(alpha = 0.18f)
-                        else DshBrand.copy(alpha = 0.14f),
-                        if (DshThemeStyle == ThemeStyle.CODEX) RoundedCornerShape(6.dp) else CircleShape,
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    title.take(1).uppercase(),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = DshBrand,
-                )
-            }
-            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1721,7 +1602,7 @@ private fun SessionCard(
                     Text(
                         title,
                         style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = if (DshThemeStyle == ThemeStyle.CYBERPUNK) FontWeight.Bold else FontWeight.Medium,
+                        fontWeight = if (DshThemeStyle == ThemeStyle.CYBERPUNK) FontWeight.Bold else FontWeight.Normal,
                         color = titleColor,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -1744,13 +1625,10 @@ private fun SessionCard(
                                 .background(DshBrand.copy(alpha = pulse), CircleShape),
                         )
                     }
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        time,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                 }
+                Text(time, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp), maxLines = 1)
                 if (preview.isNotBlank()) {
                     Spacer(Modifier.height(3.dp))
                     Text(
@@ -1780,10 +1658,6 @@ private fun SessionCard(
                 }
             }
         }
-        HorizontalDivider(
-            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
-            thickness = 0.5.dp,
-        )
     }
 }
 
@@ -1838,6 +1712,8 @@ private fun ClaudeHomeLayout(
     onPresetMenuChange: (Boolean) -> Unit,
     pendingImages: List<DshConnection.ImagePart>,
     onPickImage: () -> Unit,
+    onVoice: () -> Unit,
+    onPresetSelect: (String) -> Unit,
     onRemoveImage: (Int) -> Unit,
     onNewChat: () -> Unit,
     onSessionClick: (String) -> Unit,
@@ -1858,6 +1734,7 @@ private fun ClaudeHomeLayout(
     var menuTarget by remember { mutableStateOf<String?>(null) }
     var searchQuery by remember { mutableStateOf("") }
     // 抽屉 Recents：置顶排序在前（sessions 已在 HomeScreen 层排好，此处幂等）→ 过滤在后
+    var recentLimit by remember(searchQuery) { mutableIntStateOf(5) }
     val filtered = remember(sessions, pinnedIds, searchQuery) {
         filterSessions(sortSessionsWithPinned(sessions, pinnedIds), searchQuery)
     }
@@ -1998,7 +1875,7 @@ private fun ClaudeHomeLayout(
                             modifier = Modifier.padding(horizontal = 32.dp, vertical = 8.dp),
                         )
                     }
-                    filtered.forEach { s ->
+                    filtered.take(recentLimit).forEach { s ->
                         Box {
                             Row(
                                 Modifier
@@ -2041,6 +1918,9 @@ private fun ClaudeHomeLayout(
                                 onArchive = { onArchive(s) },
                             )
                         }
+                    }
+                    if (recentLimit < filtered.size || recentLimit > 5) {
+                        RecentSessionControls(filtered.size, recentLimit, { recentLimit += 5 }, { recentLimit = 5 })
                     }
                     if (archivedIds.isNotEmpty()) {
                         Text(
@@ -2200,154 +2080,10 @@ private fun ClaudeHomeLayout(
                 }
             }
 
-            // ── 底部输入容器：16 外边距 + 安全区；#242423 圆角 28 内边距 12，三层结构 ──
-            sendError?.let {
-                Text(
-                    it,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
-                )
-            }
-            Surface(
-                shape = RoundedCornerShape(28.dp),
-                color = Color(0xFF242423),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
-            ) {
-                Column(Modifier.padding(12.dp)) {
-                    // 1. Pro 入口行（有实际功能：进入趣味假订阅中心）
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { onUpgrade() }
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text(
-                            "探索 DeepSeek Harness",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFA8A29E),
-                        )
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Default.WorkspacePremium,
-                                null,
-                                Modifier.size(14.dp),
-                                tint = Color(0xFFA78BFA),
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                "Upgrade to Pro",
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.Medium,
-                                color = Color(0xFFA78BFA),
-                            )
-                        }
-                    }
-                    // 2. 多行文本输入区（无边框无背景，17sp 一级文本，橙色光标）
-                    BasicTextField(
-                        value = input,
-                        onValueChange = onInputChange,
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = Color(0xFFF5F5F4)),
-                        cursorBrush = SolidColor(Color(0xFFE8755A)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 8.dp),
-                        minLines = 2,
-                        maxLines = 6,
-                        decorationBox = { inner ->
-                            Box {
-                                if (input.isEmpty()) {
-                                    Text(
-                                        "给 DeepSeek Harness 发消息…",
-                                        color = Color(0xFFA8A29E),
-                                        style = MaterialTheme.typography.bodyMedium,
-                                    )
-                                }
-                                inner()
-                            }
-                        },
-                    )
-                    // 3. 底部操作栏：+ 40 圆 / 模型胶囊 40 / 发送 44 圆橙箭头（无意义的装饰元素已移除）
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Box(
-                            Modifier
-                                .size(40.dp)
-                                .background(Color(0xFF2A2A29), CircleShape)
-                                .clickable { onPickImage() },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(Icons.Default.Add, null, Modifier.size(20.dp), tint = Color(0xFFF5F5F4))
-                        }
-                        // 模型选择胶囊（映射 "Sonnet 5 Thinking" = 预设名）
-                        Box {
-                            Row(
-                                Modifier
-                                    .height(40.dp)
-                                    .clip(RoundedCornerShape(20.dp))
-                                    .background(Color(0xFF2A2A29))
-                                    .clickable { onPresetMenuChange(true) }
-                                    .padding(horizontal = 16.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    presets.firstOrNull { it.first == preset }?.second ?: preset,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFFA8A29E),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = presetMenu,
-                                onDismissRequest = { onPresetMenuChange(false) },
-                            ) {
-                                presets.forEach { (id, name) ->
-                                    DropdownMenuItem(
-                                        text = { Text(name) },
-                                        onClick = { onPresetMenuChange(false) },
-                                    )
-                                }
-                            }
-                        }
-                        Spacer(Modifier.weight(1f))
-                        Box(
-                            Modifier
-                                .size(44.dp)
-                                .background(
-                                    if (input.isNotBlank() || pendingImages.isNotEmpty()) Color(0xFFE8755A)
-                                    else Color(0xFF2A2A29),
-                                    CircleShape,
-                                )
-                                .clickable(
-                                    enabled = (input.isNotBlank() || pendingImages.isNotEmpty()) && !sending,
-                                ) { onSend() },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            if (sending) {
-                                CircularProgressIndicator(
-                                    Modifier.size(18.dp),
-                                    color = Color(0xFFF5F5F4),
-                                    strokeWidth = 2.dp,
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Default.ArrowUpward,
-                                    null,
-                                    Modifier.size(20.dp),
-                                    tint = Color(0xFFF5F5F4),
-                                )
-                            }
-                        }
-                    }
-                }
+            Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                NewTaskEditor(input, onInputChange, "给 DeepSeek Harness 发消息…", sending,
+                    input.isNotBlank() || pendingImages.isNotEmpty(), onSend, onVoice,
+                    preset, presets, onPresetSelect, onPickImage, sendError)
             }
         }
     }
@@ -2376,6 +2112,8 @@ private fun DeepLookHomeLayout(
     onPresetMenuChange: (Boolean) -> Unit,
     pendingImages: List<DshConnection.ImagePart>,
     onPickImage: () -> Unit,
+    onVoice: () -> Unit,
+    onPresetSelect: (String) -> Unit,
     onRemoveImage: (Int) -> Unit,
     onSessionClick: (String) -> Unit,
     onSettings: () -> Unit,
@@ -2405,6 +2143,7 @@ private fun DeepLookHomeLayout(
             ?: "工作区 ${selectedWorkspaceId.take(8)}"
     }
     // 会话 tab 列表：置顶排序在前（sessions 已在 HomeScreen 层排好，此处幂等）→ 过滤在后
+    var recentLimit by remember(searchQuery) { mutableIntStateOf(5) }
     val filtered = remember(sessions, pinnedIds, searchQuery) {
         filterSessions(sortSessionsWithPinned(sessions, pinnedIds), searchQuery)
     }
@@ -2510,21 +2249,9 @@ private fun DeepLookHomeLayout(
 
                 // 分组「给大肥鱼派个任务」
                 DeepLookGroupTitle("给大肥鱼派个任务")
-                DeepLookCard {
-                    Column(Modifier.padding(14.dp)) {
-                        OutlinedTextField(
-                            value = input,
-                            onValueChange = onInputChange,
-                            modifier = Modifier.fillMaxWidth(),
-                            placeholder = { Text("描述你的任务…") },
-                            minLines = 3,
-                            maxLines = 6,
-                            shape = RoundedCornerShape(12.dp),
-                            keyboardOptions = KeyboardOptions.Default,
-                        )
                         if (pendingImages.isNotEmpty()) {
                             Spacer(Modifier.height(8.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 pendingImages.forEachIndexed { i, _ ->
                                     AssistChip(
                                         onClick = { onRemoveImage(i) },
@@ -2536,80 +2263,10 @@ private fun DeepLookHomeLayout(
                                 }
                             }
                         }
-                        sendError?.let {
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                it,
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                        Spacer(Modifier.height(10.dp))
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            IconButton(onClick = onPickImage) {
-                                Icon(Icons.Default.AttachFile, null)
-                            }
-                            Box {
-                                AssistChip(
-                                    onClick = { onPresetMenuChange(true) },
-                                    modifier = Modifier.widthIn(max = 150.dp),
-                                    label = {
-                                        Text(
-                                            presets.firstOrNull { it.first == preset }?.second ?: preset,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            style = MaterialTheme.typography.labelMedium,
-                                        )
-                                    },
-                                    leadingIcon = {
-                                        Icon(Icons.Default.SmartToy, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                                    },
-                                )
-                                DropdownMenu(
-                                    expanded = presetMenu,
-                                    onDismissRequest = { onPresetMenuChange(false) },
-                                ) {
-                                    presets.forEach { (id, name) ->
-                                        DropdownMenuItem(
-                                            text = { Text(name) },
-                                            onClick = { onPresetMenuChange(false) },
-                                        )
-                                    }
-                                }
-                            }
-                            Spacer(Modifier.weight(1f))
-                        }
-                        Spacer(Modifier.height(10.dp))
-                        // 主按钮：全宽 50dp 高、圆角 13、品牌蓝、白字 16/600
-                        Button(
-                            onClick = onSend,
-                            enabled = (input.isNotBlank() || pendingImages.isNotEmpty()) && !sending,
-                            shape = RoundedCornerShape(13.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(50.dp),
-                        ) {
-                            if (sending) {
-                                CircularProgressIndicator(
-                                    Modifier.size(18.dp),
-                                    color = MaterialTheme.colorScheme.onPrimary,
-                                    strokeWidth = 2.dp,
-                                )
-                            } else {
-                                Icon(Icons.AutoMirrored.Filled.Send, null, Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    "发送",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.SemiBold,
-                                )
-                            }
-                        }
-                    }
-                }
+                NewTaskEditor(input, onInputChange, "描述你的任务…", sending,
+                    input.isNotBlank() || pendingImages.isNotEmpty(), onSend, onVoice,
+                    preset, presets, onPresetSelect, onPickImage, sendError)
+
             } else {
                 // 会话列表分组卡片
                 DeepLookGroupTitle("最近会话")
@@ -2670,7 +2327,7 @@ private fun DeepLookHomeLayout(
                     }
                 } else {
                     DeepLookCard {
-                        filtered.forEachIndexed { index, s ->
+                        filtered.take(recentLimit).forEachIndexed { index, s ->
                             Box {
                                 Row(
                                     Modifier
@@ -2731,7 +2388,7 @@ private fun DeepLookHomeLayout(
                                     onArchive = { onArchive(s) },
                                 )
                             }
-                            if (index < filtered.lastIndex) {
+                            if (index < minOf(recentLimit, filtered.size) - 1) {
                                 HorizontalDivider(
                                     color = MaterialTheme.colorScheme.surfaceVariant,
                                     thickness = 1.dp,
@@ -2739,81 +2396,18 @@ private fun DeepLookHomeLayout(
                                 )
                             }
                         }
+                        if (recentLimit < filtered.size || recentLimit > 5) {
+                            RecentSessionControls(filtered.size, recentLimit, { recentLimit += 5 }, { recentLimit = 5 })
+                        }
                     }
                 }
             }
             Spacer(Modifier.height(16.dp))
         }
 
-        // ── 底部导航 78dp：三 tab 等宽（会话 | ⊕新会话 深蓝黑方块高亮 | 设置）──
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .background(
-                    MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
-                )
-                .padding(top = 8.dp)
-                .navigationBarsPadding()
-                .height(70.dp),
-        ) {
-            // 会话
-            DeepLookTab(modifier = Modifier.weight(1f),
-                selected = tab == "sessions",
-                onClick = { tab = "sessions" },
-                deep = deep,
-            ) {
-                Icon(
-                    Icons.Default.ChatBubbleOutline,
-                    null,
-                    Modifier.size(24.dp),
-                    tint = if (tab == "sessions") deep else faintIcon,
-                )
-                Text(
-                    "会话",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (tab == "sessions") deep else faintIcon,
-                )
-            }
-            // 新会话（深蓝黑圆角方块 + 白色加号，当前高亮）
-            DeepLookTab(modifier = Modifier.weight(1f),
-                selected = tab == "new",
-                onClick = { tab = "new" },
-                deep = deep,
-            ) {
-                Box(
-                    Modifier
-                        .size(width = 44.dp, height = 28.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(deepBlock),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Default.Add, null, Modifier.size(20.dp), tint = Color.White)
-                }
-                Text(
-                    "新会话",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = deepAccent,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            // 设置
-            DeepLookTab(modifier = Modifier.weight(1f),
-                selected = false,
-                onClick = { onSettings() },
-                deep = deep,
-            ) {
-                Icon(
-                    Icons.Default.Settings,
-                    null,
-                    Modifier.size(24.dp),
-                    tint = faintIcon,
-                )
-                Text(
-                    "设置",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = faintIcon,
-                )
-            }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = tab == "sessions", onClick = { tab = "sessions" }, label = { Text("会话") })
+            FilterChip(selected = tab == "new", onClick = { tab = "new" }, label = { Text("新会话") })
         }
     }
 }
@@ -2916,6 +2510,8 @@ private fun ChatGptHomeLayout(
     onPresetMenuChange: (Boolean) -> Unit,
     pendingImages: List<DshConnection.ImagePart>,
     onPickImage: () -> Unit,
+    onVoice: () -> Unit,
+    onPresetSelect: (String) -> Unit,
     onRemoveImage: (Int) -> Unit,
     onSessionClick: (String) -> Unit,
     onSettings: () -> Unit,
@@ -2936,6 +2532,7 @@ private fun ChatGptHomeLayout(
     var showArchived by remember { mutableStateOf(false) }
     var menuTarget by remember { mutableStateOf<String?>(null) }
 
+    var recentLimit by remember(searchQuery) { mutableIntStateOf(5) }
     val filtered = remember(sessions, searchQuery) {
         filterSessions(sessions, searchQuery)
     }
@@ -3077,7 +2674,7 @@ private fun ChatGptHomeLayout(
                                 .background(Color(0xFF1C1C1E), RoundedCornerShape(8.dp)),
                         )
                     }
-                    filtered.forEach { s ->
+                    filtered.take(recentLimit).forEach { s ->
                         Box {
                             Row(
                                 Modifier
@@ -3120,6 +2717,9 @@ private fun ChatGptHomeLayout(
                                 onArchive = { onArchive(s) },
                             )
                         }
+                    }
+                    if (recentLimit < filtered.size || recentLimit > 5) {
+                        RecentSessionControls(filtered.size, recentLimit, { recentLimit += 5 }, { recentLimit = 5 })
                     }
                     if (showArchived && archivedIds.isNotEmpty()) {
                         Text(
@@ -3257,7 +2857,7 @@ private fun ChatGptHomeLayout(
                         presets.forEach { (id, name) ->
                             DropdownMenuItem(
                                 text = { Text(name) },
-                                onClick = { onPresetMenuChange(false) },
+                                onClick = { onPresetSelect(id); onPresetMenuChange(false) },
                             )
                         }
                     }
@@ -3303,86 +2903,10 @@ private fun ChatGptHomeLayout(
                 }
             }
 
-            // ── 底部输入栏：16 外边距 + 安全区；52dp 胶囊容器 #1C1C1E 圆角 26 ──
-            sendError?.let {
-                Text(
-                    it,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
-                )
-            }
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
-                    .height(52.dp)
-                    .clip(RoundedCornerShape(26.dp))
-                    .background(Color(0xFF1C1C1E))
-                    .padding(horizontal = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    Icons.Default.Add,
-                    null,
-                    Modifier
-                        .size(24.dp)
-                        .clickable { onPickImage() },
-                    tint = Color.White,
-                )
-                BasicTextField(
-                    value = input,
-                    onValueChange = onInputChange,
-                    singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = Color.White),
-                    cursorBrush = SolidColor(Color.White),
-                    keyboardOptions = KeyboardOptions.Default,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 12.dp),
-                    decorationBox = { inner ->
-                        Box {
-                            if (input.isEmpty()) {
-                                Text(
-                                    "询问 DeepSeek Harness…",
-                                    color = Color(0xFF9CA3AF),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                )
-                            }
-                            inner()
-                        }
-                    },
-                )
-                Spacer(Modifier.width(8.dp))
-                Box(
-                    Modifier
-                        .size(40.dp)
-                        .background(
-                            if (input.isNotBlank() || pendingImages.isNotEmpty()) Color(0xFF3B82F6)
-                            else Color(0xFF2C2C2E),
-                            CircleShape,
-                        )
-                        .clickable(enabled = (input.isNotBlank() || pendingImages.isNotEmpty()) && !sending) {
-                            onSend()
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (sending) {
-                        CircularProgressIndicator(
-                            Modifier.size(18.dp),
-                            color = Color.White,
-                            strokeWidth = 2.dp,
-                        )
-                    } else {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Send,
-                            null,
-                            Modifier.size(20.dp),
-                            tint = Color.White,
-                        )
-                    }
-                }
+            Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                NewTaskEditor(input, onInputChange, "询问 DeepSeek Harness…", sending,
+                    input.isNotBlank() || pendingImages.isNotEmpty(), onSend, onVoice,
+                    preset, presets, onPresetSelect, onPickImage, sendError)
             }
         }
     }

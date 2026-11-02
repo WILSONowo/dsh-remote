@@ -17,9 +17,10 @@ export declare function createGateway(webServer: any): {
 export declare function createRelayManager(home: string, webServer: any, register: (route: any) => void, generatePairTicket?: () => {
     ticket: string;
     expiresAt: number;
-}): {
+}, isAllowed?: () => boolean): {
     start: () => Promise<void>;
     stop: () => Promise<void>;
+    setAllowed: (_enabled: boolean) => void;
     status: () => {
         state: string;
         detail: string;

@@ -129,7 +129,7 @@ class HttpPairingRpc(
      * 配对码校验（插件 v2.1.0）：PC 生成 6 位随机码，手机输入即完成配对并直接拿到通道 token。
      * 404/410 = 旧插件 → error="plugin_old"（UI 引导改用「等待 PC 确认」）；网络错误抛异常由调用方兜底。
      */
-    suspend fun codeVerify(code: String, deviceId: String, deviceName: String): CodeVerifyResult =
+    suspend fun codeVerify(code: String, deviceId: String, deviceName: String, discoverySession: String? = null): CodeVerifyResult =
         withContext(Dispatchers.IO) {
             val req = Request.Builder()
                 .url(endpoint + "/api/remote-access/pair/code/verify")
@@ -137,6 +137,7 @@ class HttpPairingRpc(
                     .put("code", code)
                     .put("deviceId", deviceId)
                     .put("deviceName", deviceName)
+                    .apply { discoverySession?.let { put("discoverySession", it) } }
                     .toString().toRequestBody("application/json".toMediaType()))
                 .build()
             client.newCall(req).execute().use { resp ->

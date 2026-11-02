@@ -12,6 +12,7 @@ import { computerIdentity } from "./identity.js";
 import { createRelayManager } from "./relay.js";
 import { createModernAdapter } from "./modern.js";
 import { createSecurity, DEVICE_ID } from "./security.js";
+import { publishDiscovery } from "./discovery.js";
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   closeSync,
@@ -516,7 +517,8 @@ export const apply = (ctx) => {
     },
   });
 
-  const security = createSecurity(home, reg);
+  let relay;
+  const security = createSecurity(home, reg, { publishDiscovery, onAccessChange: enabled => relay?.setAllowed(enabled) });
   ctx.effect(() => () => security.dispose(), "dsh-remote-access: device credentials");
 
   // ---------- 公网域名信任白名单（v2.4.0：写入 connection 行 !!js 拼接表达式） ----------
@@ -773,6 +775,7 @@ export const apply = (ctx) => {
 
   let nativeRequestRejection;
   const unauthorized = (req) => {
+    if (security.remoteBlocked(req)) return true;
     if (security.authorize(req)) return false;
     // Preserve native desktop browser authentication for the host-owned API.
     // Plugin admin routes must still pass the stricter local-admin boundary.
@@ -785,13 +788,13 @@ export const apply = (ctx) => {
     catch { return true; }
   };
 
-  const rejectHttp = (res) => {
-    res.statusCode = 401;
+  const rejectHttp = (res, paused = false) => {
+    res.statusCode = paused ? 503 : 401;
     res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.end(JSON.stringify({ error: "unauthorized", hint: "channel token required" }));
+    res.end(JSON.stringify(paused ? { error: "connections_disabled" } : { error: "unauthorized", hint: "channel token required" }));
   };
-  const rejectUpgrade = (socket) => {
-    socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+  const rejectUpgrade = (socket, paused = false) => {
+    socket.write(paused ? "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n" : "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
     socket.destroy();
   };
 
@@ -804,6 +807,7 @@ export const apply = (ctx) => {
   const wrapHttp = (route) => rememberWrapper(route, ({
     ...route,
     handler: (req, res) => {
+      if (security.remoteBlocked(req)) return rejectHttp(res, true);
       if (unauthorized(req)) return rejectHttp(res);
       security.track(req, res);
       return route.handler(req, res);
@@ -812,6 +816,7 @@ export const apply = (ctx) => {
   const wrapUpgrade = (route) => rememberWrapper(route, ({
     ...route,
     handler: (req, socket, head) => {
+      if (security.remoteBlocked(req)) return rejectUpgrade(socket, true);
       if (unauthorized(req)) return rejectUpgrade(socket);
       security.track(req, socket);
       return route.handler(req, socket, head);
@@ -857,7 +862,7 @@ export const apply = (ctx) => {
   } else {
     throw new Error("Unsupported webServer route tables; remote access refused");
   }
-  const relay = createRelayManager(home, webServer, reg, security.generatePairTicket);
+  relay = createRelayManager(home, webServer, reg, security.generatePairTicket, security.isEnabled);
   // Modern desktop services are optional so legacy hosts retain their carrier.
   if (typeof ctx.inject === "function") ctx.inject(["typertGateway", "connection"], modernCtx => {
     const nativeCheck = req => modernCtx.connection.requestRejection(req);

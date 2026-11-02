@@ -132,6 +132,7 @@ class MainActivity : FragmentActivity() {
             val appearance by settingsStore.appearance.collectAsState(initial = AppearanceConfig())
             val bgUri = appearance.bgUri?.let { runCatching { Uri.parse(it) }.getOrNull() }
             val bgActive = bgUri != null
+            val builtInBackground = bgUri == null && theme.id == "blue"
             // 字体设置（对齐 dsh-font 概念：界面字体 + 代码字体，即选即生效）
             val uiFont by settingsStore.uiFont.collectAsState(initial = "")
             val codeFont by settingsStore.codeFont.collectAsState(initial = "")
@@ -162,10 +163,10 @@ class MainActivity : FragmentActivity() {
             ) {
                 val (bgAlpha, _, _) = surfaceAlphaFor(appearance.panelGlass, bgActive)
 
-                Box(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().background(theme.colors.background)) {
                     // — 深蓝主题专属背景：鲸鱼娘宫殿夜景（dsh-deep-whale 皮肤资产，低透明度铺底；
                     //   用户自定义背景图优先）—
-                    if (bgUri == null && theme.id == "blue") {
+                    if (builtInBackground) {
                         val palaceBitmap = remember(theme.id) {
                             decodeSampledBitmap(context, R.drawable.maid_palace_night)
                         }
@@ -236,7 +237,8 @@ class MainActivity : FragmentActivity() {
                     // — 内容层：背景图开启时表面透明，玻璃通透由主题色板控制 —
                     Surface(
                         modifier = Modifier.fillMaxSize(),
-                        color = if (bgActive) Color.Transparent else MaterialTheme.colorScheme.background,
+                        color = if (bgActive || builtInBackground) Color.Transparent else MaterialTheme.colorScheme.background,
+                        contentColor = MaterialTheme.colorScheme.onBackground,
                     ) {
                         val navController = rememberNavController()
                         AppNavigation(
@@ -269,7 +271,7 @@ class MainActivity : FragmentActivity() {
                     }
 
                     // — 资源更新提示层（启动自动检测；无更新静默，有更新询问是否下载）—
-                    UpdatePromptOverlay(context)
+                    if (!BuildConfig.UI_TEST_BUILD) UpdatePromptOverlay(context)
 
                     // — 全局 token 用量监听（假 Pro 扣费）：PC 端任何会话的回合都结算，
                     //   不限移动端打开的会话（后台服务连接另行挂载，双连接按 seq 去重）—
@@ -300,7 +302,9 @@ class MainActivity : FragmentActivity() {
 
     private fun consumeDeepLink(intent: Intent?) {
         intent?.getStringExtra("open_session")?.takeIf { it.isNotBlank() }?.let {
-            DshApplication.pendingOpenSessionId = it
+            DshApplication.pendingSession.value = DshApplication.Companion.SessionLink(it,
+                intent.getStringExtra("open_profile"), intent.getStringExtra("open_computer"))
+            intent.removeExtra("open_session")
         }
     }
 }

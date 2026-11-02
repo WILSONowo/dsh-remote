@@ -16,15 +16,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.dsh.mobile.data.*
+import com.dsh.mobile.DshApplication
 import com.dsh.mobile.ui.theme.DshShape
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.UUID
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () -> Unit) {
+fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () -> Unit, onConnecting: (String) -> Unit = {}) {
     val context = LocalContext.current
     val settingsStore = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
@@ -43,6 +44,7 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
     var remark by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
     var connectionMode by remember { mutableStateOf("direct") }
+    var codeDirect by remember { mutableStateOf(false) }
     var relayServerUrl by remember { mutableStateOf("") }
     var relayHostId by remember { mutableStateOf("") }
     var trustSelfSigned by remember { mutableStateOf(false) }
@@ -55,6 +57,7 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
     var autoConnect by remember { mutableStateOf(false) }
     var diag by remember { mutableStateOf<List<DiagStep>?>(null) }
     var diagRunning by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
 
     // 原 profile 就绪后回填一次各字段（编辑态加载到才填；新建态回填空值无副作用）
     LaunchedEffect(original) {
@@ -119,6 +122,16 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
         val profile = resetPairingIfEndpointChanged(original, edited)
         scope.launch {
             settingsStore.upsertProfile(profile)
+            if (isNew) {
+                settingsStore.profiles.first().filter { it.id != profile.id && it.autoConnect }.forEach {
+                    settingsStore.upsertProfile(it.copy(autoConnect = false))
+                }
+                settingsStore.setActiveProfile(profile.id)
+                onConnecting(profile.id)
+                connection.connect(profile)
+                onBack()
+                return@launch
+            }
             // 活跃主机改动需传导到前台连接与后台服务 watcher
             if (settingsStore.activeProfileId.first() == profile.id) {
                 val orig = original
@@ -133,9 +146,6 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
                     // 显式断开确保 SSL/代理等参数变化也能重建 OkHttpClient
                     connection.disconnect()
                     connection.connect(profile)
-                    // 两次 edit 制造 distinct 变更，触发服务 watcher 重启应用新参数
-                    settingsStore.setActiveProfile(null)
-                    settingsStore.setActiveProfile(profile.id)
                 }
             }
             onBack()
@@ -188,6 +198,7 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
             Modifier
                 .padding(padding)
                 .fillMaxSize()
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -199,179 +210,210 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = connectionMode == "direct", onClick = { connectionMode = "direct" }, label = { Text("直连") })
-                FilterChip(selected = connectionMode == "relay", onClick = { connectionMode = "relay"; trustSelfSigned = false }, label = { Text("服务器") })
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = connectionMode == "direct" && !codeDirect, onClick = { connectionMode = "direct"; codeDirect = false }, label = { Text("IP 直连") })
+                if (isNew) FilterChip(selected = codeDirect, onClick = { connectionMode = "direct"; codeDirect = true }, label = { Text("配对码直连") })
+                FilterChip(selected = connectionMode == "relay", onClick = { connectionMode = "relay"; codeDirect = false; trustSelfSigned = false }, label = { Text("服务器") })
             }
-            if (connectionMode == "relay") {
-                Text("请从首页扫码或粘贴电脑生成的连接信息。服务器地址和电脑身份由程序管理，不能手动填写。")
-                if (relayServerUrl.isNotBlank()) Text("服务器：$relayServerUrl", style = MaterialTheme.typography.bodySmall)
-            } else OutlinedTextField(
-                value = url, onValueChange = { url = it },
-                label = { Text("服务器地址") },
-                placeholder = { Text("192.168.1.100:8787 或电脑的可访问域名") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            // 已记录的设备信息（只读）：重连校验依据
-            original?.let { p ->
-                if (p.deviceModel.isNotBlank() || p.computerId.isNotBlank()) {
-                    Card(Modifier.fillMaxWidth(), shape = DshShape.card) {
-                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("已记录设备", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                if (p.deviceModel.isNotBlank()) "电脑名称：${p.deviceModel}" else "电脑名称：未记录",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Text(
-                                if (p.computerId.isNotBlank()) "已保存电脑身份，修改名称不会影响配对" else "配对后自动保存电脑身份",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+            if (codeDirect) {
+                LanPairingSection(onIp = { codeDirect = false }, onSelected = { target, address ->
+                    // Reuse a saved endpoint without treating discovery metadata as an authenticated identity.
+                    val saved = settingsStore.profiles.first()
+                    val previous = saved.firstOrNull { it.connectionMode == "direct" && normalizeBaseUrl(it.url) == address }
+                    val profile = (previous ?: HostProfile(id = UUID.randomUUID().toString(), remark = "", url = address))
+                        .copy(remark = remark.trim().ifBlank { previous?.remark.orEmpty() },
+                            deviceModel = previous?.deviceModel?.ifBlank { target.name } ?: target.name, autoConnect = true)
+                    connection.disconnect()
+                    (context.applicationContext as? DshApplication)?.pairingCoordinator?.prepareDiscovery(profile, target.session)
+                    saved.filter { it.autoConnect && it.id != profile.id }.forEach { settingsStore.upsertProfile(it.copy(autoConnect = false)) }
+                    settingsStore.upsertProfile(profile)
+                    settingsStore.setActiveProfile(profile.id)
+                    onConnecting(profile.id)
+                    connection.connect(profile)
+                    onBack()
+                })
+            } else {
+                if (connectionMode == "relay") {
+                    Text("请从首页扫码或粘贴电脑生成的连接信息。服务器地址和电脑身份由程序管理，不能手动填写。")
+                    if (relayServerUrl.isNotBlank()) Text("服务器：$relayServerUrl", style = MaterialTheme.typography.bodySmall)
+                } else OutlinedTextField(
+                    value = url, onValueChange = { url = it },
+                    label = { Text("电脑地址") },
+                    placeholder = { Text("192.168.1.100:8787 或电脑的可访问域名") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (connectionMode != "relay" || !isNew) {
+                // 已记录的设备信息（只读）：重连校验依据
+                original?.let { p ->
+                    if (p.deviceModel.isNotBlank() || p.computerId.isNotBlank()) {
+                        Card(Modifier.fillMaxWidth(), shape = DshShape.card) {
+                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("已记录设备", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    if (p.deviceModel.isNotBlank()) "电脑名称：${p.deviceModel}" else "电脑名称：未记录",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Text(
+                                    if (p.computerId.isNotBlank()) "已保存电脑身份，修改名称不会影响配对" else "配对后自动保存电脑身份",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }
-            }
 
-            Card(Modifier.fillMaxWidth(), shape = DshShape.card) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("HTTPS 证书", style = MaterialTheme.typography.titleSmall)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("信任自签名证书", style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                if (connectionMode == "relay") "服务器中转必须校验证书；使用自签名证书时请导入 CA 证书" else "⚠ 仅对本主机生效，跳过证书校验",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.error,
-                            )
-                        }
-                        Switch(checked = trustSelfSigned, enabled = connectionMode == "direct", onCheckedChange = { trustSelfSigned = it })
-                    }
-                    OutlinedButton(onClick = { caPicker.launch(arrayOf("application/x-pem-file", "application/octet-stream")) }) {
-                        Icon(Icons.Default.UploadFile, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("导入 CA 证书")
-                    }
-                    caCertUri?.let {
-                        Text(
-                            "已导入：$it",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-
-            Card(Modifier.fillMaxWidth(), shape = DshShape.card) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("代理（按主机）", style = MaterialTheme.typography.titleSmall)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        listOf("none" to "无", "http" to "HTTP", "socks5" to "SOCKS5").forEach { (v, label) ->
-                            FilterChip(
-                                selected = proxyType == v,
-                                onClick = { proxyType = v },
-                                label = { Text(label) },
-                            )
-                            Spacer(Modifier.width(6.dp))
-                        }
-                    }
-                    if (proxyType != "none") {
-                        OutlinedTextField(
-                            value = proxyHost, onValueChange = { proxyHost = it },
-                            label = { Text("代理主机") }, singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        OutlinedTextField(
-                            value = proxyPort, onValueChange = { proxyPort = it },
-                            label = { Text("端口") }, singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        if (proxyType == "http") {
-                            OutlinedTextField(
-                                value = proxyUser, onValueChange = { proxyUser = it },
-                                label = { Text("账号（可选）") }, singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            OutlinedTextField(
-                                value = proxyPass, onValueChange = { proxyPass = it },
-                                label = { Text("密码（可选）") }, singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        } else if (proxyType == "socks5") {
-                            Text(
-                                "SOCKS5 暂不支持认证（OkHttp 限制）；需要认证请改用 HTTP 代理",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("启动时自动连接", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                Switch(checked = autoConnect, onCheckedChange = { autoConnect = it })
-            }
-
-            Button(
-                onClick = { runDiag() },
-                enabled = !diagRunning && url.isNotBlank(),
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = DshShape.pill,
-            ) {
-                if (diagRunning) {
-                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
-                    Text("诊断中…")
-                } else {
-                    Text("测试连接")
-                }
-            }
-
-            diag?.let { steps ->
                 Card(Modifier.fillMaxWidth(), shape = DshShape.card) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("诊断结果", style = MaterialTheme.typography.titleSmall)
-                        steps.forEach { s ->
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    if (s.ok) Icons.Default.CheckCircle else Icons.Default.Cancel,
-                                    null,
-                                    Modifier.size(16.dp),
-                                    tint = if (s.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        Text("HTTPS 证书", style = MaterialTheme.typography.titleSmall)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("信任自签名证书", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    if (connectionMode == "relay") "服务器中转必须校验证书；使用自签名证书时请导入 CA 证书" else "⚠ 仅对本主机生效，跳过证书校验",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
                                 )
-                                Spacer(Modifier.width(8.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text("${s.name}（${s.elapsedMs}ms）", style = MaterialTheme.typography.bodySmall)
-                                    s.detail?.let {
-                                        Text(
-                                            it,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
+                            }
+                            Switch(checked = trustSelfSigned, enabled = connectionMode == "direct", onCheckedChange = { trustSelfSigned = it })
+                        }
+                        OutlinedButton(onClick = { caPicker.launch(arrayOf("application/x-pem-file", "application/octet-stream")) }) {
+                            Icon(Icons.Default.UploadFile, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("导入 CA 证书")
+                        }
+                        caCertUri?.let {
+                            Text(
+                                "已导入：$it",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+
+                Card(Modifier.fillMaxWidth(), shape = DshShape.card) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("代理（按主机）", style = MaterialTheme.typography.titleSmall)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            listOf("none" to "无", "http" to "HTTP", "socks5" to "SOCKS5").forEach { (v, label) ->
+                                FilterChip(
+                                    selected = proxyType == v,
+                                    onClick = { proxyType = v },
+                                    label = { Text(label) },
+                                )
+                                Spacer(Modifier.width(6.dp))
+                            }
+                        }
+                        if (proxyType != "none") {
+                            OutlinedTextField(
+                                value = proxyHost, onValueChange = { proxyHost = it },
+                                label = { Text("代理主机") }, singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            OutlinedTextField(
+                                value = proxyPort, onValueChange = { proxyPort = it },
+                                label = { Text("端口") }, singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            if (proxyType == "http") {
+                                OutlinedTextField(
+                                    value = proxyUser, onValueChange = { proxyUser = it },
+                                    label = { Text("账号（可选）") }, singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                OutlinedTextField(
+                                    value = proxyPass, onValueChange = { proxyPass = it },
+                                    label = { Text("密码（可选）") }, singleLine = true,
+                                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            } else if (proxyType == "socks5") {
+                                Text(
+                                    "SOCKS5 暂不支持认证（OkHttp 限制）；需要认证请改用 HTTP 代理",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("启动时自动连接", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Switch(checked = autoConnect, onCheckedChange = { autoConnect = it })
+                }
+
+                Button(
+                    onClick = { runDiag() },
+                    enabled = !diagRunning && url.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = DshShape.pill,
+                ) {
+                    if (diagRunning) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("诊断中…")
+                    } else {
+                        Text("测试连接")
+                    }
+                }
+
+                diag?.let { steps ->
+                    Card(Modifier.fillMaxWidth(), shape = DshShape.card) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("诊断结果", style = MaterialTheme.typography.titleSmall)
+                            steps.forEach { s ->
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        if (s.ok) Icons.Default.CheckCircle else Icons.Default.Cancel,
+                                        null,
+                                        Modifier.size(16.dp),
+                                        tint = if (s.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text("${s.name}（${s.elapsedMs}ms）", style = MaterialTheme.typography.bodySmall)
+                                        s.detail?.let {
+                                            Text(
+                                                it,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            Button(
-                onClick = { save() },
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-                shape = DshShape.pill,
-            ) { Text("保存") }
-
-            if (!isNew) {
-                OutlinedButton(
-                    onClick = { delete() },
-                    modifier = Modifier.fillMaxWidth(),
+                Button(
+                    onClick = { save() },
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
                     shape = DshShape.pill,
-                ) { Text("删除该主机", color = MaterialTheme.colorScheme.error) }
+                ) { Text(if (isNew) "保存并连接" else "保存") }
+
+                if (!isNew) {
+                    OutlinedButton(
+                        onClick = { confirmDelete = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = DshShape.pill,
+                    ) { Text("删除该主机", color = MaterialTheme.colorScheme.error) }
+                }
+            }
             }
             Spacer(Modifier.height(20.dp))
         }
     }
+    if (confirmDelete) AlertDialog(
+        onDismissRequest = { confirmDelete = false },
+        title = { Text("删除记录") },
+        text = { Text(original?.remark?.ifBlank { original?.deviceModel.orEmpty() }.orEmpty()) },
+        confirmButton = { TextButton(onClick = { confirmDelete = false; delete() }) { Text("删除") } },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } },
+    )
+
 }

@@ -9,6 +9,7 @@ import { Tunnel, MAX_FRAME } from './tunnel.js';
 import { RELAY_REQUEST, bodyJson, isLocalAdmin, reply } from './security.js';
 import { computerIdentity } from './identity.js';
 import QRCode from 'qrcode';
+import { encodePairingLink } from './pairing-link.js';
 const empty = { enabled: false, serverUrl: '', hostId: '', registrationToken: '', registrationMode: 'automatic', caFile: '', allowInsecureLoopback: false };
 export function validateRelayConfig(input, previous = empty, persisted = false) {
     if (!persisted && ['hostId', 'registrationToken', 'registrationMode'].some(key => Object.hasOwn(input, key)))
@@ -76,7 +77,7 @@ export function createGateway(webServer) {
     return { gateway, async close() { for (const s of sockets)
             s.destroy(); await new Promise(r => gateway.close(() => r())); } };
 }
-export function createRelayManager(home, webServer, register, generatePairTicket) {
+export function createRelayManager(home, webServer, register, generatePairTicket, isAllowed = () => true) {
     const file = join(home, 'remote-access', 'relay.json');
     let config = { ...empty };
     let state = 'disabled', detail = '';
@@ -85,7 +86,7 @@ export function createRelayManager(home, webServer, register, generatePairTicket
             config = validateRelayConfig(JSON.parse(readFileSync(file, 'utf8')), undefined, true);
     }
     catch {
-        detail = '中转配置已失效或属于旧版手动方案，请填写服务器地址重新启用，再让手机扫码连接';
+        detail = '服务器配置已失效或属于旧版手动方案，请填写服务器地址重新启用，再让设备扫码连接';
     }
     let generation = 0;
     let local;
@@ -113,10 +114,15 @@ export function createRelayManager(home, webServer, register, generatePairTicket
         state = 'disabled';
     };
     const start = async () => {
-        await stop();
-        if (!config.enabled)
+        const stopping = stop(), current = generation;
+        await stopping;
+        if (generation !== current || !config.enabled)
             return;
-        const current = generation;
+        if (!isAllowed()) {
+            state = 'paused';
+            detail = '';
+            return;
+        }
         let ca;
         try {
             if (config.caFile)
@@ -282,19 +288,19 @@ export function createRelayManager(home, webServer, register, generatePairTicket
                 return reply(res, 401, { error: 'local_admin_required' });
             if (req.method !== 'POST')
                 return reply(res, 405, { error: 'method_not_allowed' });
-            if (state !== 'connected' || !generatePairTicket)
+            if (!isAllowed() || state !== 'connected' || !generatePairTicket)
                 return reply(res, 409, { ok: false, error: '请先启用服务器连接并等待连接成功' });
             try {
                 await bodyJson(req);
                 const identity = computerIdentity(home);
                 const payload = { v: 1, server: config.serverUrl, hostId: config.hostId, computerId: identity.id, name: identity.name, ...generatePairTicket() };
-                const link = 'dshremote://pair#' + Buffer.from(JSON.stringify(payload)).toString('base64url');
-                const image = await QRCode.toDataURL(link, { errorCorrectionLevel: 'M', margin: 4, width: 400 });
+                const link = encodePairingLink(payload);
+                const image = await QRCode.toDataURL(link, { errorCorrectionLevel: 'M', margin: 4, scale: 8 });
                 return reply(res, 200, { ok: true, link, image, expiresAt: payload.expiresAt });
             }
             catch {
                 return reply(res, 503, { ok: false, error: '无法生成配对二维码，请重试' });
             }
         } });
-    return { start, stop, status: () => ({ state, detail }) };
+    return { start, stop, setAllowed: (_enabled) => { void start(); }, status: () => ({ state, detail }) };
 }
