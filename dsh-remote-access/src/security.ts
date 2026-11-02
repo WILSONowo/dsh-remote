@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { computerIdentity, deviceName } from './identity.js';
 
 // Only the in-process relay gateway can set this marker. HTTP headers cannot impersonate it.
 export const RELAY_REQUEST = Symbol('dsh.relay.request');
@@ -79,7 +80,7 @@ export function createSecurity(home: string, register: (route: Route) => void) {
     return device || undefined;
   };
   const bootstrap = new Set(['pair/request', 'pair/status', 'pair/check', 'pair/claim', 'pair/code/verify'].map(p => '/api/remote-access/' + p));
-  const adminPaths = new Set(['pair/respond', 'pair/list', 'pair/revoke', 'pair/code/generate', 'pair/code/current', 'trusted-hosts', 'relay/config', 'relay/pairing'].map(p => '/api/remote-access/' + p));
+  const adminPaths = new Set(['pair/respond', 'pair/list', 'pair/rename', 'computer/rename', 'pair/revoke', 'pair/code/generate', 'pair/code/current', 'trusted-hosts', 'relay/config', 'relay/pairing'].map(p => '/api/remote-access/' + p));
   const authorize = (req: Request) => {
     const path = new URL(req.url!, 'http://localhost').pathname;
     // Static desktop UI and browser login remain owned by the host.
@@ -137,7 +138,7 @@ export function createSecurity(home: string, register: (route: Route) => void) {
         const value = fn(req, body, new URL(req.url!, 'http://localhost'));
         return reply(res, 200, value);
       } catch (e: any) {
-        const input = ['invalid_device', 'invalid_secret', 'invalid_body', 'json_required', 'body_too_large'].includes(e.message) || e instanceof SyntaxError;
+        const input = ['invalid_name', 'invalid_device', 'invalid_secret', 'invalid_body', 'json_required', 'body_too_large'].includes(e.message) || e instanceof SyntaxError;
         reply(res, input ? 400 : 503, { ok: false, error: input ? 'invalid_request' : 'credential_store_unavailable' });
       }
     },
@@ -193,7 +194,15 @@ export function createSecurity(home: string, register: (route: Route) => void) {
   registerApi('pair/check', 'GET', (req, _, url) => ({
     ok: true, paired: authenticate(req)?.deviceId === url.searchParams.get('deviceId'),
   }));
-  registerApi('pair/list', 'GET', () => ({ ok: true, devices: devices.map(({ tokenHash, ...d }) => d) }));
+  registerApi('pair/list', 'GET', () => ({ ok: true, computer: computerIdentity(home), devices: devices.map(({ tokenHash, ...d }) => d) }));
+  registerApi('computer/rename', 'POST', (_, b) => ({ ok: true, computer: computerIdentity(home, deviceName(b.name)) }));
+  registerApi('pair/rename', 'POST', (_, b) => {
+    const { id } = identity(b), name = deviceName(b.name);
+    if (!devices.some(d => d.deviceId === id)) return { ok: false, error: 'device_not_found' };
+    save(devices.map(d => d.deviceId === id ? { ...d, name } : d));
+    record('rename', id);
+    return { ok: true };
+  });
   registerApi('pair/revoke', 'POST', (_, b) => {
     const { id } = identity(b);
     save(devices.filter(d => d.deviceId !== id)); pending.delete(id); disconnect(id); record('revoke', id);

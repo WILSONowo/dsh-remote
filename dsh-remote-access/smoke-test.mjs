@@ -218,7 +218,7 @@ test("mcp/list：按 mcp__<server>__<tool> 聚合；无 tools 服务时空列表
 test("device/info：随机持久身份与显示名称独立，不返回硬件地址", async () => {
   const r = await req("/api/remote-access/device/info");
   assert.equal(r.body.ok, true);
-  assert.equal(r.body.name, "电脑");
+  assert.equal(r.body.name, "synthetic-desktop");
   assert.equal(r.body.mac, "");
   assert.match(r.body.computerId, /^[a-f0-9-]{36}$/);
   assert.equal((await req("/api/remote-access/device/info")).body.computerId, r.body.computerId);

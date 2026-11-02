@@ -30,7 +30,8 @@ const locale=new loaded['@deepseek-ai/dsh-client-locale'].LocaleRuntime({emit() 
 let registration, Settings;
 loaded['dsh-remote-access'].apply({locale,effect(fn) {disposers.push(fn());},slots:{inject(name,fn){disposers.push(fn());},register(meta,component){registration=meta;Settings=component;return()=>{};}}});
 const nativeFetch=window.fetch.bind(window);
-let config={ok:true,enabled:false,serverUrl:'https://relay.example.test',computerName:'Studio computer',caFile:'',state:'disabled',detail:''};
+let config={ok:true,enabled:false,serverUrl:'https://relay.example.test',caFile:'',state:'disabled',detail:''};
+let computer={id:'11111111-1111-4111-8111-111111111111',name:'Studio computer'};
 let devices=[],hosts=[],pending=null,failNext=false;
 window.fetch=async(url,options={})=>{
  if(!String(url).startsWith('/api/remote-access/'))return nativeFetch(url,options);
@@ -40,7 +41,9 @@ window.fetch=async(url,options={})=>{
  if(route==='relay/config'){if(b)config={...config,...b,state:b.enabled?'connected':'disabled'};value=config;}
  else if(route==='relay/pairing')value={ok:true,link:'dshremote://synthetic-preview-only',image:${JSON.stringify(qr)},expiresAt:Date.now()+120000};
  else if(route.startsWith('pair/code/'))value={ok:true,code:route.endsWith('generate')?'987654':'123456',expiresInSec:600};
- else if(route==='pair/list')value={ok:true,devices};
+ else if(route==='pair/list')value={ok:true,computer,devices};
+ else if(route==='computer/rename')computer={...computer,name:b.name};
+ else if(route==='pair/rename')devices=devices.map(d=>d.deviceId===b.deviceId?{...d,name:b.name}:d);
  else if(route==='pair/status')value={ok:true,state:pending?'pending':'none',pendingDevice:pending};
  else if(route==='pair/respond'){if(b.outcome==='approve')devices=[...devices,pending];pending=null;}
  else if(route==='pair/revoke')devices=devices.filter(d=>d.deviceId!==b.deviceId);

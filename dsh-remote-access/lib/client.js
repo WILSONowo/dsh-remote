@@ -3,14 +3,11 @@
   var en = {
     nav: "Remote control",
     intro: "Connect your phone to this computer.",
-    server: "Server relay",
-    serverHint: "Connect through your own relay server.",
-    enable: "Enable server relay",
+    server: "Server",
+    serverHint: "Connect through your own server.",
+    enable: "Enable online service",
     address: "Server address",
-    computerName: "Computer name",
-    computer: "Computer",
-    advanced: "Advanced",
-    ca: "CA certificate path",
+    ca: "Custom CA certificate path (optional)",
     caHint: "Optional for a private certificate authority.",
     save: "Save",
     saving: "Saving\u2026",
@@ -44,9 +41,14 @@
     expires: "Expires in {time}",
     generate: "Generate code",
     generating: "Generating\u2026",
-    devices: "Paired devices",
+    devices: "Devices",
     devicesHint: "Each phone has its own access. Revoking it disconnects that phone.",
-    noDevices: "No paired devices",
+    thisComputer: "This computer",
+    rename: "Rename",
+    renameDevice: "Rename device",
+    deviceName: "Device name",
+    invalidName: "Enter a name of 1\u201364 characters without control characters.",
+    noDevices: "No paired phones",
     revoke: "Revoke",
     revoking: "Revoking\u2026",
     approveTitle: "Pair \u201C{name}\u201D?",
@@ -55,7 +57,7 @@
     deny: "Deny",
     responding: "Responding\u2026",
     hosts: "Trusted domains",
-    hostsHint: "For direct connections through a public tunnel. Server relay does not need this.",
+    hostsHint: "For direct connections through a public tunnel. Server connections do not need this.",
     hostFormat: "Domain or domain:port, without https://. Use Punycode for international domains.",
     domain: "Domain",
     noHosts: "No trusted domains",
@@ -66,12 +68,12 @@
     requestFailed: "Request failed. Try again.",
     saveFailed: "Could not save. Check the server address, certificate and file permissions.",
     invalidDomain: "Enter a valid domain or domain:port, without a URL scheme.",
-    connectFirst: "Save your settings and wait for the relay to connect.",
+    connectFirst: "Save your settings and wait for the server to connect.",
     legacyConfig: "Set the server address again, then pair your phone with a new QR code.",
     certificateFailed: "Check the server address, network and TLS certificate.",
     caFailed: "Could not read the CA certificate. Check its path and permissions.",
     registrationDisabled: "Computer registration is disabled. Contact the server administrator.",
-    serverUpdate: "Update the relay server to support automatic registration.",
+    serverUpdate: "Update the server to support automatic registration.",
     rateLimited: "Too many registration requests. Try again later.",
     unavailable: "The server is unavailable or has reached its computer limit.",
     identityMismatch: "The server returned a different computer identity. Check the server configuration.",
@@ -80,14 +82,11 @@
   var zh = {
     nav: "\u8FDC\u7A0B\u63A7\u5236",
     intro: "\u7528\u624B\u673A\u8FDE\u63A5\u5E76\u63A7\u5236\u8FD9\u53F0\u7535\u8111\u3002",
-    server: "\u670D\u52A1\u5668\u4E2D\u8F6C",
+    server: "\u670D\u52A1\u5668",
     serverHint: "\u901A\u8FC7\u81EA\u5EFA\u670D\u52A1\u5668\u8FDE\u63A5\u3002",
-    enable: "\u542F\u7528\u670D\u52A1\u5668\u4E2D\u8F6C",
+    enable: "\u542F\u7528\u5728\u7EBF\u670D\u52A1",
     address: "\u670D\u52A1\u5668\u5730\u5740",
-    computerName: "\u7535\u8111\u540D\u79F0",
-    computer: "\u7535\u8111",
-    advanced: "\u9AD8\u7EA7\u8BBE\u7F6E",
-    ca: "CA \u8BC1\u4E66\u8DEF\u5F84",
+    ca: "\u81EA\u5B9A\u4E49 CA \u8BC1\u4E66\u8DEF\u5F84\uFF08\u53EF\u9009\uFF09",
     caHint: "\u4F7F\u7528\u79C1\u6709\u8BC1\u4E66\u9881\u53D1\u673A\u6784\u65F6\u586B\u5199\u3002",
     save: "\u4FDD\u5B58",
     saving: "\u4FDD\u5B58\u4E2D\u2026",
@@ -121,9 +120,14 @@
     expires: "{time} \u540E\u8FC7\u671F",
     generate: "\u751F\u6210\u914D\u5BF9\u7801",
     generating: "\u751F\u6210\u4E2D\u2026",
-    devices: "\u5DF2\u914D\u5BF9\u8BBE\u5907",
+    devices: "\u8BBE\u5907\u5217\u8868",
     devicesHint: "\u6BCF\u53F0\u624B\u673A\u72EC\u7ACB\u6388\u6743\uFF0C\u64A4\u9500\u540E\u7ACB\u5373\u65AD\u5F00\u8BE5\u624B\u673A\u3002",
-    noDevices: "\u6682\u65E0\u5DF2\u914D\u5BF9\u8BBE\u5907",
+    thisComputer: "\u672C\u7535\u8111",
+    rename: "\u91CD\u547D\u540D",
+    renameDevice: "\u91CD\u547D\u540D\u8BBE\u5907",
+    deviceName: "\u8BBE\u5907\u540D\u79F0",
+    invalidName: "\u540D\u79F0\u9700\u4E3A 1\u201364 \u4E2A\u5B57\u7B26\uFF0C\u4E0D\u80FD\u5305\u542B\u63A7\u5236\u5B57\u7B26\u3002",
+    noDevices: "\u6682\u65E0\u5DF2\u914D\u5BF9\u624B\u673A",
     revoke: "\u64A4\u9500",
     revoking: "\u64A4\u9500\u4E2D\u2026",
     approveTitle: "\u5141\u8BB8\u201C{name}\u201D\u914D\u5BF9\uFF1F",
@@ -132,7 +136,7 @@
     deny: "\u62D2\u7EDD",
     responding: "\u5904\u7406\u4E2D\u2026",
     hosts: "\u53EF\u4FE1\u57DF\u540D",
-    hostsHint: "\u4EC5\u7528\u4E8E\u901A\u8FC7\u516C\u7F51\u96A7\u9053\u76F4\u8FDE\uFF0C\u670D\u52A1\u5668\u4E2D\u8F6C\u65E0\u9700\u8BBE\u7F6E\u3002",
+    hostsHint: "\u4EC5\u7528\u4E8E\u901A\u8FC7\u516C\u7F51\u96A7\u9053\u76F4\u8FDE\uFF0C\u670D\u52A1\u5668\u8FDE\u63A5\u65E0\u9700\u8BBE\u7F6E\u3002",
     hostFormat: "\u586B\u5199\u57DF\u540D\u6216\u57DF\u540D:\u7AEF\u53E3\uFF0C\u4E0D\u5E26 https://\uFF1B\u4E2D\u6587\u57DF\u540D\u8BF7\u8F6C\u4E3A Punycode\u3002",
     domain: "\u57DF\u540D",
     noHosts: "\u6682\u65E0\u53EF\u4FE1\u57DF\u540D",
@@ -319,7 +323,6 @@
             const r = await request("relay/config", {
               enabled: config.enabled,
               serverUrl: config.serverUrl,
-              computerName: config.computerName,
               caFile: config.caFile,
               allowInsecureLoopback: config.allowInsecureLoopback
             });
@@ -380,20 +383,7 @@
               placeholder: "https://relay.example.com",
               onChange: (v) => change("serverUrl", v)
             }),
-            h(Field, {
-              title: t("computerName"),
-              name: "name",
-              value: config.computerName,
-              disabled: busy,
-              placeholder: t("computer"),
-              onChange: (v) => change("computerName", v)
-            }),
-            h(
-              "details",
-              {},
-              h("summary", {}, t("advanced")),
-              h(Field, { title: t("ca"), name: "ca", value: config.caFile, disabled: busy, hint: t("caHint"), onChange: (v) => change("caFile", v) })
-            ),
+            h(Field, { title: t("ca"), name: "ca", value: config.caFile, disabled: busy, hint: t("caHint"), onChange: (v) => change("caFile", v) }),
             h(
               "div",
               { className: "remote-row" },
@@ -498,6 +488,8 @@
       }
       function DevicesSection({ t }) {
         const [devices, setDevices] = useState(null), [pending, setPending] = useState(null);
+        const [computer, setComputer] = useState(null), [editing, setEditing] = useState(null);
+        const [name, setName] = useState(""), [renaming, setRenaming] = useState(false), [renameError, setRenameError] = useState("");
         const [busyId, setBusyId] = useState(null), [responding, setResponding] = useState(false);
         const [error, setError] = useState(false), [responseError, setResponseError] = useState(false);
         const mounted = useRef(false), polling = useRef(false);
@@ -508,6 +500,7 @@
             const [list, status] = await Promise.all([request("pair/list"), request("pair/status")]);
             if (!mounted.current) return;
             setDevices(list.devices || []);
+            setComputer(list.computer);
             setError(false);
             setPending(status.state === "pending" ? status.pendingDevice : null);
           } catch {
@@ -551,16 +544,85 @@
             if (mounted.current) setResponding(false);
           }
         }
+        function edit(device, isComputer = false) {
+          setEditing({ ...device, isComputer });
+          setName(device.name);
+          setRenameError("");
+        }
+        async function rename() {
+          if (!editing || renaming) return;
+          if (!name.trim() || name.trim().length > 64 || /[\x00-\x1f\x7f]/.test(name)) {
+            setRenameError("invalidName");
+            return;
+          }
+          setRenaming(true);
+          setRenameError("");
+          try {
+            await request(editing.isComputer ? "computer/rename" : "pair/rename", { deviceId: editing.deviceId, name: name.trim() });
+            if (mounted.current) setEditing(null);
+            await refresh();
+          } catch {
+            if (mounted.current) setRenameError("requestFailed");
+          } finally {
+            if (mounted.current) setRenaming(false);
+          }
+        }
         return h(
           Section,
           { title: t("devices"), hint: t("devicesHint") },
-          !devices ? muted(t("loading")) : devices.length ? h("ul", { className: "remote-list" }, devices.map((d) => h(
-            "li",
-            { key: d.deviceId },
-            h("span", { className: "remote-name" }, d.name || d.deviceId),
-            button(t(busyId === d.deviceId ? "revoking" : "revoke"), { disabled: !!busyId, onClick: () => revoke(d.deviceId) })
-          ))) : h("p", { className: "remote-empty" }, t("noDevices")),
+          !devices ? muted(t("loading")) : h(
+            "ul",
+            { className: "remote-list" },
+            computer && h(
+              "li",
+              {},
+              h("div", { className: "remote-name" }, computer.name, muted(t("thisComputer"))),
+              button(t("rename"), { onClick: () => edit(computer, true) })
+            ),
+            devices.map((d) => h(
+              "li",
+              { key: d.deviceId },
+              h("span", { className: "remote-name" }, d.name || d.deviceId),
+              h(
+                "div",
+                { className: "remote-actions" },
+                button(t("rename"), { disabled: !!busyId, onClick: () => edit(d) }),
+                button(t(busyId === d.deviceId ? "revoking" : "revoke"), { disabled: !!busyId, onClick: () => revoke(d.deviceId) })
+              )
+            ))
+          ),
+          devices && !devices.length && h("p", { className: "remote-empty" }, t("noDevices")),
           failure(error && t("requestFailed")),
+          h(
+            Modal,
+            {
+              className: "dsh-remote",
+              open: !!editing,
+              title: t("renameDevice"),
+              closeLabel: t("cancel"),
+              onClose: () => {
+                if (!renaming) setEditing(null);
+              },
+              footer: h(
+                "div",
+                { className: "remote-actions" },
+                button(t("cancel"), { disabled: renaming, onClick: () => setEditing(null) }),
+                button(t(renaming ? "saving" : "save"), { variant: "primary", disabled: renaming || !name.trim(), onClick: rename })
+              )
+            },
+            h(
+              "form",
+              { className: "dsh-remote", onSubmit: (e) => {
+                e.preventDefault();
+                rename();
+              } },
+              h(Field, { title: t("deviceName"), name: "device-name", value: name, disabled: renaming, onChange: (v) => {
+                setName(v);
+                setRenameError("");
+              } }),
+              failure(renameError && t(renameError))
+            )
+          ),
           h(
             Modal,
             {
@@ -621,38 +683,33 @@
         return h(
           Section,
           { title: t("hosts"), hint: t("hostsHint") },
+          !hosts ? muted(t("loading")) : !hosts.length ? h("p", { className: "remote-empty" }, t("noHosts")) : h("ul", { className: "remote-list" }, hosts.map((host) => h(
+            "li",
+            { key: host },
+            h("span", { className: "remote-name" }, host),
+            button(t("remove"), { disabled: busy, onClick: () => mutate("remove", host) })
+          ))),
           h(
-            "details",
-            {},
-            h("summary", {}, t("advanced")),
-            !hosts ? muted(t("loading")) : !hosts.length ? h("p", { className: "remote-empty" }, t("noHosts")) : h("ul", { className: "remote-list" }, hosts.map((host) => h(
-              "li",
-              { key: host },
-              h("span", { className: "remote-name" }, host),
-              button(t("remove"), { disabled: busy, onClick: () => mutate("remove", host) })
-            ))),
-            h(
-              "form",
-              { className: "remote-host-form", onSubmit: (e) => {
-                e.preventDefault();
-                if (!busy && input.trim()) mutate("add", input.trim());
-              } },
-              h("input", {
-                className: "remote-input",
-                value: input,
-                disabled: busy,
-                placeholder: "tunnel.example.com",
-                "aria-label": t("domain"),
-                autoComplete: "off",
-                spellCheck: false,
-                onChange: (e) => setInput(e.target.value)
-              }),
-              button(t(busy ? "working" : "add"), { type: "submit", disabled: busy || !input.trim() })
-            ),
-            muted(t("hostFormat")),
-            failure(error && t(error)),
-            error === "loadFailed" && button(t("retry"), { onClick: refresh })
-          )
+            "form",
+            { className: "remote-host-form", onSubmit: (e) => {
+              e.preventDefault();
+              if (!busy && input.trim()) mutate("add", input.trim());
+            } },
+            h("input", {
+              className: "remote-input",
+              value: input,
+              disabled: busy,
+              placeholder: "tunnel.example.com",
+              "aria-label": t("domain"),
+              autoComplete: "off",
+              spellCheck: false,
+              onChange: (e) => setInput(e.target.value)
+            }),
+            button(t(busy ? "working" : "add"), { type: "submit", disabled: busy || !input.trim() })
+          ),
+          muted(t("hostFormat")),
+          failure(error && t(error)),
+          error === "loadFailed" && button(t("retry"), { onClick: refresh })
         );
       }
       function Settings({ t }) {

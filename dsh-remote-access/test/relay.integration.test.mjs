@@ -142,10 +142,29 @@ test('自动注册与扫码：无服务器逐机配置，多手机独立确认�
   const b = await scan('synthetic-phone-b', await qr()); assert.notEqual(a, b);
   const info = (await f.json(f.base, '/api/remote-access/device/info', undefined, a)).body;
   assert.equal(info.computerId, first.computerId); assert.equal(info.mac, '');
+  const originalRegistration = f.registrationToken;
+  assert.equal((await f.json(f.base, '/api/remote-access/computer/rename', { name: 'Unauthorized' }, a)).status, 401);
+  assert.equal((await f.json(f.base, '/api/remote-access/pair/rename', { deviceId: 'synthetic-phone-b', name: 'Unauthorized' }, a)).status, 401);
+  for (const name of ['', '  ', 'x'.repeat(65), 'bad\nname', null]) {
+    assert.equal((await f.json(f.localUrl, '/api/remote-access/computer/rename', { name })).status, 400);
+    assert.equal((await f.json(f.localUrl, '/api/remote-access/pair/rename', { deviceId: 'synthetic-phone-a', name })).status, 400);
+  }
+  assert.equal((await f.json(f.localUrl, '/api/remote-access/computer/rename', { name: 'Renamed computer' })).body.ok, true);
+  assert.equal((await f.json(f.localUrl, '/api/remote-access/pair/rename', { deviceId: 'synthetic-phone-a', name: 'Renamed phone' })).body.ok, true);
+  const list = (await f.json(f.localUrl, '/api/remote-access/pair/list')).body;
+  assert.equal(list.computer.name, 'Renamed computer');
+  assert.equal(list.devices.find(d => d.deviceId === 'synthetic-phone-a').name, 'Renamed phone');
+  assert.equal(list.devices.find(d => d.deviceId === 'synthetic-phone-b').name, 'Same phone name');
+  assert.equal(list.devices.some(d => 'tokenHash' in d), false);
+  assert.equal(JSON.parse(readFileSync(join(f.home, 'remote-access', 'devices-v2.json'))).devices.find(d => d.deviceId === 'synthetic-phone-a').name, 'Renamed phone');
+  assert.equal(f.relay.online.has(f.hostId), true);
+  assert.equal((await f.json(f.base, '/api/remote-access/device/info', undefined, a)).status, 200);
+  assert.equal((await qr()).name, 'Renamed computer');
   await f.configure(false);
   await until(() => f.relay.online.size === 0);
-  await f.configure(true, { computerName: 'Renamed computer' });
+  await f.configure(true);
   await until(() => f.relay.online.has(f.hostId));
+  assert.equal(JSON.parse(readFileSync(join(f.home, 'remote-access', 'relay.json'))).registrationToken, originalRegistration);
   const renamed = (await f.json(f.base, '/api/remote-access/device/info', undefined, b)).body;
   assert.equal(renamed.computerId, info.computerId); assert.equal(renamed.name, 'Renamed computer');
   await f.json(f.localUrl, '/api/remote-access/pair/revoke', { deviceId: 'synthetic-phone-a' });

@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-access",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "description": "DSH 手机远程访问：独立设备配对、直连、自建中转及 0.2.1-rc.5 协议适配",
   "type": "module",
   "main": "lib/index.js",

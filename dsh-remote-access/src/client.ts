@@ -72,7 +72,7 @@ window.__ModuleLoader__.load({
         setBusy(true); setError(''); setSaved(false); setPairing(null);
         try {
           const r = await request('relay/config', {
-            enabled: config.enabled, serverUrl: config.serverUrl, computerName: config.computerName,
+            enabled: config.enabled, serverUrl: config.serverUrl,
             caFile: config.caFile, allowInsecureLoopback: config.allowInsecureLoopback,
           });
           if (!mounted.current) return;
@@ -102,10 +102,7 @@ window.__ModuleLoader__.load({
         config && h('div', { className: 'remote-form' },
           h(Field, { title: t('address'), name: 'server', value: config.serverUrl, disabled: busy,
             placeholder: 'https://relay.example.com', onChange: v => change('serverUrl', v) }),
-          h(Field, { title: t('computerName'), name: 'name', value: config.computerName, disabled: busy,
-            placeholder: t('computer'), onChange: v => change('computerName', v) }),
-          h('details', {}, h('summary', {}, t('advanced')),
-            h(Field, { title: t('ca'), name: 'ca', value: config.caFile, disabled: busy, hint: t('caHint'), onChange: v => change('caFile', v) })),
+          h(Field, { title: t('ca'), name: 'ca', value: config.caFile, disabled: busy, hint: t('caHint'), onChange: v => change('caFile', v) }),
           h('div', { className: 'remote-row' },
             h('span', { className: 'remote-status', 'data-state': knownState, role: 'status' }, t(knownState)),
             h('div', { className: 'remote-actions' }, saved && h('span', { className: 'remote-muted', role: 'status' }, t('saved')),
@@ -153,6 +150,8 @@ window.__ModuleLoader__.load({
     }
     function DevicesSection({ t }) {
       const [devices, setDevices] = useState(null), [pending, setPending] = useState(null);
+      const [computer, setComputer] = useState(null), [editing, setEditing] = useState(null);
+      const [name, setName] = useState(''), [renaming, setRenaming] = useState(false), [renameError, setRenameError] = useState('');
       const [busyId, setBusyId] = useState(null), [responding, setResponding] = useState(false);
       const [error, setError] = useState(false), [responseError, setResponseError] = useState(false);
       const mounted = useRef(false), polling = useRef(false);
@@ -162,7 +161,7 @@ window.__ModuleLoader__.load({
         try {
           const [list, status] = await Promise.all([request('pair/list'), request('pair/status')]);
           if (!mounted.current) return;
-          setDevices(list.devices || []); setError(false);
+          setDevices(list.devices || []); setComputer(list.computer); setError(false);
           setPending(status.state === 'pending' ? status.pendingDevice : null);
         } catch { if (mounted.current) setError(true); }
         finally { polling.current = false; }
@@ -188,12 +187,36 @@ window.__ModuleLoader__.load({
         } catch { if (mounted.current) setResponseError(true); }
         finally { if (mounted.current) setResponding(false); }
       }
+      function edit(device, isComputer = false) {
+        setEditing({ ...device, isComputer }); setName(device.name); setRenameError('');
+      }
+      async function rename() {
+        if (!editing || renaming) return;
+        if (!name.trim() || name.trim().length > 64 || /[\x00-\x1f\x7f]/.test(name)) { setRenameError('invalidName'); return; }
+        setRenaming(true); setRenameError('');
+        try {
+          await request(editing.isComputer ? 'computer/rename' : 'pair/rename', { deviceId: editing.deviceId, name: name.trim() });
+          if (mounted.current) setEditing(null);
+          await refresh();
+        } catch { if (mounted.current) setRenameError('requestFailed'); }
+        finally { if (mounted.current) setRenaming(false); }
+      }
       return h(Section, { title: t('devices'), hint: t('devicesHint') },
-        !devices ? muted(t('loading')) : devices.length ? h('ul', { className: 'remote-list' }, devices.map(d =>
+        !devices ? muted(t('loading')) : h('ul', { className: 'remote-list' },
+          computer && h('li', {}, h('div', { className: 'remote-name' }, computer.name, muted(t('thisComputer'))),
+            button(t('rename'), { onClick: () => edit(computer, true) })), devices.map(d =>
           h('li', { key: d.deviceId }, h('span', { className: 'remote-name' }, d.name || d.deviceId),
-            button(t(busyId === d.deviceId ? 'revoking' : 'revoke'), { disabled: !!busyId, onClick: () => revoke(d.deviceId) }))))
-          : h('p', { className: 'remote-empty' }, t('noDevices')),
+            h('div', { className: 'remote-actions' }, button(t('rename'), { disabled: !!busyId, onClick: () => edit(d) }),
+              button(t(busyId === d.deviceId ? 'revoking' : 'revoke'), { disabled: !!busyId, onClick: () => revoke(d.deviceId) }))))),
+        devices && !devices.length && h('p', { className: 'remote-empty' }, t('noDevices')),
         failure(error && t('requestFailed')),
+        h(Modal, { className: 'dsh-remote', open: !!editing, title: t('renameDevice'), closeLabel: t('cancel'),
+          onClose: () => { if (!renaming) setEditing(null); },
+          footer: h('div', { className: 'remote-actions' }, button(t('cancel'), { disabled: renaming, onClick: () => setEditing(null) }),
+            button(t(renaming ? 'saving' : 'save'), { variant: 'primary', disabled: renaming || !name.trim(), onClick: rename })) },
+          h('form', { className: 'dsh-remote', onSubmit: e => { e.preventDefault(); rename(); } },
+            h(Field, { title: t('deviceName'), name: 'device-name', value: name, disabled: renaming, onChange: v => { setName(v); setRenameError(''); } }),
+            failure(renameError && t(renameError)))),
         h(Modal, { className: 'dsh-remote', open: !!pending, title: t('approveTitle', { name: pending?.name || '' }), description: t('approveHint'),
           closeLabel: t('deny'), onClose: () => respond('deny'),
           footer: h(React.Fragment, {}, button(t('deny'), { disabled: responding, onClick: () => respond('deny') }),
@@ -218,7 +241,6 @@ window.__ModuleLoader__.load({
         finally { if (mounted.current) setBusy(false); }
       }
       return h(Section, { title: t('hosts'), hint: t('hostsHint') },
-        h('details', {}, h('summary', {}, t('advanced')),
           !hosts ? muted(t('loading')) : !hosts.length ? h('p', { className: 'remote-empty' }, t('noHosts')) :
             h('ul', { className: 'remote-list' }, hosts.map(host => h('li', { key: host }, h('span', { className: 'remote-name' }, host),
               button(t('remove'), { disabled: busy, onClick: () => mutate('remove', host) })))),
@@ -227,7 +249,7 @@ window.__ModuleLoader__.load({
               autoComplete: 'off', spellCheck: false, onChange: e => setInput(e.target.value) }),
             button(t(busy ? 'working' : 'add'), { type: 'submit', disabled: busy || !input.trim() })),
           muted(t('hostFormat')), failure(error && t(error)),
-          error === 'loadFailed' && button(t('retry'), { onClick: refresh })));
+          error === 'loadFailed' && button(t('retry'), { onClick: refresh }));
     }
     function Settings({ t }) {
       return h('div', { className: 'dsh-remote' },

@@ -6,9 +6,6 @@ export declare const en: {
     serverHint: string;
     enable: string;
     address: string;
-    computerName: string;
-    computer: string;
-    advanced: string;
     ca: string;
     caHint: string;
     save: string;
@@ -45,6 +42,11 @@ export declare const en: {
     generating: string;
     devices: string;
     devicesHint: string;
+    thisComputer: string;
+    rename: string;
+    renameDevice: string;
+    deviceName: string;
+    invalidName: string;
     noDevices: string;
     revoke: string;
     revoking: string;

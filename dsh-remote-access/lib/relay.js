@@ -264,7 +264,6 @@ export function createRelayManager(home, webServer, register, generatePairTicket
             saving = true;
             try {
                 const input = await bodyJson(req), next = validateRelayConfig(input, config);
-                computerIdentity(home, input.computerName);
                 await stop();
                 config = next;
                 persist();
@@ -272,7 +271,7 @@ export function createRelayManager(home, webServer, register, generatePairTicket
                 return reply(res, 200, { ok: true, state, detail });
             }
             catch {
-                return reply(res, 400, { ok: false, error: '保存失败：仅支持自动注册，请检查服务器 HTTPS 地址、电脑名称、证书和文件权限' });
+                return reply(res, 400, { ok: false, error: '保存失败：请检查服务器 HTTPS 地址、证书和文件权限' });
             }
             finally {
                 saving = false;

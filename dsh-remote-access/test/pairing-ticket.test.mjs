@@ -5,7 +5,8 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import http from 'node:http';
 import { once } from 'node:events';
-import { tmpdir } from 'node:os';
+import os, { tmpdir } from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { createSecurity, RELAY_REQUEST } from '../lib/security.js';
 import { computerIdentity } from '../lib/identity.js';
@@ -43,12 +44,27 @@ test('scan tickets expire, are replaced and consumed once; approval and claim pr
   assert.equal((await call('pair/claim', { deviceId: 'a' })).ok, false);
 });
 
-test('installation identity survives rename and reload; server changes get new registration credentials', () => {
+test('installation identity survives rename and reload; server changes get new registration credentials', t => {
+  let systemName = 'Synthetic-PC';
+  t.mock.method(os, 'hostname', () => systemName); syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const home = mkdtempSync(join(tmpdir(), 'dsh-identity-'));
   try {
-    const initial = computerIdentity(home), renamed = computerIdentity(home, 'Synthetic computer');
+    const initial = computerIdentity(home);
+    assert.equal(initial.name, 'Synthetic-PC');
+    systemName = 'Synthetic-PC-2';
+    assert.equal(computerIdentity(home).name, systemName);
+    const renamed = computerIdentity(home, 'Synthetic computer');
+    systemName = 'Synthetic-PC-3';
     assert.equal(initial.id, renamed.id);
     assert.deepEqual(computerIdentity(home), renamed);
+    for (const name of ['', '  ', 'x'.repeat(65), 'bad\nname', null, 42]) assert.throws(() => computerIdentity(home, name));
+    assert.deepEqual(computerIdentity(home), renamed);
+    const file = join(home, 'remote-access', 'identity.json');
+    writeFileSync(file, JSON.stringify({ id: initial.id, name: '电脑' }));
+    assert.deepEqual(computerIdentity(home), { id: initial.id, name: systemName });
+    writeFileSync(file, JSON.stringify({ id: initial.id, name: 'Existing custom name' }));
+    assert.deepEqual(computerIdentity(home), { id: initial.id, name: 'Existing custom name' });
     const first = validateRelayConfig({ enabled: true, serverUrl: 'https://relay.example.test' });
     const saved = { ...first, hostId: 'a'.repeat(32) };
     const again = validateRelayConfig({ enabled: true, serverUrl: saved.serverUrl }, saved);
