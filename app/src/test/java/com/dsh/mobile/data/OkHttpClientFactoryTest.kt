@@ -12,7 +12,7 @@ class OkHttpClientFactoryTest {
     @Test
     fun relayCredentialStaysWithinHostPathAndSurvivesStaleProfile() {
         val profile = HostProfile(id = "token-scope-test", remark = "test", url = "",
-            connectionMode = "relay", relayServerUrl = "https://relay.example", relayHostId = "pc-a")
+            connectionMode = "relay", computerId = "00000000-0000-4000-8000-000000000001", relayServerUrl = "https://relay.example", relayHostId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         val client = OkHttpClientFactory.build(profile).first
         OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, "fresh-token")
         OkHttpClientFactory.build(profile) // old Compose snapshot must not erase the new token
@@ -26,13 +26,13 @@ class OkHttpClientFactoryTest {
             probe.newCall(okhttp3.Request.Builder().url(url).build()).execute().close()
             return sent
         }
-        assertEquals("Bearer fresh-token", tokenAt("https://relay.example/h/pc-a/api/session.list"))
-        assertNull(tokenAt("https://relay.example/h/pc-b/api/session.list"))
-        assertNull(tokenAt("https://another.example/h/pc-a/api/session.list"))
-        assertNull(tokenAt("http://relay.example/h/pc-a/api/session.list"))
+        assertEquals("Bearer fresh-token", tokenAt("https://relay.example/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/api/session.list"))
+        assertNull(tokenAt("https://relay.example/h/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/api/session.list"))
+        assertNull(tokenAt("https://another.example/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/api/session.list"))
+        assertNull(tokenAt("http://relay.example/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/api/session.list"))
         assertTrue(!client.followRedirects)
         assertTrue(!client.retryOnConnectionFailure)
-        OkHttpClientFactory.build(profile.copy(relayHostId = "pc-b"))
+        OkHttpClientFactory.build(profile.copy(relayHostId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
         assertNull(OkHttpClientFactory.ChannelTokenRegistry.get(profile.id))
         OkHttpClientFactory.release(profile.id)
     }

@@ -59,7 +59,7 @@ fun HostProfile.connectionUrl(): String {
     require(connectionMode == "relay") { "未知连接模式" }
     val uri = java.net.URI(relayServerUrl.trim())
     require(uri.scheme == "https" && !uri.host.isNullOrBlank() && uri.userInfo == null && uri.query == null && uri.fragment == null && uri.path in listOf("", "/")) { "中转服务器请填写 HTTPS 地址，不带路径或账号" }
-    require(Regex("[A-Za-z0-9_-]{1,64}").matches(relayHostId)) { "请填写有效的主机 ID" }
+    require(Regex("[a-f0-9]{32}").matches(relayHostId) && Regex("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}").matches(computerId)) { "旧版或无效的中转记录，请删除后扫描电脑生成的新二维码" }
     require(!trustSelfSigned) { "中转连接必须校验证书，可导入受信 CA" }
     return relayServerUrl.trim().trimEnd('/') + "/h/" + relayHostId
 }

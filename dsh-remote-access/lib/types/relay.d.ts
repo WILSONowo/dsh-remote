@@ -4,11 +4,11 @@ type Config = {
     serverUrl: string;
     hostId: string;
     registrationToken: string;
-    registrationMode: 'automatic' | 'manual';
+    registrationMode: 'automatic';
     caFile: string;
     allowInsecureLoopback: boolean;
 };
-export declare function validateRelayConfig(input: any, previous?: Config): Config;
+export declare function validateRelayConfig(input: any, previous?: Config, persisted?: boolean): Config;
 /** A private gateway dispatches only /api routes and always marks requests as remote. */
 export declare function createGateway(webServer: any): {
     gateway: http.Server<typeof http.IncomingMessage, typeof http.ServerResponse>;

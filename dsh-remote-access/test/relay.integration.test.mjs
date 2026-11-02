@@ -4,7 +4,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,7 +19,7 @@ async function until(fn, timeout = 5000) {
   const end = Date.now() + timeout;
   while (!fn()) { if (Date.now() > end) throw new Error('Condition timeout'); await new Promise(r => setTimeout(r, 20)); }
 }
-async function fixture(t, secure = false, automatic = false) {
+async function fixture(t, secure = false) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-relay-test-'));
   const previous = process.env.DSH_HOME; process.env.DSH_HOME = home;
   const cleanups = [];
@@ -54,7 +54,6 @@ async function fixture(t, secure = false, automatic = false) {
   direct.on('upgrade', (req, socket, head) => webServer.upgrades.get(req.url)?.handler(req, socket, head));
   await listenLoopback(direct);
   const localUrl = `http://127.0.0.1:${direct.address().port}`;
-  const token = randomBytes(32).toString('hex');
   let tls, caFile = '';
   if (secure) {
     caFile = join(home, 'test-cert.pem'); const key = join(home, 'test-key.pem');
@@ -63,8 +62,7 @@ async function fixture(t, secure = false, automatic = false) {
       '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1', '-keyout', key, '-out', caFile], { stdio: 'ignore', windowsHide: true });
     tls = { key: readFileSync(key), cert: readFileSync(caFile) };
   }
-  const relay = createRelayServer({ hosts: { desktop: createHash('sha256').update(token).digest('hex') },
-    registration: automatic ? { enabled: true, database: join(home, 'hosts.sqlite') } : undefined,
+  const relay = createRelayServer({ registration: { enabled: true, database: join(home, 'hosts.sqlite') },
     tls, allowInsecureLoopback: !secure });
   await listenLoopback(relay.server);
   const url = `${secure ? 'https' : 'http'}://127.0.0.1:${relay.server.address().port}`;
@@ -80,7 +78,6 @@ async function fixture(t, secure = false, automatic = false) {
   }
   async function configure(enabled = true, overrides = {}) {
     return json(localUrl, '/api/remote-access/relay/config', { enabled, serverUrl: url,
-      ...(automatic ? { registrationMode: 'automatic' } : { hostId: 'desktop', registrationToken: token }),
       caFile, allowInsecureLoopback: !secure, ...overrides });
   }
   t.after(async () => {
@@ -96,19 +93,28 @@ async function fixture(t, secure = false, automatic = false) {
   const hostId = [...relay.online.keys()][0];
   const base = url + '/h/' + hostId;
   async function pair(id) {
-    const code = await json(localUrl, '/api/remote-access/pair/code/generate', {});
-    const result = await json(base, '/api/remote-access/pair/code/verify', { deviceId: id, deviceName: id, code: code.body.code });
+    const qr = await json(localUrl, '/api/remote-access/relay/pairing', {});
+    const ticket = JSON.parse(Buffer.from(qr.body.link.split('#')[1], 'base64url')).ticket;
+    const headers = { 'X-DSH-Pairing-Secret': randomBytes(32).toString('hex') };
+    assert.equal((await json(base, '/api/remote-access/pair/request', { deviceId: id, deviceName: id, ticket }, undefined, headers)).body.state, 'pending');
+    await json(localUrl, '/api/remote-access/pair/respond', { deviceId: id, outcome: 'approve' });
+    const result = await json(base, '/api/remote-access/pair/claim', { deviceId: id }, undefined, headers);
     assert.equal(result.body.ok, true); return result.body.token;
   }
-  return { home, relay, url, localUrl, base, hostId, json, pair, configure, tls, registrationToken: token, executions: () => executions };
+  return { home, relay, url, localUrl, base, hostId, json, pair, configure, tls, registrationToken: JSON.parse(readFileSync(join(home, 'remote-access', 'relay.json'))).registrationToken, executions: () => executions };
 }
 
 test('自动注册与扫码：无服务器逐机配置，多手机独立确认、撤销、名称与身份分离', { skip: !backend && 'Set DSH_RELAY_BACKEND', timeout: 20000 }, async t => {
-  const f = await fixture(t, true, true);
+  const f = await fixture(t, true);
   const settings = await f.json(f.localUrl, '/api/remote-access/relay/config');
-  assert.equal(settings.body.registrationMode, 'automatic');
+  assert.equal(settings.body.registrationMode, undefined);
+  assert.equal(settings.body.hostId, undefined);
   assert.equal(settings.body.registrationToken, undefined);
   assert.match(f.hostId, /^[a-f0-9]{32}$/);
+  assert.equal((await f.configure(true, { hostId: f.hostId })).status, 400);
+  assert.equal(f.relay.online.has(f.hostId), true);
+  assert.equal((await f.json(f.base, '/api/remote-access/pair/request', { deviceId: 'manual' })).body.error, 'pairing_ticket_required');
+  assert.equal((await f.json(f.base, '/api/remote-access/pair/code/verify', { deviceId: 'manual', code: '123456' })).body.error, 'relay_requires_scan');
   assert.equal((await f.json(f.base, '/api/remote-access/relay/pairing', {})).status, 401);
   async function qr() {
     const r = await f.json(f.localUrl, '/api/remote-access/relay/pairing', {});
@@ -159,7 +165,7 @@ test('本机 HTTP 中转：配对、未授权拦截、流式上传、保留直�
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), data);
   const direct = await fetch(f.localUrl + '/api/echo', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'X-Forwarded-For': 'remote' }, body: 'direct' });
   assert.equal(await direct.text(), 'direct');
-  assert.equal((await fetch(f.url + '/h/another/api/echo', { headers: { Authorization: 'Bearer ' + token } })).status, 503);
+  assert.equal((await fetch(f.url + '/h/' + '0'.repeat(32) + '/api/echo', { headers: { Authorization: 'Bearer ' + token } })).status, 503);
   assert.equal((await fetch(f.base + '/not-api')).status, 404);
   assert.equal(f.executions(), 2);
 });
@@ -171,7 +177,7 @@ test('HTTPS/WSS：CA 验证、主机注册鉴权、重复注册与设备配对',
   }), /certificate|self.signed/i);
   assert.equal((await f.json(f.url, '/healthz')).body.protocol, 1);
   const rejection = token => new Promise((resolve, reject) => {
-    const ws = new WebSocket(f.url.replace('https:', 'wss:') + '/relay/v1/agent/desktop', { ca: f.tls.cert, headers: { Authorization: 'Bearer ' + token } });
+    const ws = new WebSocket(f.url.replace('https:', 'wss:') + '/relay/v1/agent/' + f.hostId, { ca: f.tls.cert, headers: { Authorization: 'Bearer ' + token } });
     ws.on('unexpected-response', (_, res) => { res.resume(); resolve(res.statusCode); ws.terminate(); });
     ws.on('error', e => { if (!/closed before/.test(e.message)) reject(e); });
   });
@@ -180,7 +186,7 @@ test('HTTPS/WSS：CA 验证、主机注册鉴权、重复注册与设备配对',
   const device = await f.pair('tls-phone');
   assert.equal((await f.json(f.base, '/api/remote-access/pair/check?deviceId=tls-phone', undefined, device)).body.paired, true);
   await f.configure(true, { caFile: '' });
-  await until(() => !f.relay.online.has('desktop'));
+  await until(() => !f.relay.online.has(f.hostId));
   let state;
   for (let i = 0; i < 100; i++) {
     state = await f.json(f.localUrl, '/api/remote-access/relay/config');
@@ -188,8 +194,8 @@ test('HTTPS/WSS：CA 验证、主机注册鉴权、重复注册与设备配对',
     await new Promise(r => setTimeout(r, 20));
   }
   assert.match(state.body.detail, /TLS/);
-  assert.equal(f.relay.online.has('desktop'), false);
-  await f.configure(); await until(() => f.relay.online.has('desktop'));
+  assert.equal(f.relay.online.has(f.hostId), false);
+  await f.configure(); await until(() => f.relay.online.has(f.hostId));
 });
 
 test('真实 WebSocket 和 SSE：按设备撤销立即关闭流，其他设备继续连接', { skip: !backend && 'Set DSH_RELAY_BACKEND to an isolated backend checkout', timeout: 20000 }, async t => {
@@ -216,13 +222,13 @@ test('中转断线会关闭活动请求，重连不重放写操作；禁用中�
   const f = await fixture(t), token = await f.pair('reconnect-phone');
   const headers = { Authorization: 'Bearer ' + token };
   assert.equal(await (await fetch(f.base + '/api/echo', { method: 'POST', headers, body: 'once' })).text(), 'once');
-  f.relay.online.get('desktop').ws.terminate();
-  await until(() => !f.relay.online.has('desktop'));
+  f.relay.online.get(f.hostId).ws.terminate();
+  await until(() => !f.relay.online.has(f.hostId));
   assert.equal((await fetch(f.base + '/api/echo', { method: 'POST', headers, body: 'offline' })).status, 503);
-  await until(() => f.relay.online.has('desktop'), 8000);
+  await until(() => f.relay.online.has(f.hostId), 8000);
   assert.equal(f.executions(), 1);
   assert.equal(await (await fetch(f.base + '/api/echo', { method: 'POST', headers, body: 'new' })).text(), 'new');
-  await f.configure(false); await until(() => !f.relay.online.has('desktop'));
+  await f.configure(false); await until(() => !f.relay.online.has(f.hostId));
   assert.equal((await fetch(f.base + '/api/echo')).status, 503);
   assert.equal(await (await fetch(f.localUrl + '/api/echo', { method: 'POST', headers: { ...headers, 'X-Forwarded-For': 'remote' }, body: 'direct' })).text(), 'direct');
 });

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer, get as httpGet } from 'node:http';
 import { once } from 'node:events';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import WebSocket from 'ws';
 import { createModernAdapter, assistantBaseline } from '../lib/modern.js';
 import { createSecurity, RELAY_REQUEST } from '../lib/security.js';
@@ -99,12 +99,18 @@ test('0.2.1-rc.5 real Gateway + generated schemas: mobile RPC, history, WS, inte
   await listenLoopback(server);
   const url = `http://127.0.0.1:${server.address().port}`;
   t.after(() => { server.closeAllConnections(); server.close(); });
-  const http = async (path, body, token) => {
-    const response = await fetch(url + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: JSON.stringify(body) });
+  const http = async (path, body, token, extra = {}) => {
+    const response = await fetch(url + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...extra }, body: JSON.stringify(body) });
     return { status: response.status, body: response.status === 401 ? null : await response.json() };
   };
-  const code = (await http('/local/api/remote-access/pair/code/generate', {})).body.code;
-  const token = (await http('/api/remote-access/pair/code/verify', { deviceId: 'a', code })).body.token;
+  async function pair(deviceId) {
+    const ticket = security.generatePairTicket().ticket;
+    const proof = { 'X-DSH-Pairing-Secret': randomBytes(32).toString('hex') };
+    assert.equal((await http('/api/remote-access/pair/request', { deviceId, ticket }, undefined, proof)).body.state, 'pending');
+    await http('/local/api/remote-access/pair/respond', { deviceId, outcome: 'approve' });
+    return (await http('/api/remote-access/pair/claim', { deviceId }, undefined, proof)).body.token;
+  }
+  const token = await pair('a');
   assert.match(token, /^[a-f0-9]{64}$/);
   const rpc = async (method, payload = {}, auth = token) => {
     const response = await http('/api/' + method, { type: 'client-request', rpcId: 'req-test', method, payload }, auth);
@@ -145,8 +151,8 @@ test('0.2.1-rc.5 real Gateway + generated schemas: mobile RPC, history, WS, inte
   const body = { type: 'client-response', rpcId: approval.rpcId, result: { ok: true, value: {
     sessionId: 's1', approvalId: approval.payload.approvalId, outcome: 'allowed-once',
   } } };
-  const secondCode = (await http('/local/api/remote-access/pair/code/generate', {})).body.code;
-  const tokenB = (await http('/api/remote-access/pair/code/verify', { deviceId: 'b', code: secondCode })).body.token;
+  const tokenB = await pair('b');
+  assert.match(tokenB, /^[a-f0-9]{64}$/);
   assert.equal((await http('/api/respond', body, tokenB)).status, 403);
   assert.equal((await http('/api/respond', body, token)).status, 200);
   assert.deepEqual(await decision, { kind: 'result', value: 'allowed-once' });
@@ -210,25 +216,29 @@ test('0.2.1-rc.5 actual WebServer/Connection: plugin mounting, native auth, rela
   const describe = await fetch(base + '/api/host.describe', { method: 'POST', headers: { 'Content-Type': 'application/json', Host: 'phone.test' }, body: JSON.stringify({ type: 'client-request', rpcId: 'describe', method: 'host.describe' }) });
   assert.equal((await describe.json()).result.value.hostProtocol, 'typert');
   const { createRelayServer } = await import(pathToFileURL(join(backend, 'src/server.mjs')).href);
-  const registration = randomBytes(32).toString('hex');
-  const relay = createRelayServer({ hosts: { sdk: createHash('sha256').update(registration).digest('hex') }, allowInsecureLoopback: true });
+  const relay = createRelayServer({ registration: { enabled: true, database: ':memory:' }, allowInsecureLoopback: true });
   await listenLoopback(relay.server);
   t.after(() => relay.close());
   const relayUrl = `http://127.0.0.1:${relay.server.address().port}`;
-  const post = async (url, body, token) => {
-    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: JSON.stringify(body) });
+  const post = async (url, body, token, extra = {}) => {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...extra }, body: JSON.stringify(body) });
     return { status: r.status, body: await r.json() };
   };
-  assert.equal((await post(base + '/api/remote-access/relay/config', { enabled: true, serverUrl: relayUrl, hostId: 'sdk', registrationToken: registration, allowInsecureLoopback: true })).body.ok, true);
-  for (let i = 0; i < 100 && !relay.online.has('sdk'); i++) await new Promise(r => setTimeout(r, 10));
-  assert.ok(relay.online.has('sdk'));
-  const code = (await post(base + '/api/remote-access/pair/code/generate', {})).body.code;
-  const token = (await post(relayUrl + '/h/sdk/api/remote-access/pair/code/verify', { deviceId: 'sdk-phone', code })).body.token;
+  assert.equal((await post(base + '/api/remote-access/relay/config', { enabled: true, serverUrl: relayUrl, allowInsecureLoopback: true })).body.ok, true);
+  for (let i = 0; i < 100 && !relay.online.size; i++) await new Promise(r => setTimeout(r, 10));
+  assert.equal(relay.online.size, 1);
+  const hostId = [...relay.online.keys()][0];
+  const qr = (await post(base + '/api/remote-access/relay/pairing', {})).body;
+  const ticket = JSON.parse(Buffer.from(qr.link.split('#')[1], 'base64url')).ticket;
+  const proof = { 'X-DSH-Pairing-Secret': randomBytes(32).toString('hex') };
+  assert.equal((await post(relayUrl + '/h/' + hostId + '/api/remote-access/pair/request', { deviceId: 'sdk-phone', ticket }, undefined, proof)).body.state, 'pending');
+  await post(base + '/api/remote-access/pair/respond', { deviceId: 'sdk-phone', outcome: 'approve' });
+  const token = (await post(relayUrl + '/h/' + hostId + '/api/remote-access/pair/claim', { deviceId: 'sdk-phone' }, undefined, proof)).body.token;
   assert.match(token, /^[a-f0-9]{64}$/);
-  const result = await post(relayUrl + '/h/sdk/api/session.list', { type: 'client-request', rpcId: 'via-relay', method: 'session.list', payload: {} }, token);
+  const result = await post(relayUrl + '/h/' + hostId + '/api/session.list', { type: 'client-request', rpcId: 'via-relay', method: 'session.list', payload: {} }, token);
   assert.equal(result.body.result.ok, true, JSON.stringify(result));
   assert.equal(result.body.result.value.items[0].sessionId, 'relay-sdk');
-  assert.equal((await post(relayUrl + '/h/sdk/api/remote-access/pair/code/generate', {}, token)).status, 401);
+  assert.equal((await post(relayUrl + '/h/' + hostId + '/api/remote-access/pair/code/generate', {}, token)).status, 401);
   await mounted.dispose();
   assert.equal(ctx.webServer.prefixes.get('/api'), native, 'surviving host routes must not retain unloaded auth closures');
   assert.equal(ctx.webServer.exact.get('/assets/test.js'), staticRoute);

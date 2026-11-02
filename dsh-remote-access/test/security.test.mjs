@@ -23,10 +23,10 @@ test('中转请求即使来自 localhost 且没有代理头，也不能成为管
 });
 
 test('服务器地址校验阻止非 TLS 公网、URL 凭证、路径与主机 ID 注入', () => {
-  const base = { enabled: true, serverUrl: 'https://relay.example', hostId: 'pc', registrationToken: 'a'.repeat(64) };
+  const base = { enabled: true, serverUrl: 'https://relay.example' };
   assert.equal(validateRelayConfig(base).serverUrl, base.serverUrl);
   for (const serverUrl of ['http://relay.example', 'https://user:password@relay.example', 'https://relay.example/path', 'https://relay.example?token=x', 'wss://relay.example']) assert.throws(() => validateRelayConfig({ ...base, serverUrl }));
-  assert.throws(() => validateRelayConfig({ ...base, hostId: '../other' }));
+  for (const key of ['hostId', 'registrationToken', 'registrationMode']) assert.throws(() => validateRelayConfig({ ...base, [key]: '' }), /手动/);
   assert.throws(() => validateRelayConfig({ ...base, registrationToken: 'short' }));
   assert.throws(() => validateRelayConfig({ ...base, serverUrl: 'http://127.0.0.1' }));
   assert.equal(validateRelayConfig({ ...base, serverUrl: 'http://127.0.0.1', allowInsecureLoopback: true }).enabled, true);

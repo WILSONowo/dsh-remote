@@ -8,7 +8,7 @@ import org.junit.Test
 
 class PairingLinkTest {
     private val now = 1_800_000_000_000L
-    private fun payload() = PairingLink(1, "https://relay.example.test", "synthetic-computer",
+    private fun payload() = PairingLink(1, "https://relay.example.test", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "00000000-0000-4000-8000-000000000001", "Synthetic computer", "a".repeat(64), now + 120_000)
     private fun encode(link: PairingLink) = "dshremote://pair#" +
         Base64.getUrlEncoder().withoutPadding().encodeToString(Json.encodeToString(link).toByteArray())
@@ -16,7 +16,7 @@ class PairingLinkTest {
     @Test fun scanCreatesRelayProfileWithoutPersistingTemporaryTicket() {
         val link = PairingLink.parse(encode(payload()), now)
         val profile = link.profile()
-        assertEquals("https://relay.example.test/h/synthetic-computer", profile.connectionUrl())
+        assertEquals("https://relay.example.test/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", profile.connectionUrl())
         assertEquals(link.computerId, profile.computerId)
         assertEquals("Synthetic computer", profile.deviceModel)
         assertFalse(profile.paired)

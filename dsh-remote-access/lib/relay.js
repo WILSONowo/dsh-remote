@@ -6,17 +6,21 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { Tunnel, MAX_FRAME } from './tunnel.js';
-import { RELAY_REQUEST, VALID_ID, bodyJson, isLocalAdmin, reply } from './security.js';
+import { RELAY_REQUEST, bodyJson, isLocalAdmin, reply } from './security.js';
 import { computerIdentity } from './identity.js';
 import QRCode from 'qrcode';
 const empty = { enabled: false, serverUrl: '', hostId: '', registrationToken: '', registrationMode: 'automatic', caFile: '', allowInsecureLoopback: false };
-export function validateRelayConfig(input, previous = empty) {
+export function validateRelayConfig(input, previous = empty, persisted = false) {
+    if (!persisted && ['hostId', 'registrationToken', 'registrationMode'].some(key => Object.hasOwn(input, key)))
+        throw new Error('不再支持手动中转配置');
+    if (persisted && input.registrationMode !== 'automatic')
+        throw new Error('旧版手动配置已停用，请重新启用自动注册');
     const serverUrl = String(input.serverUrl || '').trim().replace(/\/$/, '');
     const sameServer = serverUrl === previous.serverUrl;
-    const mode = input.registrationMode ?? (input.hostId ? 'manual' : 'automatic');
-    if (!['automatic', 'manual'].includes(mode))
-        throw new Error('未知注册方式');
-    const c = { enabled: input.enabled === true, serverUrl, hostId: String(input.hostId || '').trim(), registrationToken: String(input.registrationToken || (sameServer ? previous.registrationToken : '')), registrationMode: mode, caFile: String(input.caFile || '').trim(), allowInsecureLoopback: input.allowInsecureLoopback === true };
+    const c = { enabled: input.enabled === true, serverUrl,
+        hostId: persisted ? input.hostId : sameServer ? previous.hostId : '',
+        registrationToken: persisted ? input.registrationToken : sameServer ? previous.registrationToken : '',
+        registrationMode: 'automatic', caFile: String(input.caFile || '').trim(), allowInsecureLoopback: input.allowInsecureLoopback === true };
     if (!c.enabled && !c.serverUrl)
         return c;
     const url = new URL(c.serverUrl);
@@ -25,23 +29,12 @@ export function validateRelayConfig(input, previous = empty) {
         throw new Error('服务器地址只填写协议、域名和端口');
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback && c.allowInsecureLoopback))
         throw new Error('公网中转必须使用 HTTPS');
-    if (mode === 'automatic') {
-        if (sameServer && previous.registrationMode === 'automatic') {
-            c.hostId = previous.hostId;
-            c.registrationToken = previous.registrationToken;
-        }
-        else {
-            // Loading a persisted automatic configuration keeps its existing secret.
-            c.hostId = previous === empty ? c.hostId : '';
-            c.registrationToken = previous === empty ? c.registrationToken : '';
-        }
-        if (!c.registrationToken)
-            c.registrationToken = randomBytes(32).toString('hex');
-    }
-    if ((mode === 'manual' || c.hostId) && !VALID_ID.test(c.hostId))
-        throw new Error('主机 ID 只允许字母、数字、下划线及连字符，最多 64 字符');
-    if (!/^[a-f0-9]{64}$/.test(c.registrationToken))
-        throw new Error('注册凭证必须为服务器生成的 64 位十六进制字符串');
+    if (!persisted && !c.registrationToken)
+        c.registrationToken = randomBytes(32).toString('hex');
+    if (typeof c.hostId !== 'string' || (c.hostId && !/^[a-f0-9]{32}$/.test(c.hostId)))
+        throw new Error('自动注册身份无效');
+    if (typeof c.registrationToken !== 'string' || !/^[a-f0-9]{64}$/.test(c.registrationToken))
+        throw new Error('自动注册凭证无效');
     return c;
 }
 /** A private gateway dispatches only /api routes and always marks requests as remote. */
@@ -89,10 +82,10 @@ export function createRelayManager(home, webServer, register, generatePairTicket
     let state = 'disabled', detail = '';
     try {
         if (existsSync(file))
-            config = validateRelayConfig(JSON.parse(readFileSync(file, 'utf8')));
+            config = validateRelayConfig(JSON.parse(readFileSync(file, 'utf8')), undefined, true);
     }
     catch {
-        detail = '中转配置读取失败，请重新保存';
+        detail = '中转配置已失效或属于旧版手动方案，请填写服务器地址重新启用，再让手机扫码连接';
     }
     let generation = 0;
     let local;
@@ -134,7 +127,7 @@ export function createRelayManager(home, webServer, register, generatePairTicket
             detail = '无法读取 CA 证书';
             return;
         }
-        if (config.registrationMode === 'automatic') {
+        { // Automatic registration is the only enrollment path.
             state = 'registering';
             detail = '';
             try {
@@ -176,7 +169,7 @@ export function createRelayManager(home, webServer, register, generatePairTicket
                 });
                 if (generation !== current)
                     return;
-                if (!result?.ok || typeof result.hostId !== 'string' || !VALID_ID.test(result.hostId) || (config.hostId && config.hostId !== result.hostId))
+                if (!result?.ok || typeof result.hostId !== 'string' || !/^[a-f0-9]{32}$/.test(result.hostId) || (config.hostId && config.hostId !== result.hostId))
                     throw new Error('服务器返回的电脑身份不一致');
                 config.hostId = result.hostId;
                 persist();
@@ -261,8 +254,8 @@ export function createRelayManager(home, webServer, register, generatePairTicket
             if (!isLocalAdmin(req))
                 return reply(res, 401, { error: 'local_admin_required' });
             if (req.method === 'GET') {
-                const { registrationToken, ...publicConfig } = config;
-                return reply(res, 200, { ok: true, ...publicConfig, computerName: computerIdentity(home).name, tokenConfigured: !!registrationToken, state, detail });
+                const { hostId, registrationToken, registrationMode, ...publicConfig } = config;
+                return reply(res, 200, { ok: true, ...publicConfig, computerName: computerIdentity(home).name, state, detail });
             }
             if (req.method !== 'POST')
                 return reply(res, 405, { error: 'method_not_allowed' });
@@ -279,7 +272,7 @@ export function createRelayManager(home, webServer, register, generatePairTicket
                 return reply(res, 200, { ok: true, state, detail });
             }
             catch {
-                return reply(res, 400, { ok: false, error: '保存失败：请检查服务器 HTTPS 地址、电脑名称、证书和文件权限；手动配置还需核对主机 ID 与注册凭证' });
+                return reply(res, 400, { ok: false, error: '保存失败：仅支持自动注册，请检查服务器 HTTPS 地址、电脑名称、证书和文件权限' });
             }
             finally {
                 saving = false;

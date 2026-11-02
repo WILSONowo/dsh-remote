@@ -102,6 +102,7 @@ class PairingCoordinator(
 
     suspend fun pairWithCode(code: String): PairCodeResult {
         val profile = connection.currentProfile() ?: return PairCodeResult(false, "没有活跃连接")
+        if (profile.connectionMode == "relay") return PairCodeResult(false, "中转连接请扫码或粘贴电脑生成的临时连接信息")
         val rpc = HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first)
         val result = try {
             rpc.codeVerify(code.trim(), settingsStore.ensureDeviceId(), settingsStore.deviceName.first().ifBlank { android.os.Build.MODEL })
@@ -123,6 +124,11 @@ class PairingCoordinator(
     /** Both QR and manual approval use an independent secret to claim the credential. */
     suspend fun chooseLegacyHandshake(ticket: String? = null) {
         val profile = connection.currentProfile() ?: return
+        if (profile.connectionMode == "relay" && ticket == null) {
+            _events.tryEmit("请扫描电脑生成的新二维码，或粘贴临时连接信息")
+            _awaitingDecision.value = profile.id
+            return
+        }
         if (handshakingFor != null) return
         handshakingFor = profile.id
         _waitingForApproval.value = profile.id
@@ -145,7 +151,7 @@ class PairingCoordinator(
                     }
                 }
                 PairingOutcome.SKIPPED -> {
-                    _events.tryEmit("电脑插件不支持此配对方式，请更新插件或使用配对码")
+                    _events.tryEmit(if (profile.connectionMode == "relay") "电脑插件不支持扫码配对，请更新插件" else "电脑插件不支持此配对方式，请更新插件或使用配对码")
                     _awaitingDecision.value = profile.id
                 }
                 PairingOutcome.DENIED, PairingOutcome.TIMEOUT -> {

@@ -204,7 +204,7 @@ fun ConnectScreen(
         }
     }
 
-    // —— 首次配对对话框（v1.8.0：配对码优先；「等待 PC 确认」旧式兜底）——
+    // 首次配对：中转使用临时连接信息，直连使用配对码或电脑确认。
     var pairCode by remember { mutableStateOf("") }
     var pairError by remember { mutableStateOf<String?>(null) }
     var pairBusy by remember { mutableStateOf(false) }
@@ -518,17 +518,19 @@ fun ConnectScreen(
             )
         }
 
-        // Legacy/direct pairing remains available.
+        // Relay pairing only accepts QR/link tickets; direct pairing is separate.
         if (showPairDialog) {
+            val relayPairing = connection.currentProfile()?.connectionMode == "relay"
             AlertDialog(
                 onDismissRequest = { pairDismissedFor = awaitingId },
                 title = { Text("首次配对") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            "在电脑的 DeepSeek Harness「设置 → 远程控制」中查看或生成 6 位配对码，输入后即可配对。直连和服务器中转均使用此配对码。",
+                            if (relayPairing) "请在电脑的 DeepSeek Harness「远程控制 → 添加手机」生成二维码，再扫码或粘贴临时连接信息。中转不再支持手填主机 ID 或六位码配对。"
+                            else "在电脑的 DeepSeek Harness「设置 → 远程控制」中查看或生成 6 位配对码，输入后完成直连配对。",
                         )
-                        OutlinedTextField(
+                        if (!relayPairing) OutlinedTextField(
                             value = pairCode,
                             onValueChange = { v ->
                                 pairCode = v.filter { it.isDigit() }.take(6)
@@ -550,8 +552,12 @@ fun ConnectScreen(
                 },
                 confirmButton = {
                     TextButton(
-                        enabled = pairCode.length == 6 && !pairBusy,
+                        enabled = relayPairing || (pairCode.length == 6 && !pairBusy),
                         onClick = {
+                            if (relayPairing) {
+                                pairDismissedFor = awaitingId
+                                startScan()
+                            } else
                             scope.launch {
                                 pairBusy = true
                                 val r = appCtx?.pairingCoordinator?.pairWithCode(pairCode)
@@ -560,13 +566,14 @@ fun ConnectScreen(
                                 pairBusy = false
                             }
                         },
-                    ) { Text(if (pairBusy) "配对中…" else "配对") }
+                    ) { Text(if (relayPairing) "扫码连接" else if (pairBusy) "配对中…" else "配对") }
                 },
                 dismissButton = {
                     TextButton(onClick = {
                         pairDismissedFor = awaitingId
-                        scope.launch { appCtx?.pairingCoordinator?.chooseLegacyHandshake() }
-                    }) { Text("等待电脑确认") }
+                        if (relayPairing) showPaste = true
+                        else scope.launch { appCtx?.pairingCoordinator?.chooseLegacyHandshake() }
+                    }) { Text(if (relayPairing) "粘贴连接信息" else "等待电脑确认") }
                 },
             )
         }

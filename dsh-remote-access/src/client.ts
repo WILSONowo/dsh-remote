@@ -177,7 +177,7 @@ window.__ModuleLoader__.load({
 
       return h("div", { style: S.root },
         h("div", { style: S.title }, "配对设备管理"),
-        h("div", { style: S.sub }, "手机 App 首次连接本电脑时，可使用配对码或在此确认允许；已允许的设备可随时撤销，撤销后立即断开该设备，需重新配对。"),
+        h("div", { style: S.sub }, "手机通过服务器连接时，先扫码或粘贴连接信息，再在电脑确认；直连可使用配对码或本机确认。撤销设备后立即断开，需重新配对。"),
         h("div", { style: S.card },
           devices === null ? h("div", { style: S.sub }, "加载中…") :
             devices.length === 0 ? h("div", { style: S.sub }, "暂无已配对设备。") :
@@ -243,9 +243,9 @@ window.__ModuleLoader__.load({
 
       return h("div", { style: S.card },
         h("div", { style: S.row },
-          h("div", { style: S.title }, "配对码（推荐）"),
+          h("div", { style: S.title }, "直连配对码"),
           pc ? h("span", { style: Object.assign({}, S.badge, { background: "rgba(52,199,89,.15)", color: "var(--dsw-alias-state-success-primary)" }) }, "有效 " + mm + ":" + ss) : null),
-        h("div", { style: S.sub }, "生成一个 6 位随机配对码，在手机 App 连接本机后输入即完成配对。"),
+        h("div", { style: S.sub }, "生成一个 6 位随机配对码，手机直连本电脑后输入即可配对。服务器连接请使用“添加手机”。"),
         pc ? h("div", { style: Object.assign({}, S.mono, { fontSize: 30, fontWeight: 700, letterSpacing: "0.4em", color: "var(--dsw-alias-brand-primary)", marginTop: 8, marginBottom: 2 }) }, pc.code) : null,
         pc ? h("div", { style: S.sub }, "10 分钟有效 · 最多试错 5 次 · 验证通过立即作废") : null,
         h("div", { style: Object.assign({}, S.row, { marginTop: 10 }) },
@@ -312,7 +312,6 @@ window.__ModuleLoader__.load({
 
     function RelayCard() {
       var [config, setConfig] = useState(null);
-      var [token, setToken] = useState("");
       var [busy, setBusy] = useState(false);
       var [error, setError] = useState("");
       var [status, setStatus] = useState("");
@@ -337,12 +336,11 @@ window.__ModuleLoader__.load({
         setBusy(true); setError(""); setPairing(null);
         fetchJson("/api/remote-access/relay/config", {
           method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({enabled:config.enabled, serverUrl:config.serverUrl, hostId:config.hostId,
-            registrationToken:token, registrationMode:config.registrationMode, computerName:config.computerName,
+          body: JSON.stringify({enabled:config.enabled, serverUrl:config.serverUrl, computerName:config.computerName,
             caFile:config.caFile, allowInsecureLoopback:config.allowInsecureLoopback})
         }).then(function(r) {
           if (!r || !r.ok) { setError(r && r.error || "保存失败"); return; }
-          setToken(""); refresh(true);
+          refresh(true);
         }).catch(function() { setError("保存失败，请检查电脑端连接"); }).finally(function() { setBusy(false); });
       }
       function addPhone() {
@@ -369,14 +367,6 @@ window.__ModuleLoader__.load({
           field("电脑名称", "computerName", "电脑"),
           h("button", {style:S.btn, onClick:function() { setAdvanced(!advanced); }}, advanced ? "收起高级设置" : "高级设置"),
           advanced ? h("div", {},
-          h("label", {style:S.row}, h("input", {type:"checkbox", checked:config.registrationMode === "manual", disabled:busy,
-            onChange:function(e) { change("registrationMode", e.target.checked ? "manual" : "automatic"); }}), "使用旧版手动注册设置"),
-          config.registrationMode === "manual" ? h("div", {},
-          field("主机 ID", "hostId", "旧版服务器登记的主机 ID"),
-          h("label", {style:{display:"block", marginTop:10}}, h("div", {style:S.sub}, "主机注册凭证"),
-            h("input", {type:"password", autoComplete:"new-password", style:Object.assign({},S.input,{width:"100%",boxSizing:"border-box"}),
-              value:token, disabled:busy, placeholder:config.tokenConfigured ? "已保存，留空保持原凭证" : "服务器生成的注册凭证",
-              onChange:function(e) { setToken(e.target.value); }}))) : null,
           field("自定义 CA 证书路径（可选）", "caFile", "使用公开受信证书时留空")) : null,
           h("div", {style:Object.assign({},S.row,{marginTop:12})},
             h("button", {style:S.btnPrimary, disabled:busy, onClick:save}, busy ? "处理中…" : "保存中转设置"),
@@ -398,7 +388,7 @@ window.__ModuleLoader__.load({
         h("div", { style: S.row },
           h("div", { style: S.title }, "远程身份认证"),
           h("span", { style: Object.assign({}, S.badge, { background: "rgba(52,199,89,.15)", color: "var(--dsw-alias-state-success-primary)" }) }, "● 已启用")),
-        h("div", { style: S.sub }, "通过直连或服务器连接，首次使用配对码或本机确认进行授权。"),
+        h("div", { style: S.sub }, "通过直连或服务器连接。服务器连接需扫码或粘贴临时连接信息后在电脑确认；直连可使用配对码或本机确认。"),
         h("div", { style: S.ok }, "设备管理和中转配置仅允许在本机操作；手机配对后获得独立访问权限。"),
         h(RelayCard, {}),
         h(PairCodeCard, {}),

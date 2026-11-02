@@ -45,7 +45,6 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
     var connectionMode by remember { mutableStateOf("direct") }
     var relayServerUrl by remember { mutableStateOf("") }
     var relayHostId by remember { mutableStateOf("") }
-    var showManualRelay by remember { mutableStateOf(false) }
     var trustSelfSigned by remember { mutableStateOf(false) }
     var caCertUri by remember { mutableStateOf<String?>(null) }
     var proxyType by remember { mutableStateOf("none") }
@@ -205,16 +204,8 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
                 FilterChip(selected = connectionMode == "relay", onClick = { connectionMode = "relay"; trustSelfSigned = false }, label = { Text("服务器") })
             }
             if (connectionMode == "relay") {
-                Text("推荐在首页扫码或粘贴电脑生成的连接信息，服务器地址和电脑身份会自动填写。")
-                TextButton(onClick = { showManualRelay = !showManualRelay }) { Text(if (showManualRelay) "收起手动设置" else "手动设置（兼容旧版）") }
-                if (showManualRelay) {
-                OutlinedTextField(value = relayServerUrl, onValueChange = { relayServerUrl = it },
-                    label = { Text("服务器地址") }, placeholder = { Text("https://relay.example.com:8443") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = relayHostId, onValueChange = { relayHostId = it },
-                    label = { Text("主机 ID") }, supportingText = { Text("仅用于旧版手动配置；新连接请从首页扫码") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth())
-                }
+                Text("请从首页扫码或粘贴电脑生成的连接信息。服务器地址和电脑身份由程序管理，不能手动填写。")
+                if (relayServerUrl.isNotBlank()) Text("服务器：$relayServerUrl", style = MaterialTheme.typography.bodySmall)
             } else OutlinedTextField(
                 value = url, onValueChange = { url = it },
                 label = { Text("服务器地址") },

@@ -196,7 +196,7 @@
           "div",
           { style: S.root },
           h("div", { style: S.title }, "\u914D\u5BF9\u8BBE\u5907\u7BA1\u7406"),
-          h("div", { style: S.sub }, "\u624B\u673A App \u9996\u6B21\u8FDE\u63A5\u672C\u7535\u8111\u65F6\uFF0C\u53EF\u4F7F\u7528\u914D\u5BF9\u7801\u6216\u5728\u6B64\u786E\u8BA4\u5141\u8BB8\uFF1B\u5DF2\u5141\u8BB8\u7684\u8BBE\u5907\u53EF\u968F\u65F6\u64A4\u9500\uFF0C\u64A4\u9500\u540E\u7ACB\u5373\u65AD\u5F00\u8BE5\u8BBE\u5907\uFF0C\u9700\u91CD\u65B0\u914D\u5BF9\u3002"),
+          h("div", { style: S.sub }, "\u624B\u673A\u901A\u8FC7\u670D\u52A1\u5668\u8FDE\u63A5\u65F6\uFF0C\u5148\u626B\u7801\u6216\u7C98\u8D34\u8FDE\u63A5\u4FE1\u606F\uFF0C\u518D\u5728\u7535\u8111\u786E\u8BA4\uFF1B\u76F4\u8FDE\u53EF\u4F7F\u7528\u914D\u5BF9\u7801\u6216\u672C\u673A\u786E\u8BA4\u3002\u64A4\u9500\u8BBE\u5907\u540E\u7ACB\u5373\u65AD\u5F00\uFF0C\u9700\u91CD\u65B0\u914D\u5BF9\u3002"),
           h(
             "div",
             { style: S.card },
@@ -268,10 +268,10 @@
           h(
             "div",
             { style: S.row },
-            h("div", { style: S.title }, "\u914D\u5BF9\u7801\uFF08\u63A8\u8350\uFF09"),
+            h("div", { style: S.title }, "\u76F4\u8FDE\u914D\u5BF9\u7801"),
             pc ? h("span", { style: Object.assign({}, S.badge, { background: "rgba(52,199,89,.15)", color: "var(--dsw-alias-state-success-primary)" }) }, "\u6709\u6548 " + mm + ":" + ss) : null
           ),
-          h("div", { style: S.sub }, "\u751F\u6210\u4E00\u4E2A 6 \u4F4D\u968F\u673A\u914D\u5BF9\u7801\uFF0C\u5728\u624B\u673A App \u8FDE\u63A5\u672C\u673A\u540E\u8F93\u5165\u5373\u5B8C\u6210\u914D\u5BF9\u3002"),
+          h("div", { style: S.sub }, "\u751F\u6210\u4E00\u4E2A 6 \u4F4D\u968F\u673A\u914D\u5BF9\u7801\uFF0C\u624B\u673A\u76F4\u8FDE\u672C\u7535\u8111\u540E\u8F93\u5165\u5373\u53EF\u914D\u5BF9\u3002\u670D\u52A1\u5668\u8FDE\u63A5\u8BF7\u4F7F\u7528\u201C\u6DFB\u52A0\u624B\u673A\u201D\u3002"),
           pc ? h("div", { style: Object.assign({}, S.mono, { fontSize: 30, fontWeight: 700, letterSpacing: "0.4em", color: "var(--dsw-alias-brand-primary)", marginTop: 8, marginBottom: 2 }) }, pc.code) : null,
           pc ? h("div", { style: S.sub }, "10 \u5206\u949F\u6709\u6548 \xB7 \u6700\u591A\u8BD5\u9519 5 \u6B21 \xB7 \u9A8C\u8BC1\u901A\u8FC7\u7ACB\u5373\u4F5C\u5E9F") : null,
           h(
@@ -355,7 +355,6 @@
       }
       function RelayCard() {
         var [config, setConfig] = useState(null);
-        var [token, setToken] = useState("");
         var [busy, setBusy] = useState(false);
         var [error, setError] = useState("");
         var [status, setStatus] = useState("");
@@ -397,9 +396,6 @@
             body: JSON.stringify({
               enabled: config.enabled,
               serverUrl: config.serverUrl,
-              hostId: config.hostId,
-              registrationToken: token,
-              registrationMode: config.registrationMode,
               computerName: config.computerName,
               caFile: config.caFile,
               allowInsecureLoopback: config.allowInsecureLoopback
@@ -409,7 +405,6 @@
               setError(r && r.error || "\u4FDD\u5B58\u5931\u8D25");
               return;
             }
-            setToken("");
             refresh(true);
           }).catch(function() {
             setError("\u4FDD\u5B58\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7535\u8111\u7AEF\u8FDE\u63A5");
@@ -472,35 +467,6 @@
             advanced ? h(
               "div",
               {},
-              h("label", { style: S.row }, h("input", {
-                type: "checkbox",
-                checked: config.registrationMode === "manual",
-                disabled: busy,
-                onChange: function(e) {
-                  change("registrationMode", e.target.checked ? "manual" : "automatic");
-                }
-              }), "\u4F7F\u7528\u65E7\u7248\u624B\u52A8\u6CE8\u518C\u8BBE\u7F6E"),
-              config.registrationMode === "manual" ? h(
-                "div",
-                {},
-                field("\u4E3B\u673A ID", "hostId", "\u65E7\u7248\u670D\u52A1\u5668\u767B\u8BB0\u7684\u4E3B\u673A ID"),
-                h(
-                  "label",
-                  { style: { display: "block", marginTop: 10 } },
-                  h("div", { style: S.sub }, "\u4E3B\u673A\u6CE8\u518C\u51ED\u8BC1"),
-                  h("input", {
-                    type: "password",
-                    autoComplete: "new-password",
-                    style: Object.assign({}, S.input, { width: "100%", boxSizing: "border-box" }),
-                    value: token,
-                    disabled: busy,
-                    placeholder: config.tokenConfigured ? "\u5DF2\u4FDD\u5B58\uFF0C\u7559\u7A7A\u4FDD\u6301\u539F\u51ED\u8BC1" : "\u670D\u52A1\u5668\u751F\u6210\u7684\u6CE8\u518C\u51ED\u8BC1",
-                    onChange: function(e) {
-                      setToken(e.target.value);
-                    }
-                  })
-                )
-              ) : null,
               field("\u81EA\u5B9A\u4E49 CA \u8BC1\u4E66\u8DEF\u5F84\uFF08\u53EF\u9009\uFF09", "caFile", "\u4F7F\u7528\u516C\u5F00\u53D7\u4FE1\u8BC1\u4E66\u65F6\u7559\u7A7A")
             ) : null,
             h(
@@ -537,7 +503,7 @@
             h("div", { style: S.title }, "\u8FDC\u7A0B\u8EAB\u4EFD\u8BA4\u8BC1"),
             h("span", { style: Object.assign({}, S.badge, { background: "rgba(52,199,89,.15)", color: "var(--dsw-alias-state-success-primary)" }) }, "\u25CF \u5DF2\u542F\u7528")
           ),
-          h("div", { style: S.sub }, "\u901A\u8FC7\u76F4\u8FDE\u6216\u670D\u52A1\u5668\u8FDE\u63A5\uFF0C\u9996\u6B21\u4F7F\u7528\u914D\u5BF9\u7801\u6216\u672C\u673A\u786E\u8BA4\u8FDB\u884C\u6388\u6743\u3002"),
+          h("div", { style: S.sub }, "\u901A\u8FC7\u76F4\u8FDE\u6216\u670D\u52A1\u5668\u8FDE\u63A5\u3002\u670D\u52A1\u5668\u8FDE\u63A5\u9700\u626B\u7801\u6216\u7C98\u8D34\u4E34\u65F6\u8FDE\u63A5\u4FE1\u606F\u540E\u5728\u7535\u8111\u786E\u8BA4\uFF1B\u76F4\u8FDE\u53EF\u4F7F\u7528\u914D\u5BF9\u7801\u6216\u672C\u673A\u786E\u8BA4\u3002"),
           h("div", { style: S.ok }, "\u8BBE\u5907\u7BA1\u7406\u548C\u4E2D\u8F6C\u914D\u7F6E\u4EC5\u5141\u8BB8\u5728\u672C\u673A\u64CD\u4F5C\uFF1B\u624B\u673A\u914D\u5BF9\u540E\u83B7\u5F97\u72EC\u7ACB\u8BBF\u95EE\u6743\u9650\u3002"),
           h(RelayCard, {}),
           h(PairCodeCard, {}),

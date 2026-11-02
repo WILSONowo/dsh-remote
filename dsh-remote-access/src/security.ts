@@ -154,6 +154,7 @@ export function createSecurity(home: string, register: (route: Route) => void) {
   registerApi('pair/request', 'POST', (req, b) => {
     const { id, name } = identity(b);
     if (authenticate(req)?.deviceId === id) return { ok: true, state: 'paired' };
+    if (req[RELAY_REQUEST] && b.ticket === undefined) return { ok: false, state: 'expired', error: 'pairing_ticket_required' };
     const s = secret(req), old = pendingNow(id);
     if (old && !equal(old.secretHash, hash(s))) return { ok: false, state: 'busy' };
     for (const id of pending.keys()) pendingNow(id);
@@ -202,7 +203,8 @@ export function createSecurity(home: string, register: (route: Route) => void) {
     if (path === 'generate' || !code || code.expires < Date.now() || code.attempts >= 5) makeCode();
     return { ok: true, code: code!.value, expiresInSec: Math.max(0, Math.floor((code!.expires - Date.now()) / 1000)), maxAttempts: 5 };
   });
-  registerApi('pair/code/verify', 'POST', (_, b) => {
+  registerApi('pair/code/verify', 'POST', (req, b) => {
+    if (req[RELAY_REQUEST]) return { ok: false, error: 'relay_requires_scan' };
     const { id, name } = identity(b);
     if (!code || code.expires < Date.now()) return { ok: false, error: 'no_active_code' };
     if (code.attempts >= 5) return { ok: false, error: 'code_locked' };

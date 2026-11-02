@@ -4,14 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RelayProfileTest {
-    private val relay = HostProfile("a", "", "", connectionMode = "relay", relayServerUrl = "https://relay.example:8443/", relayHostId = "pc-1")
+    private val relay = HostProfile("a", "", "", connectionMode = "relay", computerId = "00000000-0000-4000-8000-000000000001", relayServerUrl = "https://relay.example:8443/", relayHostId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     @Test fun directProfilesRemainCompatible() {
         val p = ProfileCodec.decode("""[{"id":"old","remark":"PC","url":"192.168.1.2:8787"}]""").single()
         assertEquals("http://192.168.1.2:8787", p.connectionUrl())
         assertEquals("direct", p.connectionMode)
     }
     @Test fun relayEndpointPreservesHostForEveryApi() {
-        assertEquals("https://relay.example:8443/h/pc-1", relay.connectionUrl())
+        assertEquals("https://relay.example:8443/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", relay.connectionUrl())
         assertEquals(relay, ProfileCodec.decode(ProfileCodec.encode(listOf(relay))).single())
     }
     @Test fun rejectsInsecureAmbiguousOrInjectedRelayEndpoints() {
@@ -20,6 +20,10 @@ class RelayProfileTest {
         }
         for (id in listOf("../other", "a/b", "", "a?x", "a%2fb")) assertTrue(runCatching { relay.copy(relayHostId = id).connectionUrl() }.isFailure)
         assertTrue(runCatching { relay.copy(trustSelfSigned = true).connectionUrl() }.isFailure)
+    }
+    @Test fun legacyManualRelayProfilesRequireRescan() {
+        assertTrue(runCatching { relay.copy(computerId = "").connectionUrl() }.isFailure)
+        assertTrue(runCatching { relay.copy(relayHostId = "old-manual-host").connectionUrl() }.isFailure)
     }
     @Test fun changingHostDoesNotSendOldCredentialsToNewHost() {
         val paired = relay.copy(paired = true, channelToken = "secret", deviceMac = "mac")

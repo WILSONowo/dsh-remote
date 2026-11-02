@@ -27,6 +27,8 @@ test('scan tickets expire, are replaced and consumed once; approval and claim pr
     await routes.get(req.url).handler(req, { writeHead(code) { status = code; }, end(text) { value = JSON.parse(text); } });
     return { status, ...value };
   }
+  assert.equal((await call('pair/request', { deviceId: 'manual' })).error, 'pairing_ticket_required');
+  assert.equal((await call('pair/code/verify', { deviceId: 'manual', code: '123456' })).error, 'relay_requires_scan');
   const old = security.generatePairTicket(); now += 120001;
   assert.equal((await call('pair/request', { deviceId: 'a', ticket: old.ticket })).error, 'invalid_pairing_ticket');
   const replaced = security.generatePairTicket(), fresh = security.generatePairTicket();
@@ -48,11 +50,13 @@ test('installation identity survives rename and reload; server changes get new r
     assert.equal(initial.id, renamed.id);
     assert.deepEqual(computerIdentity(home), renamed);
     const first = validateRelayConfig({ enabled: true, serverUrl: 'https://relay.example.test' });
-    const saved = { ...first, hostId: 'synthetic-host' };
-    const again = validateRelayConfig({ ...saved, registrationToken: '' }, saved);
+    const saved = { ...first, hostId: 'a'.repeat(32) };
+    const again = validateRelayConfig({ enabled: true, serverUrl: saved.serverUrl }, saved);
     assert.equal(again.registrationToken, first.registrationToken); assert.equal(again.hostId, saved.hostId);
-    assert.deepEqual(validateRelayConfig(saved), saved);
-    const changed = validateRelayConfig({ ...saved, serverUrl: 'https://other.example.test' }, saved);
+    assert.deepEqual(validateRelayConfig(saved, undefined, true), saved);
+    assert.throws(() => validateRelayConfig({ ...saved, registrationMode: 'manual' }, undefined, true), /手动/);
+    assert.throws(() => validateRelayConfig({ ...saved, registrationMode: undefined }, undefined, true), /手动/);
+    const changed = validateRelayConfig({ enabled: true, serverUrl: 'https://other.example.test' }, saved);
     assert.notEqual(changed.registrationToken, saved.registrationToken); assert.equal(changed.hostId, '');
     writeFileSync(join(home, 'remote-access', 'identity.json'), '{broken');
     assert.throws(() => computerIdentity(home));
