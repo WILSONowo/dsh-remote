@@ -46,7 +46,6 @@ fun ConnectScreen(
     startupPending: Boolean = false,
     onStartupHandled: () -> Unit = {},
     onOpenSessions: () -> Unit = {},
-    verifyingAccess: Boolean = false,
     onDisconnect: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -274,7 +273,7 @@ fun ConnectScreen(
                                     Box(Modifier.size(8.dp).background(dotColor, DshShape.pill))
                                     Text(
                                         when (hostState) {
-                                            is DshConnection.State.Connected -> if (verifyingAccess) "正在验证" else if (p.paired && connection.currentProfile()?.paired == true) "已连接" else "待配对"
+                                            is DshConnection.State.Connected -> if (p.paired && connection.currentProfile()?.paired == true) "已连接" else "待配对"
                                             is DshConnection.State.Connecting -> "连接中…"
                                             is DshConnection.State.Error -> "连接失败"
                                             else -> "未连接"
@@ -297,8 +296,8 @@ fun ConnectScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                if (connected != null && p.paired) {
-                                    Button(onClick = onOpenSessions, enabled = !verifyingAccess && connection.currentProfile()?.paired == true) { Text("会话") }
+                                if ((connected != null || hostState is DshConnection.State.Connecting) && p.paired) {
+                                    Button(onClick = onOpenSessions, enabled = connection.currentProfile()?.paired == true) { Text("会话") }
                                 } else if (hostState !is DshConnection.State.Connecting && connected == null) {
                                     Button(onClick = { connectTo(p) }) { Text("连接") }
                                 }

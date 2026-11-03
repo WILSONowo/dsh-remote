@@ -395,7 +395,7 @@ private fun UpdatePromptOverlay(context: android.content.Context) {
             title = { Text("检测到资源更新") },
             text = {
                 Text(
-                    "发现新版本 v$versionTag，是否下载？\n下载将自动选择最快的镜像站。",
+                    "发现新版本 v$versionTag，是否下载？",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             },
@@ -419,7 +419,7 @@ private fun UpdatePromptOverlay(context: android.content.Context) {
                 UpdateChecker.PHASE_CONNECTING -> "正在连接 ${e.mirrorName}…"
                 UpdateChecker.PHASE_DOWNLOADING ->
                     if (e.progress <= 0f) "已连接 ${e.mirrorName}，开始下载…"
-                    else "正在从 ${e.mirrorName} 下载（第 ${e.mirrorIndex + 1}/${UpdateMirrors.DOWNLOAD_MIRRORS.size} 个源）"
+                    else "正在从 ${e.mirrorName} 下载（第 ${e.mirrorIndex + 1}/${UpdateMirrors.APK_MIRRORS.size} 个源）"
                 else -> "下载中…"
             }
             AlertDialog(

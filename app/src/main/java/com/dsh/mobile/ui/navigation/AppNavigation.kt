@@ -76,7 +76,6 @@ fun AppNavigation(
     val activeProfile = profiles.firstOrNull { it.id == activeId }
     var startupPending by rememberSaveable { mutableStateOf(true) }
     var computerMenu by remember { mutableStateOf(false) }
-    var verifying by remember { mutableStateOf(false) }
     var switching by remember { mutableStateOf(false) }
     var notificationAsked by rememberSaveable { mutableStateOf(false) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -102,25 +101,19 @@ fun AppNavigation(
             launchSingleTop = true
         }
     }
-    fun openWithAccess(destination: String) {
-        val id = activeId ?: return
-        if (verifying) return
-        val origin = navController.currentBackStackEntry
-        verifying = true
+    val canEnter = activeProfile?.paired == true && connection.currentProfile()?.id == activeId &&
+        connection.currentProfile()?.paired == true && connState !is DshConnection.State.Disconnected
+
+    fun openProtected(destination: String) {
+        if (!canEnter || route == destination) return
         opScope.launch(Dispatchers.Main.immediate) {
-            try {
-                val permitted = connection.confirmAccess(id)
-                if (navController.currentBackStackEntry !== origin || connection.currentProfile()?.id != id) return@launch
-                if (!permitted) openRoot(Screen.Connect)
-                else if (destination == Screen.Home.route) openRoot(Screen.Home)
-                else navController.navigate(destination) { launchSingleTop = true }
-            } finally {
-                verifying = false
-            }
+            if (connection.currentProfile()?.id != activeId) return@launch
+            if (destination == Screen.Home.route) openRoot(Screen.Home)
+            else navController.navigate(destination) { launchSingleTop = true }
         }
     }
     fun selectRoot(screen: Screen) {
-        if (screen == Screen.Home) openWithAccess(screen.route) else openRoot(screen)
+        if (screen == Screen.Home) openProtected(screen.route) else openRoot(screen)
     }
     LaunchedEffect(connState, activeProfile?.paired, awaitingId, route) {
         if (route in listOf(Screen.Home.route, Screen.Session.route, Screen.Pending.route) &&
@@ -152,7 +145,7 @@ fun AppNavigation(
         val target = pending ?: return@LaunchedEffect
         DshApplication.pendingSession.value = null
         if (target.profileId == profile.id && target.computer == profile.computerScope()) {
-            openWithAccess(Screen.Session.createRoute(target.sessionId))
+            openProtected(Screen.Session.createRoute(target.sessionId))
         } else openRoot(Screen.Connect)
     }
 
@@ -161,16 +154,15 @@ fun AppNavigation(
     val rootScreen = route in listOf(Screen.Connect.route, Screen.Home.route, Screen.Settings.route)
     val showNavigation = rootScreen
     Scaffold(
-        modifier = if (route == Screen.Home.route) Modifier.imePadding() else Modifier,
         containerColor = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onBackground,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            if (showNavigation && !useRail) RootNavigation(false, route, ready, ::selectRoot)
+            if (showNavigation && !useRail) RootNavigation(false, route, canEnter, ::selectRoot)
         },
     ) { padding ->
         Row(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
-            if (showNavigation && useRail) RootNavigation(true, route, ready, ::selectRoot)
+            if (showNavigation && useRail) RootNavigation(true, route, canEnter, ::selectRoot)
             Column(Modifier.weight(1f).fillMaxHeight()) {
                 if (route == Screen.Home.route) {
                     Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
@@ -229,26 +221,27 @@ fun AppNavigation(
                                 onEditHost = { id -> navController.navigate(Screen.HostProfile.createRoute(id)) },
                                 startupPending = startupPending,
                                 onStartupHandled = { startupPending = false },
-                                onOpenSessions = { openWithAccess(Screen.Home.route) },
-                                verifyingAccess = verifying,
+                                onOpenSessions = { openProtected(Screen.Home.route) },
                                 onDisconnect = ::onUserDisconnect,
                             )
                         }
                         composable(Screen.Home.route) {
-                            if (switching || connection.currentProfile()?.id != activeId) {
-                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    Text(if (connState is DshConnection.State.Error) "连接失败" else "连接中…")
+                            BoxWithConstraints(Modifier.fillMaxSize()) {
+                                val pageHeight = maxHeight
+                                Box(Modifier.fillMaxSize().imePadding()) {
+                                    VerifiedPage(connection, activeId, ready && !switching, connState) {
+                                        HomeScreen(
+                                            pageHeight = pageHeight,
+                                            connection = connection,
+                                            approvalCenter = approvalCenter,
+                                            onPending = { navController.navigate(Screen.Pending.route) },
+                                            onSessionClick = { id -> openProtected(Screen.Session.createRoute(id)) },
+                                            onSettings = { openRoot(Screen.Settings) },
+                                            onUpgrade = { navController.navigate(Screen.Pro.route) },
+                                            onDisconnect = { onUserDisconnect() },
+                                        )
+                                    }
                                 }
-                            } else key(activeProfile.computerScope()) {
-                                HomeScreen(
-                                    connection = connection,
-                                    approvalCenter = approvalCenter,
-                                    onPending = { navController.navigate(Screen.Pending.route) },
-                                    onSessionClick = { id -> openWithAccess(Screen.Session.createRoute(id)) },
-                                    onSettings = { openRoot(Screen.Settings) },
-                                    onUpgrade = { navController.navigate(Screen.Pro.route) },
-                                    onDisconnect = { onUserDisconnect() },
-                                )
                             }
                         }
                         composable(
@@ -258,21 +251,23 @@ fun AppNavigation(
                                 navArgument("focusSeq") { type = NavType.StringType; defaultValue = "" },
                             ),
                         ) {
-                            SessionScreen(
-                                sessionId = it.arguments?.getString("sessionId") ?: "",
-                                connection = connection,
-                                approvalCenter = approvalCenter,
-                                focusSeq = it.arguments?.getString("focusSeq")?.toLongOrNull(),
-                                onBack = { if (!navController.popBackStack()) openRoot(Screen.Home) },
-                                onPending = { navController.navigate(Screen.Pending.route) },
-                            )
+                            VerifiedPage(connection, activeId, ready, connState) {
+                                SessionScreen(
+                                    sessionId = it.arguments?.getString("sessionId") ?: "",
+                                    connection = connection,
+                                    approvalCenter = approvalCenter,
+                                    focusSeq = it.arguments?.getString("focusSeq")?.toLongOrNull(),
+                                    onBack = { if (!navController.popBackStack()) openRoot(Screen.Home) },
+                                    onPending = { navController.navigate(Screen.Pending.route) },
+                                )
+                            }
                         }
                         composable(Screen.Pending.route) {
                             PendingScreen(
                                 center = approvalCenter,
                                 connection = connection,
                                 onBack = { navController.popBackStack() },
-                                onOpenSession = { sid, seq -> openWithAccess(Screen.Session.createRoute(sid, seq)) },
+                                onOpenSession = { sid, seq -> openProtected(Screen.Session.createRoute(sid, seq)) },
                             )
                         }
                         composable(Screen.Settings.route) {
@@ -304,6 +299,29 @@ fun AppNavigation(
                     }
                 }
             }
+        }
+    }
+}
+
+/** Show the destination immediately. Start its data requests only after this computer confirms access. */
+@Composable
+private fun VerifiedPage(
+    connection: DshConnection,
+    profileId: String?,
+    ready: Boolean,
+    state: DshConnection.State,
+    content: @Composable () -> Unit,
+) {
+    var verified by remember(profileId, ready, state) { mutableStateOf(false) }
+    LaunchedEffect(profileId, ready, state) {
+        if (profileId != null && ready) {
+            verified = connection.confirmAccess(profileId)
+        }
+    }
+    if (verified && ready) content() else {
+        Box(Modifier.fillMaxSize().testTag("session_page_loading"), contentAlignment = Alignment.Center) {
+            if (state is DshConnection.State.Error) Text(state.message)
+            else CircularProgressIndicator()
         }
     }
 }

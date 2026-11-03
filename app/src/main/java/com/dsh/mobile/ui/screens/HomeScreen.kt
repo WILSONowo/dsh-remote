@@ -68,6 +68,10 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.layout
+import kotlin.math.roundToInt
 import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -80,6 +84,7 @@ import java.util.*
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
+    pageHeight: androidx.compose.ui.unit.Dp,
     connection: DshConnection,
     approvalCenter: ApprovalCenter,
     onPending: () -> Unit,
@@ -847,18 +852,30 @@ fun HomeScreen(
             )
         },
     ) { padding ->
-        BoxWithConstraints(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
-            val bodyHeight = maxHeight
-            Column(Modifier.fillMaxSize()) {
-                if (!compactHeight && bodyHeight >= 180.dp) {
-                    SessionGreeting(compactHeight || bodyHeight < 360.dp)
-                } else if (!compactHeight && bodyHeight >= 96.dp) {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (DshThemeStyle == ThemeStyle.STANDARD) "你好 👋" else "新任务", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                        if (DshThemeId == "blue" || DshThemeId == "warm") {
-                            Image(androidx.compose.ui.res.painterResource(R.drawable.maid_left), "鲸鱼娘",
-                                Modifier.size(36.dp), contentScale = ContentScale.Fit)
+        Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
+            // Choose the greeting size from the window before keyboard avoidance.
+            val bodyHeight = pageHeight - padding.calculateTopPadding() - padding.calculateBottomPadding()
+            val greeting = rememberTopAppBarState()
+            val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(greeting, canScroll = {
+                recentListState.canScrollForward || recentListState.canScrollBackward || greeting.heightOffset < 0f
+            })
+            Column(Modifier.fillMaxSize().nestedScroll(scroll.nestedScrollConnection)) {
+                Box(Modifier.clipToBounds().layout { measurable, constraints ->
+                    val child = measurable.measure(constraints)
+                    greeting.heightOffsetLimit = -child.height.toFloat()
+                    val offset = greeting.heightOffset.roundToInt().coerceIn(-child.height, 0)
+                    layout(child.width, child.height + offset) { child.placeRelative(0, offset) }
+                }) {
+                    if (!compactHeight && bodyHeight >= 180.dp) {
+                        SessionGreeting(bodyHeight < 360.dp)
+                    } else if (!compactHeight && bodyHeight >= 96.dp) {
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (DshThemeStyle == ThemeStyle.STANDARD) "你好 👋" else "新任务", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                            if (DshThemeId == "blue" || DshThemeId == "warm") {
+                                Image(androidx.compose.ui.res.painterResource(R.drawable.maid_left), "鲸鱼娘",
+                                    Modifier.size(36.dp), contentScale = ContentScale.Fit)
+                            }
                         }
                     }
                 }
@@ -917,6 +934,7 @@ fun HomeScreen(
                             item(key = "recent_more") {
                                 RecentSessionControls(stdFiltered.size, recentLimit, { recentLimit += 5 }, {
                                     recentLimit = 5
+                                    greeting.heightOffset = 0f
                                     scope.launch { recentListState.scrollToItem(0) }
                                 })
                             }

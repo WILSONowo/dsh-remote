@@ -46,6 +46,13 @@ object UpdateMirrors {
         "", // 直连兜底
     )
 
+    val APK_MIRRORS = listOf("https://hub.neko-arc.top/") + DOWNLOAD_MIRRORS
+
+    fun apkDownloadMirrors(lastSuccessful: String?): List<String> =
+        if (!lastSuccessful.isNullOrEmpty() && lastSuccessful in DOWNLOAD_MIRRORS)
+            listOf(APK_MIRRORS.first(), lastSuccessful) + DOWNLOAD_MIRRORS.filterNot { it == lastSuccessful }
+        else APK_MIRRORS
+
     /** 检查更新 API 镜像（反代 api.github.com，支持度不一，失败即下一个） */
     val API_MIRRORS: List<String> = listOf(
         "https://ghfast.top/",
@@ -232,8 +239,7 @@ object UpdateChecker {
     fun downloadApkFlow(url: String, dest: File): Flow<DownloadEvent> = flow {
         var lastErr: IOException? = null
         val tmp = File(dest.parentFile, dest.name + ".part")
-        // 上次成功的镜像优先
-        orderedMirrors(UpdateMirrors.DOWNLOAD_MIRRORS).forEachIndexed { index, prefix ->
+        UpdateMirrors.apkDownloadMirrors(lastMirror).forEachIndexed { index, prefix ->
             val target = if (prefix.isEmpty()) url else prefix + url
             val name = mirrorName(prefix)
             emit(DownloadEvent(PHASE_CONNECTING, index, name, target))

@@ -144,7 +144,7 @@ class NavigationUiTest {
     @Test
     fun idleRevocationReturnsToPairing() = exerciseConnectedHome(revoke = "idle")
 
-    @Test fun temporaryCheckFailureKeepsPairingAndStaysOnConnections() = exerciseConnectedHome(revoke = "offline")
+    @Test fun temporaryCheckFailureKeepsPairingAndRecoversInsideSessions() = exerciseConnectedHome(revoke = "offline")
 
     @Test fun firstTaskUsesManualModelAndEffortBeforePrompt() = exerciseConnectedHome(firstTask = "manual")
 
@@ -155,6 +155,8 @@ class NavigationUiTest {
         val calls = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
         val unavailable = java.util.concurrent.atomic.AtomicBoolean(false)
         val authorized = java.util.concurrent.atomic.AtomicBoolean(true)
+        val accessReply = CountDownLatch(1)
+        val holdAccess = java.util.concurrent.atomic.AtomicBoolean(false)
         val release = CountDownLatch(1)
         val executor = Executors.newCachedThreadPool { runnable -> Thread(runnable).apply { isDaemon = true } }
         val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
@@ -174,6 +176,7 @@ class NavigationUiTest {
                         if (contentLength > 0) calls.add(JSONObject(reader.readUtf8(contentLength.toLong())))
                         val output = client.getOutputStream()
                         if (request.contains("/pair/check?")) {
+                            if (holdAccess.get()) accessReply.await()
                             val payload = """{"ok":true,"paired":${authorized.get()}}""".toByteArray()
                             val status = if (unavailable.get()) "503 Unavailable" else "200 OK"
                             output.write("HTTP/1.1 $status\r\nContent-Type: application/json\r\nContent-Length: ${payload.size}\r\nConnection: close\r\n\r\n".toByteArray())
@@ -233,7 +236,13 @@ class NavigationUiTest {
             compose.onNodeWithText("切换").assertDoesNotExist()
             if (revoke == "before") authorized.set(false)
             if (revoke == "offline") unavailable.set(true)
+            holdAccess.set(true)
             compose.onNode(hasText("会话") and !hasTestTag("nav_sessions")).performClick()
+            compose.onNodeWithTag("session_page_loading").assertIsDisplayed()
+            compose.onNodeWithText("切换").assertIsDisplayed()
+            compose.onNodeWithTag("message_editor").assertDoesNotExist()
+            compose.onNodeWithTag("home_recent_list").assertDoesNotExist()
+            accessReply.countDown()
             if (revoke == "offline") {
                 compose.waitUntil(10_000) {
                     org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
@@ -241,13 +250,12 @@ class NavigationUiTest {
                 }
                 Assert.assertTrue(runBlocking { store.profiles.first().single { it.id == "paired-a" }.paired })
                 unavailable.set(false)
-                compose.waitUntil(10_000) { compose.onAllNodesWithText("断开连接").fetchSemanticsNodes().isNotEmpty() }
-                compose.onNodeWithText("添加电脑").assertIsDisplayed()
-                compose.onNodeWithText("切换").assertDoesNotExist()
+                compose.waitUntil(10_000) { compose.onAllNodesWithTag("message_editor").fetchSemanticsNodes().isNotEmpty() }
+                compose.onNodeWithText("切换").assertIsDisplayed()
                 return
             }
-            if (revoke != "before") {
-                compose.waitUntil(10_000) { compose.onAllNodesWithText("切换").fetchSemanticsNodes().isNotEmpty() }
+            if (revoke == "idle") {
+                compose.waitUntil(10_000) { compose.onAllNodesWithTag("message_editor").fetchSemanticsNodes().isNotEmpty() }
             }
             if (revoke != null) {
                 authorized.set(false)
@@ -262,6 +270,7 @@ class NavigationUiTest {
                 Assert.assertTrue(saved.single { it.id == "paired-b" }.paired)
                 return
             }
+            compose.waitUntil(10_000) { compose.onAllNodesWithTag("message_editor").fetchSemanticsNodes().isNotEmpty() }
             if (firstTask != null) {
                 if (firstTask == "manual") {
                     compose.onNodeWithContentDescription("切换模型").performClick()
@@ -287,11 +296,20 @@ class NavigationUiTest {
                 Assert.assertEquals(if (firstTask == "manual") "pro" else "flash", choice.getString("model"))
                 if (firstTask == "manual") Assert.assertEquals("high", choice.getString("reasoningEffort"))
                 Assert.assertEquals(firstTask == "manual", runBlocking { store.manualModel(connection.currentProfile().computerScope(), "new-fixture").first() })
+                compose.waitUntil(10_000) {
+                    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                    compose.onAllNodesWithTag("nav_sessions").fetchSemanticsNodes().isEmpty()
+                }
+                compose.waitForIdle()
                 return
             }
             if (RuntimeEnvironment.getApplication().resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT) {
                 val nav = compose.onNodeWithTag("nav_sessions")
                 val before = nav.fetchSemanticsNode().boundsInRoot
+                val dockNode = compose.onNodeWithTag("home_task_dock")
+                val dockBefore = dockNode.fetchSemanticsNode().boundsInRoot
+                val tools = compose.onNodeWithTag("recent_session_tools")
+                val toolsTop = tools.fetchSemanticsNode().boundsInRoot.top
                 val original = androidx.core.view.ViewCompat.getRootWindowInsets(hostView)
                 val ime = androidx.core.view.WindowInsetsCompat.Type.ime()
                 fun deliverIme(height: Int) {
@@ -302,12 +320,15 @@ class NavigationUiTest {
                         androidx.core.view.ViewCompat.dispatchApplyWindowInsets(hostView, insets)
                     }
                 }
-                deliverIme(160)
+                deliverIme(220)
                 nav.assertIsDisplayed()
-                Assert.assertEquals(before.top - 160f, nav.fetchSemanticsNode().boundsInRoot.top, 1f)
+                Assert.assertEquals(before, nav.fetchSemanticsNode().boundsInRoot)
+                Assert.assertTrue(dockNode.fetchSemanticsNode().boundsInRoot.bottom < dockBefore.bottom)
+                Assert.assertEquals(toolsTop, tools.fetchSemanticsNode().boundsInRoot.top, 1f)
                 deliverIme(0)
                 nav.assertIsDisplayed()
-                Assert.assertEquals(before.top, nav.fetchSemanticsNode().boundsInRoot.top, 1f)
+                Assert.assertEquals(before, nav.fetchSemanticsNode().boundsInRoot)
+                Assert.assertEquals(dockBefore, dockNode.fetchSemanticsNode().boundsInRoot)
             }
             ThemeStyle.entries.forEach { theme ->
                 compose.runOnIdle { style.value = theme }
@@ -330,6 +351,18 @@ class NavigationUiTest {
             val workspace = compose.onNodeWithText("默认工作区").fetchSemanticsNode().boundsInRoot
             Assert.assertTrue(workspace.bottom <= editor.top || workspace.right <= editor.left)
             Assert.assertTrue(compose.onNodeWithTag("home_recent_list").fetchSemanticsNode().boundsInRoot.bottom <= dock.top)
+            if (RuntimeEnvironment.getApplication().resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT) {
+                val tools = compose.onNodeWithTag("recent_session_tools")
+                val topBefore = tools.fetchSemanticsNode().boundsInRoot.top
+                val recentList = compose.onNodeWithTag("home_recent_list")
+                recentList.performTouchInput { swipeUp() }
+                val pinned = tools.fetchSemanticsNode().boundsInRoot.top
+                Assert.assertTrue(pinned < topBefore)
+                recentList.performTouchInput { swipeUp() }
+                Assert.assertEquals(pinned, tools.fetchSemanticsNode().boundsInRoot.top, 1f)
+                repeat(3) { recentList.performTouchInput { swipeDown() } }
+                Assert.assertEquals(topBefore, tools.fetchSemanticsNode().boundsInRoot.top, 1f)
+            }
             compose.onNodeWithText("默认工作区").performClick()
             compose.onAllNodesWithText("默认工作区").onLast().performClick()
             val list = compose.onNode(hasScrollToIndexAction())
@@ -371,10 +404,10 @@ class NavigationUiTest {
             compose.onNodeWithText("Computer b").performClick()
             compose.waitUntil(10_000) {
                 org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-                connection.currentProfile()?.id == "paired-b" && compose.onAllNodesWithText("切换").fetchSemanticsNodes().isNotEmpty()
+                connection.currentProfile()?.id == "paired-b" && compose.onAllNodesWithText("Recent 01").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("添加电脑").assertDoesNotExist()
-            list.performScrollToNode(hasText("显示更多"))
+            compose.onNodeWithTag("home_recent_list").performScrollToNode(hasText("显示更多"))
             compose.onNodeWithText("Recent 06").assertDoesNotExist()
             compose.onNodeWithTag("nav_connections").performClick()
             compose.onNodeWithText("添加电脑").assertIsDisplayed()
@@ -410,6 +443,7 @@ class NavigationUiTest {
                 runBlocking { reset.await() }
             }
             connection.disconnect()
+            accessReply.countDown()
             release.countDown()
             server.close()
             executor.shutdownNow()

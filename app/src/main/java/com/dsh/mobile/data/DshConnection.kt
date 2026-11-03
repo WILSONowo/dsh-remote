@@ -32,7 +32,8 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
     sealed class State {
         data object Disconnected : State()
         data class Connecting(val baseUrl: String) : State()
-        data class Connected(val baseUrl: String, val hostVersion: String? = null, val profileId: String? = null) : State()
+        data class Connected(val baseUrl: String, val hostVersion: String? = null, val profileId: String? = null,
+            val generation: Long = 0L) : State()
         data class Error(val message: String, val code: ConnectionErrorCode?, val profileId: String?) : State()
     }
 
@@ -165,7 +166,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
                         onAttempt?.invoke(AttemptInfo(profile.id, null))
                         // UNKNOWN（占位/缺失/无法解析）时 hostVersion 置 null → UI 显示「版本未知」
                         val hostVersion = if (verdict == VersionVerdict.OK) result.version else null
-                        _state.value = State.Connected(normalized, hostVersion, profile.id)
+                        _state.value = State.Connected(normalized, hostVersion, profile.id, probe.generation)
                         // Unpaired devices can probe the host but cannot open authenticated event streams.
                         // Starting these before pairing races the dialog with an AUTH_FAILED state.
                         if (profile.paired) {
@@ -207,11 +208,15 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
         val check = rpc.check(store.ensureDeviceId())
         if (!isCurrent(probe)) return false
         if (check.paired) return true
-        val revoked = store.clearRevokedAccess(profile)
-        synchronized(this) {
-            if (isCurrent(probe)) {
-                disconnectInternal()
-                if (revoked != null) connect(revoked, onAttempt)
+        // Persisting revocation can remove the page that started this check. Finish the
+        // matching in-memory transition even if that page's coroutine has been cancelled.
+        withContext(NonCancellable) {
+            val revoked = store.clearRevokedAccess(profile)
+            synchronized(this@DshConnection) {
+                if (isCurrent(probe)) {
+                    disconnectInternal()
+                    if (revoked != null) connect(revoked, onAttempt)
+                }
             }
         }
         return false
