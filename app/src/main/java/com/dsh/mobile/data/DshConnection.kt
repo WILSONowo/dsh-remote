@@ -6,6 +6,8 @@ import android.net.Network
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -25,7 +27,8 @@ class ApiException(message: String, val code: String? = null) : Exception(messag
  */
 class DshConnection(private val appContext: Context, private val accessCheckIntervalMs: Long = 10_000L) {
     private val store by lazy { SettingsStore(appContext.applicationContext) }
-    private var generation = 0L
+    @Volatile var generation = 0L
+        private set
     private data class AccessProbe(val profile: HostProfile, val client: OkHttpClient, val generation: Long)
 
 
@@ -279,6 +282,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
     fun disconnect() = disconnectInternal()
 
     private fun disconnectInternal() {
+        modelCatalog = ModelCatalog()
         generation++
         unregisterNetworkCallback()
         scope.coroutineContext.cancelChildren()
@@ -718,7 +722,30 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
         })
     }
 
+    // A new connection owns a new cache, even when reconnecting to the same URL.
+    internal companion object { const val MODEL_CACHE_MS = 60_000L }
+
+    private class ModelCatalog {
+        val mutex = Mutex()
+        val entries = LinkedHashMap<String?, Pair<Long, SessionModelsValue>>()
+    }
+    @Volatile private var modelCatalog = ModelCatalog()
+
     suspend fun sessionModels(sessionId: String? = null): SessionModelsValue? {
+        val cache = modelCatalog
+        return cache.mutex.withLock {
+            if (cache !== modelCatalog) return@withLock null
+            val now = android.os.SystemClock.elapsedRealtime()
+            cache.entries[sessionId]?.let { (at, value) -> if (now - at < MODEL_CACHE_MS) return@withLock value }
+            val fresh = fetchSessionModels(sessionId) ?: return@withLock null
+            if (cache !== modelCatalog) return@withLock null
+            if (cache.entries.size >= 32 && sessionId !in cache.entries) cache.entries.remove(cache.entries.keys.first())
+            cache.entries[sessionId] = now to fresh
+            fresh
+        }
+    }
+
+    private suspend fun fetchSessionModels(sessionId: String?): SessionModelsValue? {
         return try {
             val value = call(DshEndpoints.SESSION_MODELS, buildJsonObject { sessionId?.let { put("sessionId", it) } })
             json.decodeFromJsonElement(SessionModelsValue.serializer(), value)
@@ -730,12 +757,14 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
     }
 
     suspend fun selectModel(sessionId: String, provider: String, model: String, reasoningEffort: String? = null) {
+        val cache = modelCatalog
         call(DshEndpoints.SESSION_SELECT_MODEL, buildJsonObject {
             put("sessionId", sessionId)
             put("provider", provider)
             put("model", model)
             reasoningEffort?.let { put("reasoningEffort", it) }
         })
+        cache.mutex.withLock { cache.entries.remove(sessionId) }
     }
 
     suspend fun workspaceList(): WorkspaceListValue {

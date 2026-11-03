@@ -38,6 +38,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.key
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -71,6 +73,7 @@ import com.dsh.mobile.ui.theme.ThemeRegistry
 import com.dsh.mobile.ui.theme.ThemeRepository
 import com.dsh.mobile.ui.theme.isLightMode
 import com.dsh.mobile.ui.theme.surfaceAlphaFor
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
@@ -167,8 +170,8 @@ class MainActivity : FragmentActivity() {
                     // — 深蓝主题专属背景：鲸鱼娘宫殿夜景（dsh-deep-whale 皮肤资产，低透明度铺底；
                     //   用户自定义背景图优先）—
                     if (builtInBackground) {
-                        val palaceBitmap = remember(theme.id) {
-                            decodeSampledBitmap(context, R.drawable.maid_palace_night)
+                        val palaceBitmap by produceState<Bitmap?>(null, theme.id) {
+                            value = withContext(Dispatchers.IO) { decodeSampledBitmap(context, R.drawable.maid_palace_night) }
                         }
                         AndroidView(
                             factory = { ctx ->
@@ -192,15 +195,19 @@ class MainActivity : FragmentActivity() {
 
                     // — 背景图层：满清晰度图片 + 蒙层（深色→黑 / 浅色→白），对齐桌面端模板 —
                     if (bgUri != null) {
-                        val bgBitmap = remember(bgUri) { decodeSampledBitmap(context, bgUri) }
+                        val bgBitmap by key(bgUri) {
+                            produceState<Bitmap?>(null) {
+                                value = withContext(Dispatchers.IO) { decodeSampledBitmap(context, bgUri) }
+                            }
+                        }
                         AndroidView(
                             factory = { ctx ->
                                 ImageView(ctx).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
                             },
                             update = { iv ->
                                 // 只在该视图尚未挂载该图时重新设置，避免每次重组都重新解码
-                                if (iv.tag !== bgUri && bgBitmap != null) {
-                                    iv.tag = bgUri
+                                if (iv.tag !== bgBitmap) {
+                                    iv.tag = bgBitmap
                                     iv.setImageBitmap(bgBitmap)
                                 }
                                 iv.colorFilter = ColorMatrixColorFilter(

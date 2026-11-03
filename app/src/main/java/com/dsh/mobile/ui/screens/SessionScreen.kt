@@ -333,8 +333,9 @@ class SessionChatState(
         cacheJob?.cancel()
         cacheJob = scope.launch {
             delay(3_000)
-            val snapshot = withContext(Dispatchers.Default) { _items.value.map { it.toCached() } }
-            cache.saveHistory(sessionId, snapshot, cacheCompleteThrough)
+            val snapshot = _items.value
+            val completeThrough = cacheCompleteThrough
+            withContext(Dispatchers.IO) { cache.saveHistory(sessionId, snapshot.map { it.toCached() }, completeThrough) }
         }
     }
 
@@ -811,7 +812,8 @@ fun SessionScreen(
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
-    val computerScope = connection.currentProfile().computerScope()
+    val profile = connection.currentProfile()
+    val computerScope = remember(profile) { profile.computerScope() }
     val state = remember(computerScope, sessionId) { SessionChatState(scope, connection, sessionId, HistoryCache(context, computerScope)) }
     val currentMode by state.currentMode.collectAsState()
     val items by state.items.collectAsState()
@@ -922,18 +924,23 @@ fun SessionScreen(
         else Toast.makeText(context, "需要麦克风权限", Toast.LENGTH_SHORT).show()
     }
 
+    fun loadModels() {
+        if (modelLoading) return
+        modelLoading = true
+        scope.launch {
+            try { connection.sessionModels(sessionId)?.let { modelInfo = it } }
+            finally { modelLoading = false }
+        }
+    }
     LaunchedEffect(sessionId) {
+        loadModels()
         state.load()
         historyReady = true
-        modelInfo = connection.sessionModels(sessionId)
         // 会话所属工作区（只读展示，切换入口在首页新对话）
         runCatching {
             val ws = connection.workspaceList().items
                 .firstOrNull { it.sessionIds.contains(sessionId) }
             workspaceLabel = ws?.let { it.title.ifBlank { it.path } }
-        }
-        // 自适应模型开关（全局设置，可在此会话发送时生效）
-        runCatching {
         }
     }
 
@@ -986,8 +993,9 @@ fun SessionScreen(
 
     // 滚动到顶自动加载更早的消息（每加载一页顶部索引后移，需再次滚到顶才继续；
     // 与「加载更早」按钮并存，按钮兜底手动加载）
-    LaunchedEffect(listState.firstVisibleItemIndex) {
-        if (state.hasMore && listState.firstVisibleItemIndex <= 0 && items.isNotEmpty() && !loadingMore) {
+    val atListStart by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 } }
+    LaunchedEffect(atListStart) {
+        if (state.hasMore && atListStart && items.isNotEmpty() && !loadingMore) {
             loadingMore = true
             scope.launch {
                 state.loadMore()
@@ -1437,16 +1445,9 @@ fun SessionScreen(
                         "danger-full-access" -> Icons.Default.WarningAmber
                         else -> Icons.Outlined.Shield
                     },
-                    modelLabel = composerModelLabel(modelInfo),
+                    modelLabel = remember(modelInfo) { composerModelLabel(modelInfo) },
                     onPermissions = { modeDialog = true },
-                    onModel = {
-                        modelDialog = true
-                        modelLoading = true
-                        scope.launch {
-                            try { modelInfo = connection.sessionModels(sessionId) }
-                            finally { modelLoading = false }
-                        }
-                    },
+                    onModel = { modelDialog = true; loadModels() },
                     permissionMenu = {
                         AccessModeMenu(modeDialog, currentMode, modeBusy, { modeDialog = false }) { value ->
                             modeBusy = true
@@ -1467,13 +1468,7 @@ fun SessionScreen(
                     },
                     modelMenu = {
                         ModelPickerMenu(modelDialog, modelInfo, modelLoading, modelBusy, { modelDialog = false },
-                            onRetry = {
-                                modelLoading = true
-                                scope.launch {
-                                    try { modelInfo = connection.sessionModels(sessionId) }
-                                    finally { modelLoading = false }
-                                }
-                            }, onApply = { provider, model, effort ->
+                            onRetry = ::loadModels, onApply = { provider, model, effort ->
                                 modelBusy = true
                                 scope.launch {
                                     try {

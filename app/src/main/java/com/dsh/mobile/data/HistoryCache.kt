@@ -139,8 +139,13 @@ class HistoryCache internal constructor(private val cacheRoot: File, private val
                 CachedHistory.serializer(),
                 CachedHistory(System.currentTimeMillis(), capped, completeThroughSeq),
             )
-            GZIPOutputStream(historyFile(sessionId).outputStream()).use {
-                it.write(payload.toByteArray(Charsets.UTF_8))
+            val temp = File.createTempFile("history-", ".tmp", historyDir)
+            try {
+                GZIPOutputStream(temp.outputStream()).use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+                java.nio.file.Files.move(temp.toPath(), historyFile(sessionId).toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            } finally {
+                temp.delete()
             }
         }
     }

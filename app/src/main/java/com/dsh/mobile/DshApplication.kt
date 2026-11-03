@@ -24,7 +24,7 @@ class DshApplication : Application() {
         super.onCreate()
         createNotificationChannels()
         // 启动时清理过期会话缓存（7 天前历史、1 天前会话列表），防磁盘膨胀
-        runCatching { HistoryCache(this).prune() }
+        appScope.launch(Dispatchers.IO) { HistoryCache(this@DshApplication).prune() }
         // 加密主密钥初始化（凭证密文存储，幂等）
         SecretCipher.init(this)
         // 假 Pro 订阅银行初始化（读持久化状态）

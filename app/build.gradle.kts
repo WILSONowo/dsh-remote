@@ -18,9 +18,9 @@ val hasReleaseSigning = !releaseStoreFile.isNullOrBlank()
 
 // 版本号统管：由根 gradle.properties 提供（避免散落硬编码，CI 可按 tag 覆盖）
 val dsvVersionName =
-    (project.findProperty("DSH_VERSION_NAME") as String?)?.takeIf { it.isNotBlank() } ?: "3.2.2"
+    (project.findProperty("DSH_VERSION_NAME") as String?)?.takeIf { it.isNotBlank() } ?: "3.2.3"
 val dsvVersionCode =
-    ((project.findProperty("DSH_VERSION_CODE") as String?)?.takeIf { it.isNotBlank() } ?: "66").toInt()
+    ((project.findProperty("DSH_VERSION_CODE") as String?)?.takeIf { it.isNotBlank() } ?: "67").toInt()
 
 android {
     namespace = "com.dsh.mobile"

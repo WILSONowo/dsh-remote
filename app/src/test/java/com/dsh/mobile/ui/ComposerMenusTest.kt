@@ -67,7 +67,7 @@ class ComposerMenusTest {
         val info = mutableStateOf(SessionModelsValue(ModelSelection("example", "a", "low"), groups = Json.parseToJsonElement("""
             [{"id":"example","name":"Example provider","models":[
                 {"id":"a","name":"Model A","reasoning":{"efforts":[{"id":"low","name":"Low"},{"id":"high","name":"High"}]}},
-                {"id":"b","name":"Model B"}
+                {"id":"b","name":"DeepSeek-V4-Flash (custom provider)"}
             ]}]
         """)))
         val open = mutableStateOf(false)
@@ -95,7 +95,11 @@ class ComposerMenusTest {
         compose.onNodeWithText("Model A High").assertIsDisplayed()
         compose.onNodeWithContentDescription("切换模型").performClick()
         compose.onNodeWithText("模型").performScrollTo().performClick()
-        compose.onNodeWithText("Model B").performScrollTo().performClick()
+        val flash = compose.onNodeWithText("DeepSeek-V4-Flash (custom provider)", useUnmergedTree = true)
+        val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+        flash.performScrollTo().performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertEquals(1, layouts.single().lineCount)
+        compose.onNodeWithText("DeepSeek-V4-Flash (custom provider)").performClick()
         assertEquals(ModelSelection("example", "b", null), info.value.current)
         compose.onNodeWithContentDescription("切换模型").performClick()
         compose.onNodeWithText("思考程度").assertDoesNotExist()

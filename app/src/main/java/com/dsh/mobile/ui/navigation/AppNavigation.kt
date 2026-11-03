@@ -92,6 +92,7 @@ fun AppNavigation(
     }
     val entry by navController.currentBackStackEntryAsState()
     val route = entry?.destination?.route
+    val homeScope = remember(activeProfile) { activeProfile.computerScope() }
     val ready = connState is DshConnection.State.Connected &&
         activeProfile?.paired == true && connection.currentProfile()?.id == activeId && connection.currentProfile()?.paired == true
 
@@ -108,19 +109,32 @@ fun AppNavigation(
         if (!canEnter || route == destination) return
         opScope.launch(Dispatchers.Main.immediate) {
             if (connection.currentProfile()?.id != activeId) return@launch
-            if (destination == Screen.Home.route) openRoot(Screen.Home)
-            else navController.navigate(destination) { launchSingleTop = true }
+            navController.navigate(destination) { launchSingleTop = true }
         }
     }
     fun selectRoot(screen: Screen) {
-        if (screen == Screen.Home) openProtected(screen.route) else openRoot(screen)
+        if (navController.currentDestination?.route != screen.route) openRoot(screen)
+    }
+    val onHome = route == Screen.Home.route
+    var homeVerified by remember(entry, activeId, connState) { mutableStateOf(false) }
+    var hadPairing by remember(entry, activeId) { mutableStateOf(activeProfile?.paired == true) }
+    LaunchedEffect(onHome, activeProfile?.id) {
+        if (onHome && connState == DshConnection.State.Disconnected && activeProfile?.paired == true) {
+            connection.connect(activeProfile)
+        }
+    }
+    LaunchedEffect(entry, activeId, ready, connState) {
+        if (onHome && ready) {
+            hadPairing = true
+            activeId?.let { homeVerified = connection.confirmAccess(it) }
+        }
     }
     LaunchedEffect(connState, activeProfile?.paired, awaitingId, route) {
-        if (route in listOf(Screen.Home.route, Screen.Session.route, Screen.Pending.route) &&
-            (connection.currentProfile()?.paired == false || connState == DshConnection.State.Disconnected ||
-                (connState as? DshConnection.State.Error)?.code == com.dsh.mobile.data.ConnectionErrorCode.AUTH_FAILED)) {
-            openRoot(Screen.Connect)
-        }
+        val denied = connection.currentProfile()?.paired == false ||
+            (connState as? DshConnection.State.Error)?.code == com.dsh.mobile.data.ConnectionErrorCode.AUTH_FAILED
+        if ((onHome && hadPairing && denied) ||
+            (route in listOf(Screen.Session.route, Screen.Pending.route) &&
+                (denied || connState == DshConnection.State.Disconnected))) openRoot(Screen.Connect)
     }
     BackHandler(enabled = route == Screen.Home.route || route == Screen.Settings.route) {
         openRoot(Screen.Connect)
@@ -129,13 +143,13 @@ fun AppNavigation(
     /** 用户主动断开：停后台服务 + 清各主机自动连接标记（连接页不再自动重连旧地址），清理完再回连接页 */
     fun onUserDisconnect() {
         connection.disconnect()
+        if (navController.currentDestination?.route != Screen.Connect.route) openRoot(Screen.Connect)
         runCatching { context.stopService(Intent(context, DshConnectionService::class.java)) }
         opScope.launch(Dispatchers.Main.immediate) {
             val store = SettingsStore(context)
             store.profiles.first().filter { it.autoConnect }.forEach {
                 store.upsertProfile(it.copy(autoConnect = false))
             }
-            openRoot(Screen.Connect)
         }
     }
 
@@ -158,11 +172,11 @@ fun AppNavigation(
         contentColor = MaterialTheme.colorScheme.onBackground,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            if (showNavigation && !useRail) RootNavigation(false, route, canEnter, ::selectRoot)
+            if (showNavigation && !useRail) RootNavigation(false, route, ::selectRoot)
         },
     ) { padding ->
         Row(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
-            if (showNavigation && useRail) RootNavigation(true, route, canEnter, ::selectRoot)
+            if (showNavigation && useRail) RootNavigation(true, route, ::selectRoot)
             Column(Modifier.weight(1f).fillMaxHeight()) {
                 if (route == Screen.Home.route) {
                     Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
@@ -173,7 +187,14 @@ fun AppNavigation(
                             Text(activeProfile?.remark?.ifBlank { activeProfile.deviceModel }?.ifBlank { "电脑" } ?: "电脑",
                                 modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.labelLarge)
-                            Text(if (ready) "已连接" else if (connState is DshConnection.State.Connecting) "连接中…" else "未连接", style = MaterialTheme.typography.labelSmall)
+                            Text(when {
+                                switching || connState is DshConnection.State.Connecting -> "连接中…"
+                                ready && !homeVerified -> "正在验证"
+                                ready -> "已连接"
+                                connState is DshConnection.State.Error -> "连接失败"
+                                connection.currentProfile()?.paired == false -> "待配对"
+                                else -> "未连接"
+                            }, style = MaterialTheme.typography.labelSmall)
                             Box {
                                 TextButton(onClick = { computerMenu = true }, enabled = !switching) { Text("切换") }
                                 DropdownMenu(expanded = computerMenu, onDismissRequest = { computerMenu = false }) {
@@ -221,20 +242,25 @@ fun AppNavigation(
                                 onEditHost = { id -> navController.navigate(Screen.HostProfile.createRoute(id)) },
                                 startupPending = startupPending,
                                 onStartupHandled = { startupPending = false },
-                                onOpenSessions = { openProtected(Screen.Home.route) },
+                                onOpenSessions = { selectRoot(Screen.Home) },
                                 onDisconnect = ::onUserDisconnect,
                             )
                         }
                         composable(Screen.Home.route) {
                             BoxWithConstraints(Modifier.fillMaxSize()) {
                                 val pageHeight = maxHeight
+                                val draft = rememberSaveable(homeScope) { mutableStateOf("") }
                                 Box(Modifier.fillMaxSize().imePadding()) {
-                                    VerifiedPage(connection, activeId, ready && !switching, connState) {
+                                    key(homeScope, connection.generation) {
                                         HomeScreen(
                                             pageHeight = pageHeight,
+                                            draft = draft,
+                                            accessReady = homeVerified && ready && !switching,
+                                            connecting = switching || connState is DshConnection.State.Connecting || (ready && !homeVerified),
+                                            onConnect = { openRoot(Screen.Connect) },
                                             connection = connection,
                                             approvalCenter = approvalCenter,
-                                            onPending = { navController.navigate(Screen.Pending.route) },
+                                            onPending = { if (homeVerified && ready) navController.navigate(Screen.Pending.route) },
                                             onSessionClick = { id -> openProtected(Screen.Session.createRoute(id)) },
                                             onSettings = { openRoot(Screen.Settings) },
                                             onUpgrade = { navController.navigate(Screen.Pro.route) },
@@ -327,7 +353,7 @@ private fun VerifiedPage(
 }
 
 @Composable
-private fun RootNavigation(rail: Boolean, route: String?, ready: Boolean, onSelect: (Screen) -> Unit) {
+private fun RootNavigation(rail: Boolean, route: String?, onSelect: (Screen) -> Unit) {
     val entries = listOf(
         Triple(Screen.Connect, Icons.Default.Devices, "连接"),
         Triple(Screen.Home, Icons.Default.ChatBubbleOutline, "会话"),
@@ -342,13 +368,13 @@ private fun RootNavigation(rail: Boolean, route: String?, ready: Boolean, onSele
         Spacer(Modifier.height(8.dp))
         entries.forEach { (screen, icon, label) ->
             NavigationRailItem(modifier = Modifier.testTag(tag(screen)), selected = route == screen.route,
-                enabled = screen != Screen.Home || ready, onClick = { onSelect(screen) },
+                onClick = { onSelect(screen) },
                 icon = { Icon(icon, null) }, label = { Text(label) })
         }
     } else NavigationBar {
         entries.forEach { (screen, icon, label) ->
             NavigationBarItem(modifier = Modifier.testTag(tag(screen)), selected = route == screen.route,
-                enabled = screen != Screen.Home || ready, onClick = { onSelect(screen) },
+                onClick = { onSelect(screen) },
                 icon = { Icon(icon, null) }, label = { Text(label) })
         }
     }

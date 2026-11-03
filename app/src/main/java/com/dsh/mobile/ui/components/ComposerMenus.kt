@@ -8,6 +8,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import com.dsh.mobile.data.SessionModelsValue
 import kotlinx.serialization.json.*
 
@@ -45,6 +46,7 @@ internal fun composerModelLabel(info: SessionModelsValue?): String {
 fun ModelPickerMenu(expanded: Boolean, info: SessionModelsValue?, loading: Boolean, busy: Boolean,
     onDismiss: () -> Unit, onRetry: () -> Unit, onApply: (String, String, String?) -> Unit,
     autoSelected: Boolean = false, onAuto: (() -> Unit)? = null) {
+    if (!expanded) return
     var modelList by remember(expanded) { mutableStateOf(false) }
     val models = remember(info) { composerModels(info) }
     val selected = models.firstOrNull { it.provider == info?.current?.provider && it.id == info.current.model }
@@ -54,7 +56,7 @@ fun ModelPickerMenu(expanded: Boolean, info: SessionModelsValue?, loading: Boole
                 trailingIcon = { if (autoSelected) Icon(Icons.Default.Check, "已选择") }, onClick = onAuto)
             HorizontalDivider(Modifier.padding(horizontal = 16.dp))
         }
-        if (loading || busy) {
+        if ((loading && models.isEmpty()) || busy) {
             ComposerMenuItem(text = { Text(if (busy) "切换中…" else "加载中…") }, enabled = false, onClick = {},
                 leadingIcon = { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) })
         } else if (models.isEmpty()) {
@@ -68,7 +70,7 @@ fun ModelPickerMenu(expanded: Boolean, info: SessionModelsValue?, loading: Boole
                     style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 group.forEach { model ->
                     val current = model.provider == info?.current?.provider && model.id == info.current.model
-                    ComposerMenuItem(text = { Text(model.name) },
+                    ComposerMenuItem(text = { Text(model.name, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) },
                         trailingIcon = { if (current) Icon(Icons.Default.Check, "已选择") },
                         onClick = { onApply(model.provider, model.id, if (current) info?.current?.reasoningEffort else null) })
                 }
@@ -86,6 +88,7 @@ fun ModelPickerMenu(expanded: Boolean, info: SessionModelsValue?, loading: Boole
             }
             ComposerMenuItem(text = {
                 Column { Text("模型"); Text(selected?.name ?: info?.current?.model.orEmpty(),
+                    maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }, trailingIcon = { Icon(Icons.Default.ChevronRight, null) }, onClick = { modelList = true })
         }

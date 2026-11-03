@@ -82,6 +82,11 @@ class NavigationUiTest {
     @Test fun settingsAndSavedComputersRemainReachableWhileDisconnected() {
         launch()
         compose.onNodeWithText("添加电脑").assertIsDisplayed()
+        compose.onNodeWithTag("nav_sessions").assertIsEnabled().performClick()
+        compose.onNodeWithText("最近会话").assertIsDisplayed()
+        compose.onNodeWithText("未连接").assertIsDisplayed()
+        compose.onNodeWithText("连接电脑").assertIsDisplayed()
+        compose.onNodeWithTag("nav_connections").performClick()
         compose.onNodeWithText("设置").assertIsDisplayed()
         compose.onNodeWithText("设置").performClick()
         compose.onNodeWithText("外观").performClick()
@@ -237,11 +242,14 @@ class NavigationUiTest {
             if (revoke == "before") authorized.set(false)
             if (revoke == "offline") unavailable.set(true)
             holdAccess.set(true)
-            compose.onNode(hasText("会话") and !hasTestTag("nav_sessions")).performClick()
+            compose.onNodeWithTag("nav_sessions").assertIsEnabled().performClick()
             compose.onNodeWithTag("session_page_loading").assertIsDisplayed()
             compose.onNodeWithText("切换").assertIsDisplayed()
-            compose.onNodeWithTag("message_editor").assertDoesNotExist()
-            compose.onNodeWithTag("home_recent_list").assertDoesNotExist()
+            compose.onNodeWithText("正在验证").assertIsDisplayed()
+            compose.onNodeWithText("最近会话").assertIsDisplayed()
+            compose.onNodeWithTag("home_recent_list").assertIsDisplayed()
+            compose.onNodeWithTag("message_action").assertIsNotEnabled()
+            if (firstTask == "manual") compose.onNodeWithTag("message_editor").performTextInput("draft")
             accessReply.countDown()
             if (revoke == "offline") {
                 compose.waitUntil(10_000) {
@@ -272,7 +280,9 @@ class NavigationUiTest {
             }
             compose.waitUntil(10_000) { compose.onAllNodesWithTag("message_editor").fetchSemanticsNodes().isNotEmpty() }
             if (firstTask != null) {
+                compose.waitUntil(10_000) { compose.onAllNodesWithText("已连接").fetchSemanticsNodes().isNotEmpty() }
                 if (firstTask == "manual") {
+                    compose.onNodeWithTag("message_editor").assertTextContains("draft").performTextClearance()
                     compose.onNodeWithContentDescription("切换模型").performClick()
                     compose.waitUntil(5_000) { compose.onAllNodesWithText("模型").fetchSemanticsNodes().isNotEmpty() }
                     compose.onNodeWithText("模型").performClick()
@@ -281,6 +291,7 @@ class NavigationUiTest {
                     compose.waitUntil(5_000) { compose.onAllNodesWithText("高").fetchSemanticsNodes().isNotEmpty() }
                     compose.onNodeWithText("高").performClick()
                     compose.onNodeWithText("Fixture Pro 高").assertExists()
+                    Assert.assertEquals(1, calls.count { it.optString("method") == "session.models" })
                 }
                 Assert.assertFalse(calls.any { it.optString("method") == "session.create" })
                 compose.onNodeWithTag("message_editor").performTextInput("hello")
@@ -429,10 +440,16 @@ class NavigationUiTest {
             edit.performClick()
             compose.onNodeWithText("保存").performScrollTo().assertIsDisplayed()
             compose.onNodeWithContentDescription("返回").performClick()
+            compose.waitUntil(5_000) { compose.onAllNodesWithText("断开连接").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("断开连接").performScrollTo().performClick()
             compose.waitUntil(5_000) { connection.state.value is DshConnection.State.Disconnected }
             compose.onNode(hasText("版本 0.2.1-rc.5") and hasAnyAncestor(hasTestTag("active_computer"))).assertExists()
             Assert.assertEquals("0.2.1-rc.5", runBlocking { store.profiles.first().single { it.id == "paired-b" }.lastHostVersion })
+            compose.onNodeWithTag("nav_sessions").assertIsEnabled().performClick()
+            compose.waitUntil(10_000) {
+                compose.onAllNodesWithText("Recent 01").fetchSemanticsNodes().isNotEmpty() &&
+                    compose.onAllNodesWithText("已连接").fetchSemanticsNodes().isNotEmpty()
+            }
         } finally {
             if (firstTask != null) {
                 val reset = scope.async(Dispatchers.IO) { SettingsStore(RuntimeEnvironment.getApplication()).setAutoModel(false) }

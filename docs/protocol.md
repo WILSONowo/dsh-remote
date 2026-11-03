@@ -1,6 +1,6 @@
 # 协议与迁移
 
-手机通过 HTTP RPC 和 WebSocket/SSE 事件流连接电脑插件。中转模式在 API 路径前添加 `/h/<hostId>`，服务器与插件使用 v1 多路复用隧道；协议实现位于 `dsh-remote-access/src/tunnel.ts`。
+手机通过 HTTP RPC 和 WebSocket/SSE 事件流连接电脑插件。中转模式在 API 路径前添加 `/h/<hostId>`，服务器与插件使用 v1 多路复用隧道；协议实现位于 [电脑插件的 tunnel.ts](https://github.com/WILSONowo/dsh-remote-access/blob/main/src/tunnel.ts)。
 后端独立维护于 [dsh-remote-backend](https://github.com/WILSONowo/dsh-remote-backend)。协议变化需运行两仓库联调测试。
 
 `modern.ts` 在 `typertGateway` 和 `connection` 服务就绪时挂载，将手机 RPC 映射到 `0.2.1-rc.5` 的命名参数网关。历史通过 `session/follow` 取得一致游标，再用 `session/page` 翻页；审批和问答通过 `$events/result` 应答。每个事件连接使用独立 scoped Peer，断线和设备撤销释放 Peer。原生桌面浏览器继续使用宿主鉴权。

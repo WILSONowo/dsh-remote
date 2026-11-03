@@ -1,6 +1,0 @@
-{
-  "meta": {
-    "title": "dsh-remote-access",
-    "description": "Remote access to DSH: supports direct LAN connections, tunneling, and self-hosted servers, with protocol compatibility for 0.2.1-rc.5."
-  }
-}

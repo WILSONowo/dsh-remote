@@ -1,6 +1,0 @@
-{
-  "meta": {
-    "title": "dsh-remote-access",
-    "description": "远程访问DSH：支持局域网直连、内网穿透和自建服务器，0.2.1-rc.5 协议适配。"
-  }
-}

@@ -16,12 +16,12 @@ import androidx.compose.ui.unit.dp
 fun NewTaskEditor(input: String, onInputChange: (String) -> Unit, placeholder: String,
     sending: Boolean, canSend: Boolean, onSend: () -> Unit, onVoice: () -> Unit,
     preset: String, presets: List<Pair<String, String>>, onPresetSelect: (String) -> Unit,
-    onPickImage: () -> Unit, error: String?, modelLabel: String, onModel: () -> Unit,
+    onPickImage: () -> Unit, error: String?, actionsEnabled: Boolean = true, modelLabel: String, onModel: () -> Unit,
     modelMenu: @Composable () -> Unit) {
     var addMenu by remember { mutableStateOf(false) }
     var presetMenu by remember { mutableStateOf(false) }
     MessageEditor(input, onInputChange, placeholder, RoundedCornerShape(28.dp), canSend, sending, false, onSend, {},
-        showPermissions = false, modelLabel = modelLabel,
+        actionsEnabled = actionsEnabled, showPermissions = false, modelLabel = modelLabel,
         modelDescription = "切换模型", onModel = onModel, onVoice = onVoice, onAdd = { addMenu = true },
         maxLines = if (LocalConfiguration.current.screenHeightDp < 600) 3 else 6,
         addMenu = {

@@ -40,6 +40,7 @@ fun MessageEditor(
     permissionLabel: String = "权限",
     permissionIcon: ImageVector = Icons.Outlined.Shield,
     showPermissions: Boolean = true,
+    actionsEnabled: Boolean = true,
     modelLabel: String = "模型",
     modelDescription: String = "切换模型",
     onPermissions: () -> Unit = {},
@@ -68,7 +69,7 @@ fun MessageEditor(
                 })
             Row(Modifier.fillMaxWidth().testTag("message_toolbar"), verticalAlignment = Alignment.CenterVertically) {
                 Box {
-                    IconButton(onClick = onAdd, modifier = Modifier.size(48.dp)) {
+                    IconButton(onClick = onAdd, enabled = actionsEnabled, modifier = Modifier.size(48.dp)) {
                         Icon(Icons.Default.Add, if (interrupting) "添加（插话已开启）" else "添加",
                             modifier = Modifier.size(28.dp),
                             tint = if (interrupting) MaterialTheme.colorScheme.primary else LocalContentColor.current)
@@ -84,7 +85,7 @@ fun MessageEditor(
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
                     Box {
                         Row(Modifier.widthIn(min = 48.dp).heightIn(min = 48.dp).clip(CircleShape)
-                            .clickable(onClick = onModel).semantics { contentDescription = modelDescription }
+                            .clickable(enabled = actionsEnabled, onClick = onModel).semantics { contentDescription = modelDescription }
                             .padding(horizontal = 12.dp),
                             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
                             Text(modelLabel, style = MaterialTheme.typography.bodyMedium,
@@ -94,7 +95,7 @@ fun MessageEditor(
                     }
                 }
                 val voice = !running && !sending && !canSend && onVoice != null
-                val enabled = running || voice || (canSend && !sending)
+                val enabled = actionsEnabled && (running || voice || (canSend && !sending))
                 IconButton(onClick = { when { running -> onStop(); voice -> onVoice?.invoke(); else -> onSend() } },
                     enabled = enabled, modifier = Modifier.size(48.dp).testTag("message_action")) {
                     Surface(shape = CircleShape, modifier = Modifier.size(38.dp),

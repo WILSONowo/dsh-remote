@@ -85,6 +85,10 @@ import java.util.*
 @Composable
 fun HomeScreen(
     pageHeight: androidx.compose.ui.unit.Dp,
+    draft: MutableState<String>,
+    accessReady: Boolean,
+    connecting: Boolean,
+    onConnect: () -> Unit,
     connection: DshConnection,
     approvalCenter: ApprovalCenter,
     onPending: () -> Unit,
@@ -95,12 +99,13 @@ fun HomeScreen(
 ) {
     val recentListState = rememberLazyListState()
     val compactHeight = LocalConfiguration.current.screenHeightDp < 600
-    val computerScope = connection.currentProfile().computerScope()
+    val profile = connection.currentProfile()
+    val computerScope = remember(profile) { profile.computerScope() }
     val scope = rememberCoroutineScope()
-    var sessions by remember { mutableStateOf<List<SessionSummary>>(emptyList()) }
+    var rawSessions by remember { mutableStateOf<List<SessionSummary>>(emptyList()) }
     var presets by remember { mutableStateOf<List<Pair<String, String>>>(listOf("cordis" to "Cordis")) }
     var preset by remember { mutableStateOf("cordis") }
-    var input by rememberSaveable(computerScope) { mutableStateOf("") }
+    var input by draft
     val voiceInput = rememberVoiceInput { text -> input = if (input.isBlank()) text else input.trimEnd() + " " + text }
     var sending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
@@ -119,27 +124,34 @@ fun HomeScreen(
     val settingsStore = remember { SettingsStore(context) }
     val cache = remember(computerScope) { HistoryCache(context, computerScope) }
     // 置顶会话 id（本地 pin；列表排序置顶在前，长按菜单可切换）
-    val pinnedIds by settingsStore.pinnedSessionIds(computerScope).collectAsState(initial = emptySet())
+    val pinnedIds by remember(computerScope) { settingsStore.pinnedSessionIds(computerScope) }.collectAsState(initial = emptySet())
+
+    val sessions = remember(rawSessions, pinnedIds) { sortSessionsWithPinned(rawSessions, pinnedIds) }
 
     // —— 新对话工作区选择 ——
     var selectedWorkspaceId by remember { mutableStateOf("") }
     val adaptive by settingsStore.autoModel.collectAsState(initial = false)
     var draftChoice by rememberSaveable(computerScope) { mutableStateOf<ModelSelection?>(null) }
     var draftCatalog by remember(computerScope) { mutableStateOf<SessionModelsValue?>(null) }
+    var fallbackCatalogAt by remember { mutableLongStateOf(0L) }
     var loadingCatalog by remember { mutableStateOf(false) }
     var showModels by remember { mutableStateOf(false) }
     var retrySession by rememberSaveable(computerScope, selectedWorkspaceId, preset) { mutableStateOf<String?>(null) }
 
     fun loadCatalog() {
-        if (loadingCatalog) return
+        if (!accessReady || loadingCatalog) return
+        if (fallbackCatalogAt > 0 && android.os.SystemClock.elapsedRealtime() - fallbackCatalogAt < DshConnection.MODEL_CACHE_MS) return
         loadingCatalog = true
         scope.launch {
             try {
                 // Older plugins require a real session for this read. Its personal selection
                 // is not the computer default and must not be inherited by a new session.
-                draftCatalog = connection.sessionModels() ?: sessions.firstOrNull()?.let {
-                    connection.sessionModels(it.sessionId)?.copy(current = ModelSelection("", ""))
+                val current = connection.sessionModels() ?: sessions.firstOrNull()?.let {
+                    connection.sessionModels(it.sessionId)?.copy(current = ModelSelection("", ""))?.also {
+                        fallbackCatalogAt = android.os.SystemClock.elapsedRealtime()
+                    }
                 }
+                if (current != null) draftCatalog = current
             } finally {
                 loadingCatalog = false
             }
@@ -236,7 +248,6 @@ fun HomeScreen(
         }
     }
 
-    val connState by connection.state.collectAsState()
     val pendingCount by approvalCenter.pendingCount.collectAsState()
 
     /** 后台预取最近 3 个会话首屏进内存缓存：点开即消费（SessionChatState.load 取走），跳过网络等待 */
@@ -251,41 +262,66 @@ fun HomeScreen(
         }
     }
 
+    var listLoading by remember { mutableStateOf(false) }
+    var loadedList by remember { mutableStateOf(false) }
+    var refreshAgain by remember { mutableStateOf(false) }
     fun refreshSessions() {
+        if (!accessReady) return
+        if (listLoading) {
+            refreshAgain = true
+            return
+        }
+        listLoading = true
         // 冷热分离：先渲染本地缓存（秒开；gzip 解压+解码移出主线程），再刷网络
         scope.launch {
-            val cached = withContext(Dispatchers.Default) { cache.loadSessionList() }
-            if (!cached.isNullOrEmpty()) sessions = sortSessionsWithPinned(cached, pinnedIds)
             try {
-                val net = connection.listSessions()
-                    .sortedByDescending { it.updatedAt }
-                sessions = sortSessionsWithPinned(net, pinnedIds)
-                withContext(Dispatchers.Default) { cache.saveSessionList(net) }
-                listError = null
-                prefetchRecent(net)
-            } catch (e: Exception) {
-                if (cached.isNullOrEmpty()) {
-                    listError = "会话列表加载失败：" + e.message
+                if (!loadedList) withContext(Dispatchers.Default) { cache.loadSessionList() }?.let {
+                    rawSessions = it
                 }
+                do {
+                    refreshAgain = false
+                    val net = connection.listSessions()
+                    rawSessions = net
+                    withContext(Dispatchers.Default) { cache.saveSessionList(net) }
+                    listError = null
+                    if (!refreshAgain) prefetchRecent(net)
+                } while (refreshAgain)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (rawSessions.isEmpty()) listError = "会话列表加载失败：" + e.message
+            } finally {
+                loadedList = true
+                listLoading = false
             }
         }
     }
 
+    var loadingArchived by remember { mutableStateOf(false) }
+    var refreshArchivedAgain by remember { mutableStateOf(false) }
     fun refreshArchived() {
+        if (!accessReady) return
+        if (loadingArchived) {
+            refreshArchivedAgain = true
+            return
+        }
+        loadingArchived = true
         scope.launch {
             try {
-                val w = connection.workspaceList()
-                workspaces = w.items
-                archivedIds = w.archivedSessionIds
+                do {
+                    refreshArchivedAgain = false
+                    val w = connection.workspaceList()
+                    workspaces = w.items
+                    archivedIds = w.archivedSessionIds
+                } while (refreshArchivedAgain)
             } catch (e: Exception) {
                 listError = "工作区加载失败：${e.message}"
-            }
+            } finally { loadingArchived = false }
         }
     }
 
-    LaunchedEffect(Unit) {
-        refreshSessions()
-        refreshArchived()
+    LaunchedEffect(accessReady) {
+        if (!accessReady) return@LaunchedEffect
         loadCatalog()
         selectedWorkspaceId = settingsStore.workspaceId(computerScope).first()
         presets = try {
@@ -299,20 +335,15 @@ fun HomeScreen(
         }
     }
 
-    // 置顶集合变化（初次从 DataStore 加载 / 长按切换）→ 就地重排当前列表，置顶立即生效
-    LaunchedEffect(pinnedIds) {
-        sessions = sortSessionsWithPinned(sessions, pinnedIds)
-    }
-
-    // STANDARD 分支会话列表：置顶排序在前（sessions 已在 HomeScreen 层排好，此处幂等）→ 过滤在后
-    val stdFiltered = remember(sessions, pinnedIds, stdSearchQuery) {
-        filterSessions(sortSessionsWithPinned(sessions, pinnedIds), stdSearchQuery)
+    val stdFiltered = remember(sessions, stdSearchQuery) {
+        filterSessions(sessions, stdSearchQuery)
     }
 
     var recentLimit by remember(stdSearchQuery) { mutableIntStateOf(5) }
 
     // 事件驱动的列表刷新（断线重连成功后立即补拉，避免列表停留在空态）
-    LaunchedEffect(Unit) {
+    LaunchedEffect(accessReady) {
+        if (!accessReady) return@LaunchedEffect
         connection.events.collect { ev ->
             when (ev) {
                 is DshConnection.Event.SessionAdded,
@@ -331,7 +362,7 @@ fun HomeScreen(
     // 从设置页/会话页返回、App 回前台时强制刷新会话列表，
     // 修复「从设置界面出来之后会话加载不出来」：返回时组合重建但拉取被静默失败吞掉后
     // 列表停在空态，必须在这里兜底重拉。
-    LifecycleResumeEffect(Unit) {
+    LifecycleResumeEffect(accessReady) {
         refreshSessions()
         refreshArchived()
         onPauseOrDispose {}
@@ -339,7 +370,7 @@ fun HomeScreen(
 
     fun send() {
         val text = input.trim()
-        if ((text.isBlank() && pendingImages.isEmpty()) || sending) return
+        if (!accessReady || (text.isBlank() && pendingImages.isEmpty()) || sending) return
         sending = true
         sendError = null
         scope.launch {
@@ -374,8 +405,9 @@ fun HomeScreen(
         val info = draftChoice?.let { draftCatalog?.copy(current = it) } ?: draftCatalog
         NewTaskEditor(input, { input = it }, placeholder, sending, input.isNotBlank() || pendingImages.isNotEmpty(),
             { send() }, voiceInput, preset, presets, { preset = it }, { imagePicker.launch("image/*") }, sendError,
-            modelLabel = if (adaptive && draftChoice == null) "自适应模型" else composerModelLabel(info),
-            onModel = { showModels = true; loadCatalog() },
+            actionsEnabled = accessReady,
+            modelLabel = if (adaptive && draftChoice == null) "自适应模型" else remember(info) { composerModelLabel(info) },
+            onModel = { if (accessReady) { showModels = true; loadCatalog() } },
             modelMenu = {
                 ModelPickerMenu(showModels, info, loadingCatalog, sending, { showModels = false }, ::loadCatalog,
                     onApply = { provider, model, effort ->
@@ -595,9 +627,10 @@ fun HomeScreen(
     }
 
     // ChatGPT 移动端布局：纯黑扁平 + 顶部导航栏 + 侧边抽屉（85% 宽 + 遮罩）+ 底部胶囊输入栏
-    if (DshThemeStyle == ThemeStyle.CHATGPT) {
+    if (accessReady && DshThemeStyle == ThemeStyle.CHATGPT) {
         Box {
             ChatGptHomeLayout(
+                loadingSessions = !loadedList && sessions.isEmpty(),
                 sessions = sessions,
                 taskEditor = taskEditor,
                 archivedIds = archivedIds,
@@ -644,9 +677,10 @@ fun HomeScreen(
     }
 
     // Claude 移动端布局：暖炭黑 + 极简顶部导航（无背景图标）+ 28px 超大圆角输入容器 + 衬线空态标语 + 侧边抽屉
-    if (DshThemeStyle == ThemeStyle.CLAUDE) {
+    if (accessReady && DshThemeStyle == ThemeStyle.CLAUDE) {
         Box {
             ClaudeHomeLayout(
+                loadingSessions = !loadedList && sessions.isEmpty(),
                 sessions = sessions,
                 taskEditor = taskEditor,
                 archivedIds = archivedIds,
@@ -692,9 +726,10 @@ fun HomeScreen(
     }
 
     // DeepLook 布局（DeepSeek 移动端 1:1）：鲸鱼顶栏 + 大标题 + iOS 分组卡片 + 底部三 tab 导航
-    if (DshThemeStyle == ThemeStyle.DEEPLOOK) {
+    if (accessReady && DshThemeStyle == ThemeStyle.DEEPLOOK) {
         Box {
             DeepLookHomeLayout(
+                loadingSessions = !loadedList && sessions.isEmpty(),
                 sessions = sessions,
                 taskEditor = taskEditor,
                 workspaces = workspaces,
@@ -735,8 +770,9 @@ fun HomeScreen(
                     }) {
                         Icon(Icons.Rounded.Search, if (stdSearchActive) "关闭搜索" else "搜索会话")
                     }
-                    IconButton(onClick = { refreshSessions() }) {
-                        Icon(Icons.Default.Refresh, "刷新")
+                    IconButton(enabled = accessReady && !listLoading, onClick = { refreshSessions() }) {
+                        if (listLoading && sessions.isNotEmpty()) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        else Icon(Icons.Default.Refresh, "刷新")
                     }
                 }
                 if (stdSearchActive) {
@@ -767,7 +803,7 @@ fun HomeScreen(
                     else -> "工作区 ${selectedWorkspaceId.take(8)}"
                 }
                 AssistChip(
-                    onClick = { workspaceSheet = true },
+                    onClick = { workspaceSheet = true }, enabled = accessReady,
                     modifier = Modifier.heightIn(min = 44.dp).widthIn(max = 320.dp).testTag("home_workspace_picker"),
                     shape = RoundedCornerShape(14.dp),
                     label = {
@@ -831,10 +867,7 @@ fun HomeScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("DeepSeek Harness", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Spacer(Modifier.width(10.dp))
-                        val dot = when (connState) {
-                            is DshConnection.State.Connected -> DshSuccess
-                            else -> MaterialTheme.colorScheme.outline
-                        }
+                        val dot = if (accessReady) DshSuccess else MaterialTheme.colorScheme.outline
                         Box(
                             Modifier
                                 .size(8.dp)
@@ -885,7 +918,14 @@ fun HomeScreen(
                     modifier = Modifier.weight(1f).fillMaxWidth().testTag("home_recent_list"),
                     contentPadding = PaddingValues(bottom = 24.dp),
                 ) {
-                    if (sessions.isEmpty() && archivedIds.isEmpty()) {
+                    if (!accessReady || (!loadedList && sessions.isEmpty())) {
+                        item(key = "connection_status") {
+                            Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                                if (connecting || accessReady) RecentLoading()
+                                else TextButton(onClick = onConnect) { Text("连接电脑") }
+                            }
+                        }
+                    } else if (sessions.isEmpty() && archivedIds.isEmpty()) {
                         item(key = "empty") {
                             Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                                 if (DshThemeId != "blue" && DshThemeId != "warm") {
@@ -978,6 +1018,13 @@ fun HomeScreen(
 
         // 工作区选择面板（对齐 Web WorkspacePicker：默认 / 已有工作区 / 新建）
         workspaceSheetOverlay()
+    }
+}
+
+@Composable
+private fun RecentLoading() {
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        CircularProgressIndicator(Modifier.size(24.dp).testTag("session_page_loading"), strokeWidth = 2.dp)
     }
 }
 
@@ -1727,6 +1774,7 @@ private fun SessionActionMenu(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ClaudeHomeLayout(
+    loadingSessions: Boolean,
     sessions: List<SessionSummary>,
     taskEditor: @Composable (String) -> Unit,
     archivedIds: List<String>,
@@ -1752,8 +1800,8 @@ private fun ClaudeHomeLayout(
     var searchQuery by remember { mutableStateOf("") }
     // 抽屉 Recents：置顶排序在前（sessions 已在 HomeScreen 层排好，此处幂等）→ 过滤在后
     var recentLimit by remember(searchQuery) { mutableIntStateOf(5) }
-    val filtered = remember(sessions, pinnedIds, searchQuery) {
-        filterSessions(sortSessionsWithPinned(sessions, pinnedIds), searchQuery)
+    val filtered = remember(sessions, searchQuery) {
+        filterSessions(sessions, searchQuery)
     }
 
     ModalNavigationDrawer(
@@ -1877,7 +1925,7 @@ private fun ClaudeHomeLayout(
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState()),
                 ) {
-                    if (sessions.isEmpty() && archivedIds.isEmpty()) {
+                    if (loadingSessions) RecentLoading() else if (sessions.isEmpty() && archivedIds.isEmpty()) {
                         Text(
                             "暂无会话",
                             style = MaterialTheme.typography.bodyMedium,
@@ -2112,6 +2160,7 @@ private fun ClaudeHomeLayout(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun DeepLookHomeLayout(
+    loadingSessions: Boolean,
     sessions: List<SessionSummary>,
     taskEditor: @Composable (String) -> Unit,
     workspaces: List<WorkspaceView>,
@@ -2148,8 +2197,8 @@ private fun DeepLookHomeLayout(
     }
     // 会话 tab 列表：置顶排序在前（sessions 已在 HomeScreen 层排好，此处幂等）→ 过滤在后
     var recentLimit by remember(searchQuery) { mutableIntStateOf(5) }
-    val filtered = remember(sessions, pinnedIds, searchQuery) {
-        filterSessions(sortSessionsWithPinned(sessions, pinnedIds), searchQuery)
+    val filtered = remember(sessions, searchQuery) {
+        filterSessions(sessions, searchQuery)
     }
 
     Column(
@@ -2280,7 +2329,7 @@ private fun DeepLookHomeLayout(
                         .padding(horizontal = 16.dp, vertical = 4.dp),
                 )
                 Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
-                    if (sessions.isEmpty()) {
+                    if (loadingSessions) RecentLoading() else if (sessions.isEmpty()) {
                         // 空状态：72dp 虚线圆环 + 内部图标 + 「暂无会话」14sp
                         Column(
                             Modifier
@@ -2501,6 +2550,7 @@ private fun chatGptTitleOf(s: SessionSummary): String = sessionTitleOf(s)
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ChatGptHomeLayout(
+    loadingSessions: Boolean,
     sessions: List<SessionSummary>,
     taskEditor: @Composable (String) -> Unit,
     archivedIds: List<String>,
@@ -2662,7 +2712,7 @@ private fun ChatGptHomeLayout(
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState()),
                 ) {
-                    if (filtered.isEmpty() && !showArchived) {
+                    if (loadingSessions) RecentLoading() else if (filtered.isEmpty() && !showArchived) {
                         // 骨架屏样式空态：40dp #1C1C1E 圆角 8 长条
                         Box(
                             Modifier

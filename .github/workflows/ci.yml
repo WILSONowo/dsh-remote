@@ -6,30 +6,6 @@ on:
   pull_request:
 
 jobs:
-  plugin:
-    name: Plugin (dsh-remote-access)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install deps
-        run: npm ci --legacy-peer-deps
-      - name: Build (src → lib)
-        run: npm run build
-      - name: Test plugin on built output
-        run: npm test
-      # prepack 生命周期会再跑 typecheck+build+test 并产出 tgz
-      - name: Pack
-        run: npm pack -w dsh-remote-access
-      - name: Upload package
-        uses: actions/upload-artifact@v4
-        with:
-          name: dsh-remote-access-tgz
-          path: dsh-remote-access-*.tgz
-          if-no-files-found: error
-
   android:
     name: Android (App)
     runs-on: ubuntu-latest
