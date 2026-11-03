@@ -88,7 +88,12 @@ def handler_for(index, trace=False):
                      "projections": {"values": {"title": f"{name} · 示例会话 {n}"}}}
                     for n in range(1, 14)]},
                 "workspace.list": {"items": [], "archivedSessionIds": []},
-                "agentPreset.list": {"items": [{"id": "cordis", "name": "Cordis"}]},
+                "agentPreset.list": {"presets": [
+                    {"id": "standard", "name": "标准模式", "isDefault": True},
+                    {"id": "ptc", "name": "PTC 模式"},
+                    {"id": "minimal", "name": "最小模式"},
+                    {"id": "cordis", "name": "创作者模式"},
+                ]},
                 "session.history": {"events": [
                     {"event": {"seq": 1, "time": timestamp, "type": "session/title",
                                "data": {"title": f"{name} · 示例会话"}}},

@@ -47,6 +47,7 @@ import com.dsh.mobile.data.McpServer
 import com.dsh.mobile.data.OkHttpClientFactory
 import com.dsh.mobile.data.ReleaseInfo
 import com.dsh.mobile.data.sessionTitleOf
+import com.dsh.mobile.data.computerScope
 import com.dsh.mobile.data.shortSessionId
 import com.dsh.mobile.data.SettingsStore
 import com.dsh.mobile.data.Sha3
@@ -99,7 +100,7 @@ fun SettingsScreen(
     fun goBack() {
         when {
             showAppearanceDetail -> showAppearanceDetail = false
-            category == "归档会话" -> category = "会话"
+            category == "归档会话" || category == "默认预设" -> category = "会话"
             category != null -> category = null
             else -> onBack()
         }
@@ -242,10 +243,32 @@ fun SettingsScreen(
             }
             if (category == "会话") {
                 SettingsGroup {
+                    SettingsRow("默认预设", { category = "默认预设" })
                     SettingsToggle("自适应模型", "按任务难度自动选 Flash / Pro（短问答→Flash，复杂任务→Pro）",
                         autoModel, { autoModel = it; scope.launch { settingsStore.setAutoModel(it) } })
                     SettingsRow("归档会话", { category = "归档会话" }, icon = Icons.Default.Archive)
                 }
+            }
+            if (category == "默认预设") {
+                if (remoteReady) key(connState) {
+                    val computer = connection.currentProfile().computerScope()
+                    val saved by remember(computer) { settingsStore.defaultPreset(computer) }.collectAsState(initial = null)
+                    var reload by remember { mutableIntStateOf(0) }
+                    val roster = presetRoster(connection, true, reload)
+                    val presets = roster?.getOrNull().orEmpty()
+                    fun save(id: String) { scope.launch { settingsStore.setDefaultPreset(computer, id) } }
+                    SettingsGroup {
+                        val followsComputer = saved == "" || (roster?.isSuccess == true && saved != null && presets.none { it.id == saved })
+                        SettingsRow("跟随电脑默认", { save("") }, value = if (followsComputer) "已选择" else null,
+                            summary = presets.firstOrNull { it.isDefault }?.label)
+                        for (preset in presets) {
+                            SettingsRow(preset.label, { save(preset.id) }, value = if (saved == preset.id) "已选择" else null,
+                                summary = preset.description?.takeIf { it.isNotBlank() })
+                        }
+                    }
+                    if (roster == null) CircularProgressIndicator()
+                    else if (roster.isFailure) TextButton(onClick = { reload++ }) { Text("重试") }
+                } else Text("请先连接电脑")
             }
             if (category == "归档会话") {
                 val connected = connState as? DshConnection.State.Connected

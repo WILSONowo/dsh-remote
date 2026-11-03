@@ -151,9 +151,9 @@ class NavigationUiTest {
 
     @Test fun temporaryCheckFailureKeepsPairingAndRecoversInsideSessions() = exerciseConnectedHome(revoke = "offline")
 
-    @Test fun firstTaskUsesManualModelAndEffortBeforePrompt() = exerciseConnectedHome(firstTask = "manual")
+    @Test fun firstTaskUsesPresetOverrideBeforePrompt() = exerciseConnectedHome(firstTask = "manual")
 
-    @Test fun firstTaskCanUseAdaptiveModelWhenNotOverridden() = exerciseConnectedHome(firstTask = "adaptive")
+    @Test fun firstTaskUsesComputerDefaultWithAdaptiveModel() = exerciseConnectedHome(firstTask = "adaptive")
 
     private fun exerciseConnectedHome(revoke: String? = null, firstTask: String? = null) {
         if (revoke != null) checkIntervalMs = 300L
@@ -198,6 +198,7 @@ class NavigationUiTest {
                             release.await()
                         } else {
                             val value = if (request.contains("describe")) """{"version":"0.2.1-rc.5"}"""
+                                else if (request.contains("/api/agentPreset.list ")) """{"presets":[{"id":"cordis","name":"Creator"},{"id":"standard","name":"Standard","isDefault":true},{"id":"custom","name":"Custom preset"}]}"""
                                 else if (request.contains("/api/session.models ")) """{"current":{"provider":"fixture","model":"pro"},"groups":[{"id":"fixture","models":[{"id":"flash","name":"Fixture Flash"},{"id":"pro","name":"Fixture Pro","reasoning":{"efforts":[{"id":"high","name":"高"}]}}]}]}"""
                                 else if (request.contains("/api/workspace.list ")) {
                                     workspaceReply.get().await()
@@ -230,7 +231,7 @@ class NavigationUiTest {
             val store = SettingsStore(RuntimeEnvironment.getApplication())
             runBlocking {
                 store.setBackgroundNotify(false)
-                store.setAutoModel(firstTask != null)
+                store.setAutoModel(firstTask == "adaptive")
                 listOf("a", "b").forEach { id ->
                     store.upsertProfile(HostProfile("paired-$id", "Computer $id", "http://127.0.0.1:${server.localPort}", paired = true))
                 }
@@ -304,16 +305,21 @@ class NavigationUiTest {
                 compose.waitUntil(10_000) { compose.onAllNodesWithText("已连接").fetchSemanticsNodes().isNotEmpty() }
                 if (firstTask == "manual") {
                     compose.onNodeWithTag("message_editor").assertTextContains("draft").performTextClearance()
-                    compose.onNodeWithContentDescription("切换模型").performClick()
-                    compose.waitUntil(5_000) { compose.onAllNodesWithText("模型").fetchSemanticsNodes().isNotEmpty() }
-                    compose.onNodeWithText("模型").performClick()
-                    compose.onNode(hasText("Fixture Pro") and !hasContentDescription("切换模型")).performClick()
-                    compose.onNodeWithContentDescription("切换模型").performClick()
-                    compose.waitUntil(5_000) { compose.onAllNodesWithText("高").fetchSemanticsNodes().isNotEmpty() }
-                    compose.onNodeWithText("高").performClick()
-                    compose.onNodeWithText("Fixture Pro 高").assertExists()
-                    Assert.assertEquals(1, calls.count { it.optString("method") == "session.models" })
+                    compose.onNodeWithTag("nav_settings").performClick()
+                    compose.onNode(hasText("会话") and !hasTestTag("nav_sessions")).performClick()
+                    compose.onNodeWithText("默认预设").performClick()
+                    compose.waitUntil(5_000) { compose.onAllNodesWithText("Custom preset").fetchSemanticsNodes().isNotEmpty() }
+                    compose.onNodeWithText("Custom preset").performClick()
+                    compose.onNodeWithTag("nav_sessions").performClick()
+                    compose.waitUntil(5_000) { compose.onAllNodesWithText("Custom preset").fetchSemanticsNodes().isNotEmpty() }
+                    compose.onNodeWithContentDescription("切换预设").performClick()
+                    compose.onNodeWithText("Creator").performClick()
+                    compose.onNodeWithContentDescription("切换预设").assertTextContains("Creator")
+                    Assert.assertEquals("custom", runBlocking { store.defaultPreset(connection.currentProfile().computerScope()).first() })
+                } else {
+                    compose.waitUntil(5_000) { compose.onAllNodesWithText("Standard").fetchSemanticsNodes().isNotEmpty() }
                 }
+                Assert.assertFalse(calls.any { it.optString("method") == "session.models" })
                 Assert.assertFalse(calls.any { it.optString("method") == "session.create" })
                 compose.onNodeWithTag("message_editor").performTextInput("hello")
                 compose.onNodeWithTag("message_action").performClick()
@@ -322,12 +328,15 @@ class NavigationUiTest {
                     calls.any { it.optString("method") == "session.prompt" }
                 }
                 val writes = calls.filter { it.optString("method") in setOf("session.create", "session.selectModel", "session.prompt") }
-                Assert.assertEquals(listOf("session.create", "session.selectModel", "session.prompt"), writes.map { it.getString("method") })
-                val choice = writes[1].getJSONObject("payload")
-                Assert.assertEquals("new-fixture", choice.getString("sessionId"))
-                Assert.assertEquals(if (firstTask == "manual") "pro" else "flash", choice.getString("model"))
-                if (firstTask == "manual") Assert.assertEquals("high", choice.getString("reasoningEffort"))
-                Assert.assertEquals(firstTask == "manual", runBlocking { store.manualModel(connection.currentProfile().computerScope(), "new-fixture").first() })
+                val expected = if (firstTask == "manual") listOf("session.create", "session.prompt")
+                    else listOf("session.create", "session.selectModel", "session.prompt")
+                Assert.assertEquals(expected, writes.map { it.getString("method") })
+                val create = writes.first().getJSONObject("payload")
+                if (firstTask == "manual") Assert.assertEquals("cordis", create.getString("agentPreset"))
+                else {
+                    Assert.assertFalse(create.has("agentPreset"))
+                    Assert.assertEquals("flash", writes[1].getJSONObject("payload").getString("model"))
+                }
                 compose.waitUntil(10_000) {
                     org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
                     compose.onAllNodesWithTag("nav_sessions").fetchSemanticsNodes().isEmpty()

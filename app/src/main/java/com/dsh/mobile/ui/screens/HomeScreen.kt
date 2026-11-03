@@ -17,8 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
-import com.dsh.mobile.ui.components.ModelPickerMenu
-import com.dsh.mobile.ui.components.composerModelLabel
+import com.dsh.mobile.ui.components.presetRoster
 import com.dsh.mobile.ui.components.NewTaskEditor
 import com.dsh.mobile.ui.components.RecentSessionControls
 import com.dsh.mobile.ui.components.rememberVoiceInput
@@ -103,13 +102,10 @@ fun HomeScreen(
     val computerScope = remember(profile) { profile.computerScope() }
     val scope = rememberCoroutineScope()
     var rawSessions by remember { mutableStateOf<List<SessionSummary>>(emptyList()) }
-    var presets by remember { mutableStateOf<List<Pair<String, String>>>(listOf("cordis" to "Cordis")) }
-    var preset by remember { mutableStateOf("cordis") }
     var input by draft
     val voiceInput = rememberVoiceInput { text -> input = if (input.isBlank()) text else input.trimEnd() + " " + text }
     var sending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
-    var presetMenu by remember { mutableStateOf(false) }
     var archivedIds by remember { mutableStateOf<Set<String>?>(null) }
     var workspaces by remember { mutableStateOf<List<WorkspaceView>>(emptyList()) }
     var archiveTarget by remember { mutableStateOf<SessionSummary?>(null) }
@@ -133,33 +129,16 @@ fun HomeScreen(
 
     // —— 新对话工作区选择 ——
     var selectedWorkspaceId by remember { mutableStateOf("") }
-    val adaptive by settingsStore.autoModel.collectAsState(initial = false)
-    var draftChoice by rememberSaveable(computerScope) { mutableStateOf<ModelSelection?>(null) }
-    var draftCatalog by remember(computerScope) { mutableStateOf<SessionModelsValue?>(null) }
-    var fallbackCatalogAt by remember { mutableLongStateOf(0L) }
-    var loadingCatalog by remember { mutableStateOf(false) }
-    var showModels by remember { mutableStateOf(false) }
-    var retrySession by rememberSaveable(computerScope, selectedWorkspaceId, preset) { mutableStateOf<String?>(null) }
+    val savedPreset by remember(computerScope) { settingsStore.defaultPreset(computerScope) }.collectAsState(initial = null)
+    var draftPreset by rememberSaveable(computerScope) { mutableStateOf<String?>(null) }
+    var reloadPresets by remember { mutableIntStateOf(0) }
+    val roster = presetRoster(connection, accessReady, reloadPresets)
+    val presets = roster?.getOrNull().orEmpty()
+    val selectedPreset = presets.firstOrNull { it.id == (draftPreset ?: savedPreset) }
+    val displayPreset = selectedPreset ?: presets.firstOrNull { it.isDefault }
+    val presetReady = savedPreset != null && (roster?.isSuccess == true || (draftPreset ?: savedPreset).isNullOrEmpty())
+    var retrySession by rememberSaveable(computerScope, selectedWorkspaceId, selectedPreset?.id) { mutableStateOf<String?>(null) }
 
-    fun loadCatalog() {
-        if (!accessReady || loadingCatalog) return
-        if (fallbackCatalogAt > 0 && android.os.SystemClock.elapsedRealtime() - fallbackCatalogAt < DshConnection.MODEL_CACHE_MS) return
-        loadingCatalog = true
-        scope.launch {
-            try {
-                // Older plugins require a real session for this read. Its personal selection
-                // is not the computer default and must not be inherited by a new session.
-                val current = connection.sessionModels() ?: sessions.firstOrNull()?.let {
-                    connection.sessionModels(it.sessionId)?.copy(current = ModelSelection("", ""))?.also {
-                        fallbackCatalogAt = android.os.SystemClock.elapsedRealtime()
-                    }
-                }
-                if (current != null) draftCatalog = current
-            } finally {
-                loadingCatalog = false
-            }
-        }
-    }
     var workspaceSheet by remember { mutableStateOf(false) }
     var newWsPath by remember { mutableStateOf("") }
     var newWsTitle by remember { mutableStateOf("") }
@@ -338,17 +317,7 @@ fun HomeScreen(
 
     LaunchedEffect(accessReady) {
         if (!accessReady) return@LaunchedEffect
-        loadCatalog()
         selectedWorkspaceId = settingsStore.workspaceId(computerScope).first()
-        presets = try {
-            val p = connection.agentPresets()
-            if (p.isNotEmpty()) p else listOf("cordis" to "Cordis")
-        } catch (_: Exception) {
-            listOf("cordis" to "Cordis")
-        }
-        if (presets.none { it.first == preset }) {
-            preset = presets.firstOrNull()?.first ?: preset
-        }
     }
 
     val stdFiltered = remember(sessions, stdSearchQuery) {
@@ -386,26 +355,20 @@ fun HomeScreen(
 
     fun send() {
         val text = input.trim()
-        if (!accessReady || (text.isBlank() && pendingImages.isEmpty()) || sending) return
+        if (!accessReady || !presetReady || (text.isBlank() && pendingImages.isEmpty()) || sending) return
         sending = true
         sendError = null
         scope.launch {
             try {
-                val choice = draftChoice
                 val sid = retrySession ?: connection.createSession(
-                    agentPreset = preset,
+                    agentPreset = selectedPreset?.id,
                     workspaceId = selectedWorkspaceId.ifBlank { null },
                 ).also { retrySession = it }
                 val useAdaptive = settingsStore.autoModel.first()
-                if (choice != null) {
-                    connection.selectModel(sid, choice.provider, choice.model, choice.reasoningEffort)
-                } else if (useAdaptive && text.isNotBlank()) {
-                    connection.applyAdaptiveModel(sid, text)
-                }
-                settingsStore.setManualModel(computerScope, sid, choice != null && useAdaptive)
+                if (useAdaptive && text.isNotBlank()) connection.applyAdaptiveModel(sid, text)
                 connection.prompt(sid, text, images = pendingImages)
                 retrySession = null
-                draftChoice = null
+                draftPreset = null
                 input = ""
                 pendingImages = emptyList()
                 onSessionClick(sid)
@@ -418,20 +381,9 @@ fun HomeScreen(
     }
 
     val taskEditor: @Composable (String) -> Unit = { placeholder ->
-        val info = draftChoice?.let { draftCatalog?.copy(current = it) } ?: draftCatalog
         NewTaskEditor(input, { input = it }, placeholder, sending, input.isNotBlank() || pendingImages.isNotEmpty(),
-            { send() }, voiceInput, preset, presets, { preset = it }, { imagePicker.launch("image/*") }, sendError,
-            actionsEnabled = accessReady,
-            modelLabel = remember(info) { composerModelLabel(info) },
-            onModel = { if (accessReady) { showModels = true; loadCatalog() } },
-            modelMenu = {
-                ModelPickerMenu(showModels, info, loadingCatalog, sending, { showModels = false }, ::loadCatalog,
-                    onApply = { provider, model, effort ->
-                        draftChoice = ModelSelection(provider, model, effort)
-                        showModels = false
-                    }, autoSelected = adaptive && draftChoice == null,
-                    onAuto = if (adaptive) ({ draftChoice = null; showModels = false }) else null)
-            })
+            { send() }, voiceInput, displayPreset, roster, { draftPreset = it }, { reloadPresets++ },
+            { imagePicker.launch("image/*") }, sendError, actionsEnabled = accessReady && !sending, sendEnabled = presetReady)
     }
 
     // 工作区选择面板（所有布局分支共用的覆盖层；DeepLook 分支不渲染 Scaffold，也必须挂这里）
@@ -650,12 +602,7 @@ fun HomeScreen(
                 loadingSessions = waitingForList,
                 sessions = sessions,
                 taskEditor = taskEditor,
-                preset = preset,
-                presets = presets,
-                presetMenu = presetMenu,
-                onPresetMenuChange = { presetMenu = it },
                 pendingImages = pendingImages,
-                onPresetSelect = { preset = it },
                 onRemoveImage = { i -> pendingImages = pendingImages.filterIndexed { j, _ -> j != i } },
                 onSessionClick = onSessionClick,
                 onSettings = onSettings,
@@ -2446,12 +2393,7 @@ private fun ChatGptHomeLayout(
     loadingSessions: Boolean,
     sessions: List<SessionSummary>,
     taskEditor: @Composable (String) -> Unit,
-    preset: String,
-    presets: List<Pair<String, String>>,
-    presetMenu: Boolean,
-    onPresetMenuChange: (Boolean) -> Unit,
     pendingImages: List<DshConnection.ImagePart>,
-    onPresetSelect: (String) -> Unit,
     onRemoveImage: (Int) -> Unit,
     onSessionClick: (String) -> Unit,
     onSettings: () -> Unit,
@@ -2729,45 +2671,6 @@ private fun ChatGptHomeLayout(
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(Icons.Default.Menu, null, Modifier.size(20.dp), tint = Color.White)
-                }
-                Spacer(Modifier.weight(1f))
-                // 中间 pill：预设名（#60A5FA 强调，含星标，点击展开预设菜单）
-                Box {
-                    Row(
-                        Modifier
-                            .height(40.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xFF1C1C1E))
-                            .clickable { onPresetMenuChange(true) }
-                            .padding(horizontal = 20.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            Icons.Default.Star,
-                            null,
-                            Modifier.size(18.dp),
-                            tint = Color(0xFF60A5FA),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            presets.firstOrNull { it.first == preset }?.second ?: preset,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color(0xFF60A5FA),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = presetMenu,
-                        onDismissRequest = { onPresetMenuChange(false) },
-                    ) {
-                        presets.forEach { (id, name) ->
-                            DropdownMenuItem(
-                                text = { Text(name) },
-                                onClick = { onPresetSelect(id); onPresetMenuChange(false) },
-                            )
-                        }
-                    }
                 }
                 Spacer(Modifier.weight(1f))
                 Box(

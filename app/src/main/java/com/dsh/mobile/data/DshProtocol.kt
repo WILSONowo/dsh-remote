@@ -206,6 +206,17 @@ data class WorkspaceView(
 )
 
 @Serializable
+data class AgentPreset(
+    val id: String,
+    val name: String? = null,
+    val description: String? = null,
+    val isDefault: Boolean = false,
+    val broken: String? = null,
+) {
+    val label get() = name?.takeIf { it.isNotBlank() } ?: id
+}
+
+@Serializable
 data class WorkspaceListValue(
     val items: List<WorkspaceView> = emptyList(),
     val archivedSessionIds: List<String> = emptyList(),

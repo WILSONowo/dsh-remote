@@ -41,6 +41,7 @@ fun MessageEditor(
     permissionIcon: ImageVector = Icons.Outlined.Shield,
     showPermissions: Boolean = true,
     actionsEnabled: Boolean = true,
+    sendEnabled: Boolean = true,
     modelLabel: String = "模型",
     modelDescription: String = "切换模型",
     onPermissions: () -> Unit = {},
@@ -95,7 +96,7 @@ fun MessageEditor(
                     }
                 }
                 val voice = !running && !sending && !canSend && onVoice != null
-                val enabled = actionsEnabled && (running || voice || (canSend && !sending))
+                val enabled = actionsEnabled && (running || voice || (canSend && sendEnabled && !sending))
                 IconButton(onClick = { when { running -> onStop(); voice -> onVoice?.invoke(); else -> onSend() } },
                     enabled = enabled, modifier = Modifier.size(48.dp).testTag("message_action")) {
                     Surface(shape = CircleShape, modifier = Modifier.size(38.dp),

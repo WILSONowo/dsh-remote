@@ -1061,22 +1061,10 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
         }
     }
 
-    /** agentPreset.list 响应：{presets:[{id, name, trust, isDefault, description}]} */
-    suspend fun agentPresets(): List<Pair<String, String>> {
-        return try {
-            val value = call(DshEndpoints.AGENT_PRESET_LIST)
-            val arr = value.jsonObject["presets"]?.jsonArray
-                ?: value.jsonObject["items"]?.jsonArray
-                ?: return emptyList()
-            arr.mapNotNull { el ->
-                val o = el.jsonObject
-                val id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-                val name = o["name"]?.jsonPrimitive?.contentOrNull ?: id
-                id to name
-            }
-        } catch (e: Exception) {
-            emptyList()
-        }
+    suspend fun agentPresets(): List<AgentPreset> {
+        val roster = call(DshEndpoints.AGENT_PRESET_LIST).jsonObject
+        val rows = roster["presets"] ?: roster.getValue("items")
+        return json.decodeFromJsonElement<List<AgentPreset>>(rows).filter { it.broken == null }
     }
 
     fun destroy() {

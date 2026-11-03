@@ -7,38 +7,58 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import com.dsh.mobile.data.AgentPreset
+import com.dsh.mobile.data.DshConnection
+import kotlinx.coroutines.CancellationException
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 
-/** The first prompt uses the same model menu as the conversation. Agent presets live in Add. */
+@Composable
+internal fun presetRoster(connection: DshConnection, enabled: Boolean, reload: Int): Result<List<AgentPreset>>? {
+    val roster by produceState<Result<List<AgentPreset>>?>(null, connection.generation, enabled, reload) {
+        value = null
+        if (enabled) {
+            value = try {
+                Result.success(connection.agentPresets())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+    return roster
+}
+
 @Composable
 fun NewTaskEditor(input: String, onInputChange: (String) -> Unit, placeholder: String,
     sending: Boolean, canSend: Boolean, onSend: () -> Unit, onVoice: () -> Unit,
-    preset: String, presets: List<Pair<String, String>>, onPresetSelect: (String) -> Unit,
-    onPickImage: () -> Unit, error: String?, actionsEnabled: Boolean = true, modelLabel: String, onModel: () -> Unit,
-    modelMenu: @Composable () -> Unit) {
+    preset: AgentPreset?, roster: Result<List<AgentPreset>>?, onPresetSelect: (String) -> Unit,
+    onRetry: () -> Unit, onPickImage: () -> Unit, error: String?, actionsEnabled: Boolean, sendEnabled: Boolean) {
     var addMenu by remember { mutableStateOf(false) }
     var presetMenu by remember { mutableStateOf(false) }
     MessageEditor(input, onInputChange, placeholder, RoundedCornerShape(28.dp), canSend, sending, false, onSend, {},
-        actionsEnabled = actionsEnabled, showPermissions = false, modelLabel = modelLabel,
-        modelDescription = "切换模型", onModel = onModel, onVoice = onVoice, onAdd = { addMenu = true },
+        actionsEnabled = actionsEnabled, sendEnabled = sendEnabled, showPermissions = false, modelLabel = preset?.label ?: "电脑默认",
+        modelDescription = "切换预设", onModel = { presetMenu = true }, onVoice = onVoice, onAdd = { addMenu = true },
         maxLines = if (LocalConfiguration.current.screenHeightDp < 600) 3 else 6,
         addMenu = {
             ComposerPopup(addMenu, { addMenu = false }) {
                 ComposerMenuItem(text = { Text("添加图片") }, leadingIcon = { Icon(Icons.Outlined.Image, null) },
                     onClick = { addMenu = false; onPickImage() })
-                ComposerMenuItem(text = { Text("预设") }, trailingIcon = { Icon(Icons.Default.ChevronRight, null) },
-                    onClick = { addMenu = false; presetMenu = true })
             }
+        }, modelMenu = {
             ComposerPopup(presetMenu, { presetMenu = false }) {
-                presets.forEach { (id, name) ->
-                    ComposerMenuItem(text = { Text(name) },
-                        trailingIcon = { if (id == preset) Icon(Icons.Default.Check, "已选择") },
-                        onClick = { onPresetSelect(id); presetMenu = false })
+                if (roster == null) ComposerMenuItem({ Text("加载中…") }, {}, enabled = false)
+                else if (roster.isFailure) ComposerMenuItem({ Text("重试") }, onRetry)
+                else if (roster.getOrNull().isNullOrEmpty()) ComposerMenuItem({ Text("电脑默认") }, { presetMenu = false })
+                roster?.getOrNull().orEmpty().forEach { item ->
+                    ComposerMenuItem(text = { Text(item.label) },
+                        trailingIcon = { if (item.id == preset?.id) Icon(Icons.Default.Check, "已选择") },
+                        onClick = { onPresetSelect(item.id); presetMenu = false })
                 }
             }
-        }, modelMenu = modelMenu)
+        })
     error?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
 }

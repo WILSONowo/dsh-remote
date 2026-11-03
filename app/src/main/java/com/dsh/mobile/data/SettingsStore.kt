@@ -321,6 +321,14 @@ class SettingsStore(
         }
     }
 
+    fun defaultPreset(scope: String): Flow<String> = context.dataStore.data.map {
+        it[stringPreferencesKey("default_preset_$scope")].orEmpty()
+    }
+
+    suspend fun setDefaultPreset(scope: String, id: String) {
+        context.dataStore.edit { it[stringPreferencesKey("default_preset_$scope")] = id }
+    }
+
     fun workspaceId(scope: String): Flow<String> = context.dataStore.data.map {
         it[stringPreferencesKey("workspace_$scope")] ?: ""
     }
