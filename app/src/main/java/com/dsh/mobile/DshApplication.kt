@@ -80,7 +80,7 @@ class DshApplication : Application() {
         var isAppInForeground = false
 
         /** 通知点击后要打开的会话（由 MainActivity/AppNavigation 消费） */
-        data class SessionLink(val sessionId: String, val profileId: String?, val computer: String?)
+        data class SessionLink(val sessionId: String, val profileId: String?, val computer: String?, val openPending: Boolean = false)
         val pendingSession = kotlinx.coroutines.flow.MutableStateFlow<SessionLink?>(null)
     }
 }

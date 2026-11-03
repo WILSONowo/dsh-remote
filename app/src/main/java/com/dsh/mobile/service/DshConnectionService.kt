@@ -1,6 +1,7 @@
 package com.dsh.mobile.service
 
 import kotlinx.coroutines.flow.combine
+import com.dsh.mobile.data.shortSessionId
 import com.dsh.mobile.data.computerScope
 
 import android.app.Notification
@@ -37,7 +38,7 @@ import kotlinx.coroutines.launch
  */
 class DshConnectionService : Service() {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var watcher: DshConnection? = null
     private var watchJob: Job? = null
     private var eventsJob: Job? = null
@@ -48,16 +49,26 @@ class DshConnectionService : Service() {
     /** 会话活跃状态（运行中→空闲迁移触发完成通知） */
     private val sessionActive = mutableMapOf<String, Boolean>()
     private val completionJobs = mutableMapOf<String, Job>()
-    /** 审批/问答去重 */
-    private val seenApprovals = mutableSetOf<String>()
-    private val seenQuestions = mutableSetOf<String>()
-    /** trackKey → 通知 id：审批/问答横幅在 Resolved 时按 key 取消，防止托盘残留 */
-    private val notificationIds = mutableMapOf<String, Int>()
+    private val pending = mutableMapOf<Pair<String, String?>, Interaction>()
+    private val pendingTag = "dsh-interaction"
+
+    private fun removeInteraction(key: Pair<String, String?>) {
+        val item = pending.remove(key) ?: return
+        notificationManager().cancel("$pendingTag/${item.nonce}", 0)
+        WidgetState.pushPending(this, pending.size)
+    }
+
+    private fun clearInteractions() {
+        pending.keys.toList().forEach(::removeInteraction)
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        val manager = notificationManager()
+        manager.activeNotifications.filter { it.tag?.startsWith("$pendingTag/") == true }
+            .forEach { manager.cancel(it.tag, it.id) }
         startAsForeground()
     }
 
@@ -98,6 +109,14 @@ class DshConnectionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == INTERACT) {
+            if (watchJob == null) {
+                stopSelf(startId)
+                return START_NOT_STICKY
+            }
+            scope.launch { processAction(intent) }
+            return START_STICKY
+        }
         startWatching()
         return START_STICKY
     }
@@ -124,10 +143,7 @@ class DshConnectionService : Service() {
                     pairingJob?.cancel()
                     watcher?.disconnect()
                     watcher = null
-                    seenApprovals.clear()
-                    seenQuestions.clear()
-                    notificationIds.values.forEach { notificationManager().cancel(it) }
-                    notificationIds.clear()
+                    clearInteractions()
                     sessionActive.clear()
                     completionJobs.values.forEach { it.cancel() }
                     completionJobs.clear()
@@ -142,9 +158,10 @@ class DshConnectionService : Service() {
                     pairingJob = scope.launch {
                         PairingCoordinator(connection, settings, this).start()
                     }
-                    eventsJob = launch { connection.events.collect { handle(it) } }
+                    eventsJob = launch { connection.events.collect { if (watcher === connection) handle(it) } }
                     stateJob = launch {
                         connection.state.collect { st ->
+                            if (st !is DshConnection.State.Connected) clearInteractions()
                             val text = when (st) {
                                 is DshConnection.State.Connected -> "已连接 " + st.baseUrl
                                 is DshConnection.State.Connecting -> "连接中…"
@@ -168,69 +185,28 @@ class DshConnectionService : Service() {
     }
 
     private suspend fun handle(event: DshConnection.Event) {
-        // Resolved 事件在 App 前台时也须处理：用户可能正停留在会话页（App 前台），
-        // 若审批/问答在 PC 端被解决，照常取消托盘横幅，否则残留过期通知。
-        if (DshApplication.isAppInForeground &&
-            event !is DshConnection.Event.ApprovalResolved &&
-            event !is DshConnection.Event.QuestionResolved
-        ) return
         when (event) {
-            // 全局 token 用量监听：App 被杀后前台服务仍活着，PC 端回合消耗继续计费（假 Pro）
-            is DshConnection.Event.SessionEvent ->
-                TokenUsageWatcher.onSessionEvent(event.sessionId, event.event)
-
-            is DshConnection.Event.ApprovalRequested -> {
-                if (!seenApprovals.add(event.approvalId)) return
-                // 分渠道开关：审批/问答渠道关闭时不弹横幅（去重照常消费，避免重复请求刷屏）
-                val settings = SettingsStore(this@DshConnectionService)
-                if (!shouldNotifyApproval(
-                        settings.backgroundNotify.first(),
-                        settings.notifyApprovals.first(),
-                        DshApplication.isAppInForeground,
-                    )
-                ) return
-                val reason = event.reason?.let { "：" + it } ?: ""
-                postAlert(
-                    "DeepSeek Harness 需要你的审批",
-                    "工具「" + event.toolName + "」请求执行权限" + reason,
-                    event.sessionId,
-                    trackKey = "a:${event.sessionId}:${event.approvalId}",
-                )
-            }
-            is DshConnection.Event.ApprovalResolved -> {
-                seenApprovals.remove(event.approvalId)
-                notificationIds.remove("a:${event.sessionId}:${event.approvalId}")?.let {
-                    notificationManager().cancel(it)
-                }
-                WidgetState.pushPending(this, notificationIds.size)
-            }
-
-            is DshConnection.Event.QuestionRequested -> {
-                if (!seenQuestions.add(event.sessionId)) return
-                // 分渠道开关：问答归入「审批与确认提醒」渠道，同审批一样受 notifyApprovals 控制
-                val settings = SettingsStore(this@DshConnectionService)
-                if (!shouldNotifyApproval(
-                        settings.backgroundNotify.first(),
-                        settings.notifyApprovals.first(),
-                        DshApplication.isAppInForeground,
-                    )
-                ) return
-                val first = event.questions.firstOrNull()?.question?.take(60)
-                postAlert(
-                    "DeepSeek Harness 需要你的确认",
-                    if (first != null) "「" + first + "」等 " + event.questions.size + " 个问题等待回答"
-                    else "有 " + event.questions.size + " 个问题等待回答",
-                    event.sessionId,
-                    trackKey = "q:${event.sessionId}",
-                )
-            }
+            is DshConnection.Event.ApprovalResolved -> removeInteraction(event.sessionId to event.approvalId)
             is DshConnection.Event.QuestionResolved -> {
-                seenQuestions.remove(event.sessionId)
-                notificationIds.remove("q:${event.sessionId}")?.let {
-                    notificationManager().cancel(it)
-                }
-                WidgetState.pushPending(this, notificationIds.size)
+                val key = event.sessionId to null
+                if (event.questionRpcId.isEmpty() || pending[key]?.rpc == event.questionRpcId) removeInteraction(key)
             }
+            DshConnection.Event.InteractionsInvalidated -> clearInteractions()
+            is DshConnection.Event.SessionRemoved -> pending.keys.filter { it.first == event.sessionId }.forEach(::removeInteraction)
+            is DshConnection.Event.ApprovalRequested, is DshConnection.Event.QuestionRequested -> {
+                val item = Interaction.from(event) ?: return
+                if (pending[item.key]?.rpc == item.rpc) return
+                removeInteraction(item.key)
+                val settings = SettingsStore(this)
+                if (!shouldNotifyApproval(settings.backgroundNotify.first(), settings.notifyApprovals.first(),
+                        DshApplication.isAppInForeground)) return
+                val text = if (event is DshConnection.Event.ApprovalRequested)
+                    "工具「" + event.toolName + "」请求执行权限" + (event.reason?.let { "：" + it } ?: "")
+                    else item.question?.question.orEmpty()
+                postInteraction(item, text, !settings.biometricLockEnabled.first())
+            }
+            is DshConnection.Event.SessionEvent -> if (!DshApplication.isAppInForeground)
+                TokenUsageWatcher.onSessionEvent(event.sessionId, event.event)
 
             is DshConnection.Event.SessionStatus ->
                 updateActivity(event.sessionId, event.status == "running")
@@ -239,6 +215,58 @@ class DshConnectionService : Service() {
                 updateActivity(event.sessionId, event.jobs.any { it.status == "running" || it.status == "stopping" })
 
             else -> {}
+        }
+    }
+
+    private fun postInteraction(item: Interaction, text: String, actionsEnabled: Boolean) {
+        pending[item.key] = item
+        postAlert(if (item.approval != null) "DeepSeek Harness 需要你的审批" else "DeepSeek Harness 需要你的确认",
+            text, item.session, interaction = item, actionsEnabled = actionsEnabled)
+        WidgetState.pushPending(this, pending.size)
+    }
+
+    private suspend fun processAction(intent: Intent) {
+        val path = intent.data?.pathSegments ?: return
+        if (path.size != 2) return
+        val item = pending.values.firstOrNull { it.nonce == path[0] } ?: return
+        val connection = watcher ?: return
+        val profile = connection.currentProfile() ?: return
+        val settings = SettingsStore(this)
+        val enabled = settings.backgroundNotify.first() && settings.notifyApprovals.first() &&
+            !settings.biometricLockEnabled.first() && settings.activeProfileId.first() == profile.id
+        if (pending[item.key] !== item || watcher !== connection) return
+        if (!enabled || connection.state.value !is DshConnection.State.Connected) {
+            removeInteraction(item.key)
+            return
+        }
+        if (getSystemService(android.app.KeyguardManager::class.java).isDeviceLocked) return
+        val operation = path[1]
+        val answered = when (operation) {
+            "allow" -> if (item.approval != null && !item.highRisk) null else return
+            "reject" -> if (item.approval != null) null else return
+            "confirm" -> item.finishSelection() ?: return
+            "reply" -> item.withReply(android.app.RemoteInput.getResultsFromIntent(intent)
+                ?.getCharSequence(REPLY_TEXT)?.toString() ?: return) ?: run {
+                android.widget.Toast.makeText(this, "请输入有效回答", android.widget.Toast.LENGTH_SHORT).show()
+                return
+            }
+            else -> return
+        }
+        removeInteraction(item.key)
+        val next = answered?.question
+        if (answered != null && next != null) {
+            val text = (listOf(next.question) + answered.selected).joinToString("\n")
+            postInteraction(answered, text, true)
+            return
+        }
+        try {
+            if (item.approval != null) connection.answerApproval(item.session, item.approval,
+                if (operation == "allow") "allowed-once" else "rejected", item.rpc)
+            else if (answered != null) connection.answerQuestions(item.session, answered.answers, item.rpc)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            android.widget.Toast.makeText(this, "无法确认处理结果，请查看待办", android.widget.Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -262,7 +290,7 @@ class DshConnectionService : Service() {
                     ) return@launch
                     postAlert(
                         "DeepSeek Harness 任务完成",
-                        "会话 " + sessionId.take(8) + " 的执行已结束",
+                        "会话 " + shortSessionId(sessionId) + " 的执行已结束",
                         sessionId,
                         channelId = DshApplication.CHANNEL_COMPLETION,
                     )
@@ -280,13 +308,16 @@ class DshConnectionService : Service() {
         text: String,
         sessionId: String? = null,
         channelId: String = DshApplication.CHANNEL_APPROVALS,
-        trackKey: String? = null,
+        interaction: Interaction? = null,
+        actionsEnabled: Boolean = false,
     ) {
         val manager = notificationManager()
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             if (sessionId != null) {
                 putExtra("open_session", sessionId)
+                putExtra("open_pending", interaction != null)
+                if (interaction != null) data = android.net.Uri.parse("dsh-notification://open/" + interaction.nonce)
                 putExtra("open_profile", watcher?.currentProfile()?.id)
                 putExtra("open_computer", watcher?.currentProfile().computerScope())
             }
@@ -295,6 +326,7 @@ class DshConnectionService : Service() {
             .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(com.dsh.mobile.R.drawable.ic_notification_dsh)
+            .setStyle(Notification.BigTextStyle().bigText(text))
             .setAutoCancel(true)
             .setPriority(Notification.PRIORITY_HIGH)
             .setContentIntent(
@@ -304,12 +336,10 @@ class DshConnectionService : Service() {
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 )
             )
+            .apply { if (actionsEnabled) interaction?.actions(this@DshConnectionService)?.forEach { addAction(it) } }
             .build()
-        val id = 1000 + (notificationSeq++ % 100)
-        manager.notify(id, notification)
-        if (trackKey != null) notificationIds[trackKey] = id
-        // 待办数同步到桌面小部件（审批/问答横幅的活动计数）
-        WidgetState.pushPending(this, notificationIds.size)
+        if (interaction != null) manager.notify("$pendingTag/${interaction.nonce}", 0, notification)
+        else manager.notify(1000 + notificationSeq++, notification)
     }
 
     override fun onDestroy() {
@@ -319,6 +349,7 @@ class DshConnectionService : Service() {
         watcher = null
         watchJob?.cancel()
         watchJob = null
+        clearInteractions()
         scope.cancel()
         super.onDestroy()
     }

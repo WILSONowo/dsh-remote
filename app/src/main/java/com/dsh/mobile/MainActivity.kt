@@ -310,7 +310,7 @@ class MainActivity : FragmentActivity() {
     private fun consumeDeepLink(intent: Intent?) {
         intent?.getStringExtra("open_session")?.takeIf { it.isNotBlank() }?.let {
             DshApplication.pendingSession.value = DshApplication.Companion.SessionLink(it,
-                intent.getStringExtra("open_profile"), intent.getStringExtra("open_computer"))
+                intent.getStringExtra("open_profile"), intent.getStringExtra("open_computer"), intent.getBooleanExtra("open_pending", false))
             intent.removeExtra("open_session")
         }
     }

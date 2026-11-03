@@ -154,8 +154,13 @@ data class SessionSummary(
 /** 会话标题：projections.values.title；无则 null（HomeScreen/PendingScreen 共用） */
 fun sessionTitleOf(session: SessionSummary): String? = runCatching {
     session.projections?.jsonObject?.get("values")?.jsonObject
-        ?.get("title")?.jsonPrimitive?.contentOrNull
+        ?.get("title")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
 }.getOrNull()
+
+fun shortSessionId(id: String): String = id.removePrefix("session-").ifEmpty { id }.take(8)
+
+fun sessionDisplayTitle(session: SessionSummary): String =
+    sessionTitleOf(session) ?: "会话 ${shortSessionId(session.sessionId)}"
 
 @Serializable
 data class SessionListValue(
@@ -223,7 +228,7 @@ object DshEndpoints {
     const val WORKSPACE_LIST = "workspace.list"
     const val WORKSPACE_CREATE = "workspace.create"
     const val WORKSPACE_ARCHIVE_SESSION = "workspace.archiveSession"
-    const val WORKSPACE_INSERT_SESSION_BEFORE = "workspace.insertSessionBefore"
+    const val WORKSPACE_UNARCHIVE_SESSION = "workspace.unarchiveSession"
     const val AGENT_PRESET_LIST = "agentPreset.list"
     const val HOST_DESCRIBE = "host.describe"
     const val HOST_LIST_DIRECTORY = "host.listDirectory"

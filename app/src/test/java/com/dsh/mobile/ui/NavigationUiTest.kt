@@ -158,6 +158,8 @@ class NavigationUiTest {
     private fun exerciseConnectedHome(revoke: String? = null, firstTask: String? = null) {
         if (revoke == "idle") checkIntervalMs = 300L
         val calls = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
+        val archived = java.util.concurrent.atomic.AtomicBoolean(true)
+        val archivedId = "session-abcdef01-example"
         val unavailable = java.util.concurrent.atomic.AtomicBoolean(false)
         val authorized = java.util.concurrent.atomic.AtomicBoolean(true)
         val accessReply = CountDownLatch(1)
@@ -194,7 +196,13 @@ class NavigationUiTest {
                         } else {
                             val value = if (request.contains("describe")) """{"version":"0.2.1-rc.5"}"""
                                 else if (request.contains("/api/session.models ")) """{"current":{"provider":"fixture","model":"pro"},"groups":[{"id":"fixture","models":[{"id":"flash","name":"Fixture Flash"},{"id":"pro","name":"Fixture Pro","reasoning":{"efforts":[{"id":"high","name":"高"}]}}]}]}"""
-                                else if (request.contains("/api/session.create ")) """{"sessionId":"new-fixture"}"""
+                                else if (request.contains("/api/workspace.list ")) {
+                                    val ids = if (archived.get()) """["$archivedId"]""" else "[]"
+                                    """{"items":[],"archivedSessionIds":$ids}"""
+                                } else if (request.contains("/api/workspace.unarchiveSession ")) {
+                                    archived.set(false)
+                                    "{}"
+                                } else if (request.contains("/api/session.create ")) """{"sessionId":"new-fixture"}"""
                                 else if (request.contains("/api/session.list ") && firstTask != null) """{"items":[]}"""
                                 else if (request.contains("/api/session.list ")) {
                                     val items = (1..13).joinToString(",") { n ->
@@ -452,6 +460,17 @@ class NavigationUiTest {
                 compose.onAllNodesWithText("Recent 01").fetchSemanticsNodes().isNotEmpty() &&
                     compose.onAllNodesWithText("已连接").fetchSemanticsNodes().isNotEmpty()
             }
+            compose.onNodeWithText("已归档（点击恢复）").assertDoesNotExist()
+            compose.onNodeWithTag("nav_settings").performClick()
+            compose.onNode(hasText("会话") and !hasTestTag("nav_sessions")).performClick()
+            compose.onNodeWithText("归档会话").performClick()
+            compose.waitUntil(5_000) { compose.onAllNodesWithText("会话 abcdef01").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("恢复").performClick()
+            compose.waitUntil(5_000) { compose.onAllNodesWithText("暂无归档会话").fetchSemanticsNodes().isNotEmpty() }
+            val restore = calls.single { it.optString("method") == "workspace.unarchiveSession" }.getJSONObject("payload")
+            Assert.assertEquals(archivedId, restore.getString("sessionId"))
+            Assert.assertFalse(restore.has("workspaceId"))
+            Assert.assertFalse(calls.any { it.optString("method") == "workspace.insertSessionBefore" })
         } finally {
             if (firstTask != null) {
                 val reset = scope.async(Dispatchers.IO) { SettingsStore(RuntimeEnvironment.getApplication()).setAutoModel(false) }

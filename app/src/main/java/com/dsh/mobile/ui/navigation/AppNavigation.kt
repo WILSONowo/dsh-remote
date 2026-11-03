@@ -159,7 +159,7 @@ fun AppNavigation(
         val target = pending ?: return@LaunchedEffect
         DshApplication.pendingSession.value = null
         if (target.profileId == profile.id && target.computer == profile.computerScope()) {
-            openProtected(Screen.Session.createRoute(target.sessionId))
+            openProtected(if (target.openPending) Screen.Pending.route else Screen.Session.createRoute(target.sessionId))
         } else openRoot(Screen.Connect)
     }
 

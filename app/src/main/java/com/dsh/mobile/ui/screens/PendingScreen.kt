@@ -36,7 +36,7 @@ fun PendingScreen(
     // 会话标题映射（一次拉取；失败回退 sessionId 前 8 位）
     LaunchedEffect(Unit) {
         titles = runCatching { connection.listSessions() }.getOrDefault(emptyList())
-            .associate { it.sessionId to (sessionTitleOf(it) ?: it.sessionId.take(8)) }
+            .associate { it.sessionId to (sessionTitleOf(it) ?: shortSessionId(it.sessionId)) }
     }
 
     suspend fun runBatch(label: String, block: suspend () -> List<String>) {
@@ -129,7 +129,7 @@ fun PendingScreen(
                             Column(Modifier.padding(14.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        titles[a.sessionId] ?: a.sessionId.take(8),
+                                        titles[a.sessionId] ?: shortSessionId(a.sessionId),
                                         style = MaterialTheme.typography.titleSmall,
                                         modifier = Modifier.weight(1f),
                                     )
@@ -213,7 +213,7 @@ fun PendingScreen(
                         Card(Modifier.fillMaxWidth().padding(vertical = 6.dp), shape = DshShape.card) {
                             Column(Modifier.padding(14.dp)) {
                                 Text(
-                                    titles[q.sessionId] ?: q.sessionId.take(8),
+                                    titles[q.sessionId] ?: shortSessionId(q.sessionId),
                                     style = MaterialTheme.typography.titleSmall,
                                 )
                                 Spacer(Modifier.height(8.dp))
@@ -247,7 +247,7 @@ fun PendingScreen(
                         ) {
                             Column(Modifier.padding(14.dp)) {
                                 Text(
-                                    titles[err.sessionId] ?: err.sessionId.take(8),
+                                    titles[err.sessionId] ?: shortSessionId(err.sessionId),
                                     style = MaterialTheme.typography.titleSmall,
                                 )
                                 Spacer(Modifier.height(4.dp))

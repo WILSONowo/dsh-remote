@@ -54,15 +54,17 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
             val toolName: String,
             val callId: String?,
             val reason: String?,
+            val rpcId: String = "",
         ) : Event()
         data class ApprovalResolved(val sessionId: String, val approvalId: String, val outcome: String) : Event()
-        data class QuestionRequested(val sessionId: String, val questions: List<QuestionItem>) : Event()
+        data class QuestionRequested(val sessionId: String, val questions: List<QuestionItem>, val rpcId: String = "") : Event()
         data class QuestionResolved(val sessionId: String, val questionRpcId: String, val outcome: String) : Event()
         data class Jobs(val sessionId: String, val jobs: List<JobView>) : Event()
         data class SessionAdded(val sessionId: String) : Event()
         data class SessionRemoved(val sessionId: String) : Event()
         data class SessionStatus(val sessionId: String, val status: String) : Event()
         data class Projection(val sessionId: String, val key: String, val value: JsonElement) : Event()
+        data object InteractionsInvalidated : Event()
         data class StreamError(val message: String) : Event()
         data class Reconnected(val baseUrl: String) : Event()
     }
@@ -97,7 +99,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
     private val retryScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /** approvalId → server-request rpcId（应答时回显） */
-    private val pendingApprovalRpc = mutableMapOf<String, String>()
+    private val pendingApprovalRpc = mutableMapOf<Pair<String, String>, String>()
     /** sessionId → question server-request rpcId */
     private val pendingQuestionRpc = mutableMapOf<String, String>()
 
@@ -340,7 +342,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
             while (isActive) {
                 var lastError = "流结束"
                 try {
-                    openWsStream(path, probe)
+                    try { openWsStream(path, probe) } finally { invalidateStream(path, probe) }
                     backoffMs = 3_000L
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
@@ -351,7 +353,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
                     lastError = e.message ?: "ws 失败"
                     // 回退：部分 dsh web 服务器用 SSE 承载该流
                     try {
-                        readSse(path, probe)
+                        try { readSse(path, probe) } finally { invalidateStream(path, probe) }
                         backoffMs = 3_000L
                     } catch (e2: Exception) {
                         if (e2 is CancellationException) throw e2
@@ -386,7 +388,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                if (isCurrent(probe)) handleStreamData(text)
+                if (isCurrent(probe)) handleStreamData(text, probe)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -430,7 +432,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
                         while (cont.isActive && isCurrent(probe)) {
                             val line = source.readUtf8Line() ?: break
                             if (line.isEmpty() && dataLines.isNotEmpty()) {
-                                if (isCurrent(probe)) handleStreamData(dataLines.joinToString("\n"))
+                                if (isCurrent(probe)) handleStreamData(dataLines.joinToString("\n"), probe)
                                 dataLines.clear()
                             } else if (line.startsWith("data:")) {
                                 dataLines.add(line.removePrefix("data:").trim())
@@ -445,7 +447,15 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
         })
     }
 
-    private fun handleStreamData(data: String) {
+    @Synchronized private fun invalidateStream(path: String, probe: AccessProbe) {
+        if (path == "/api/events.mux" && isCurrent(probe)) {
+            pendingApprovalRpc.clear()
+            pendingQuestionRpc.clear()
+            _events.tryEmit(Event.InteractionsInvalidated)
+        }
+    }
+
+    private fun handleStreamData(data: String, probe: AccessProbe) {
         if (data.isBlank()) return
         val parsed = try {
             json.decodeFromString(ServerRequest.serializer(), data)
@@ -457,7 +467,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
         } catch (e: Exception) {
             return
         }
-        dispatchFrame(parsed.rpcId, frame)
+        synchronized(this) { if (isCurrent(probe)) dispatchFrame(parsed.rpcId, frame) }
     }
 
     private fun dispatchFrame(rpcId: String, f: MuxFrame) {
@@ -473,22 +483,24 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
             DshEventTypes.FRAME_APPROVAL_REQUESTED -> {
                 val sid = f.sessionId ?: return
                 val aid = f.approvalId ?: return
-                pendingApprovalRpc[aid] = rpcId
-                _events.tryEmit(Event.ApprovalRequested(sid, aid, f.toolName ?: "?", f.callId, f.reason))
+                pendingApprovalRpc[sid to aid] = rpcId
+                _events.tryEmit(Event.ApprovalRequested(sid, aid, f.toolName ?: "?", f.callId, f.reason, rpcId))
             }
             DshEventTypes.FRAME_APPROVAL_RESOLVED -> {
                 val aid = f.approvalId ?: return
-                pendingApprovalRpc.remove(aid)
+                val sid = f.sessionId ?: return
+                pendingApprovalRpc.remove(sid to aid)
                 f.sessionId?.let { _events.tryEmit(Event.ApprovalResolved(it, aid, f.outcome ?: "resolved")) }
             }
             DshEventTypes.FRAME_QUESTION_REQUESTED -> {
                 val sid = f.sessionId ?: return
                 if (f.questions.isEmpty()) return
                 pendingQuestionRpc[sid] = rpcId
-                _events.tryEmit(Event.QuestionRequested(sid, f.questions))
+                _events.tryEmit(Event.QuestionRequested(sid, f.questions, rpcId))
             }
             DshEventTypes.FRAME_QUESTION_RESOLVED -> {
                 val sid = f.sessionId ?: return
+                if (!f.questionRpcId.isNullOrEmpty() && pendingQuestionRpc[sid]?.let { it != f.questionRpcId } == true) return
                 pendingQuestionRpc.remove(sid)
                 _events.tryEmit(Event.QuestionResolved(sid, f.questionRpcId ?: "", f.outcome ?: "answered"))
             }
@@ -553,7 +565,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
     }
 
     /** POST /api/respond —— 应答 server-request（审批/问答） */
-    suspend fun respond(rpcId: String, resultValue: JsonObject) {
+    private suspend fun respond(target: AccessProbe, rpcId: String, resultValue: JsonObject) {
         val envelope = ClientResponse(
             rpcId = rpcId,
             result = RpcResult(ok = true, value = resultValue),
@@ -561,11 +573,11 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
         val body = json.encodeToString(ClientResponse.serializer(), envelope)
             .toRequestBody("application/json".toMediaType())
         val request = Request.Builder()
-            .url("$baseUrl/api/respond")
+            .url(target.profile.connectionUrl() + "/api/respond")
             .post(body)
             .build()
         withContext(Dispatchers.IO) {
-            unaryClient.newCall(request).execute().use { resp ->
+            target.client.newCall(request).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     val text = resp.body?.string().orEmpty()
                     throw ApiException("respond HTTP ${resp.code}: $text")
@@ -574,20 +586,27 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
         }
     }
 
-    suspend fun answerApproval(sessionId: String, approvalId: String, outcome: String) {
-        val rpcId = pendingApprovalRpc.remove(approvalId)
-            ?: throw ApiException("approvalId 无对应待应答请求（可能已过期）")
-        respond(rpcId, buildJsonObject {
+    @Synchronized private fun claimInteraction(sessionId: String, approvalId: String?, expectedRpc: String?): Pair<AccessProbe, String> {
+        val profile = connectedProfile ?: throw ApiException("连接已断开")
+        if (_state.value !is State.Connected) throw ApiException("连接已断开")
+        val rpc = if (approvalId == null) pendingQuestionRpc[sessionId] else pendingApprovalRpc[sessionId to approvalId]
+        if (rpc == null || (expectedRpc != null && rpc != expectedRpc)) throw ApiException("请求已失效")
+        if (approvalId == null) pendingQuestionRpc.remove(sessionId) else pendingApprovalRpc.remove(sessionId to approvalId)
+        return AccessProbe(profile, unaryClient, generation) to rpc
+    }
+
+    suspend fun answerApproval(sessionId: String, approvalId: String, outcome: String, expectedRpc: String? = null) {
+        val (target, rpcId) = claimInteraction(sessionId, approvalId, expectedRpc)
+        respond(target, rpcId, buildJsonObject {
             put("sessionId", sessionId)
             put("approvalId", approvalId)
             put("outcome", outcome)
         })
     }
 
-    suspend fun answerQuestions(sessionId: String, answers: List<QuestionAnswer>) {
-        val rpcId = pendingQuestionRpc.remove(sessionId)
-            ?: throw ApiException("问答无对应待应答请求（可能已过期）")
-        respond(rpcId, buildJsonObject {
+    suspend fun answerQuestions(sessionId: String, answers: List<QuestionAnswer>, expectedRpc: String? = null) {
+        val (target, rpcId) = claimInteraction(sessionId, null, expectedRpc)
+        respond(target, rpcId, buildJsonObject {
             put("sessionId", sessionId)
             put("answer", buildJsonObject {
                 put("answers", buildJsonArray {
@@ -768,12 +787,8 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
     }
 
     suspend fun workspaceList(): WorkspaceListValue {
-        return try {
-            val value = call(DshEndpoints.WORKSPACE_LIST)
-            json.decodeFromJsonElement(WorkspaceListValue.serializer(), value)
-        } catch (e: Exception) {
-            WorkspaceListValue()
-        }
+        val value = call(DshEndpoints.WORKSPACE_LIST)
+        return json.decodeFromJsonElement(WorkspaceListValue.serializer(), value)
     }
 
     /** 新建工作区：path 必须是 PC 端已存在的目录绝对路径（如 E:\workspace） */
@@ -1021,10 +1036,9 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
         call(DshEndpoints.WORKSPACE_ARCHIVE_SESSION, buildJsonObject { put("sessionId", sessionId) })
     }
 
-    /** 把已归档会话恢复到指定工作区 */
-    suspend fun restoreSession(workspaceId: String, sessionId: String) {
-        call(DshEndpoints.WORKSPACE_INSERT_SESSION_BEFORE, buildJsonObject {
-            put("workspaceId", workspaceId)
+    /** 恢复会话时只取消归档，保留原工作区 */
+    suspend fun restoreSession(sessionId: String) {
+        call(DshEndpoints.WORKSPACE_UNARCHIVE_SESSION, buildJsonObject {
             put("sessionId", sessionId)
         })
     }

@@ -110,7 +110,7 @@ fun HomeScreen(
     var sending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
     var presetMenu by remember { mutableStateOf(false) }
-    var archivedIds by remember { mutableStateOf<List<String>>(emptyList()) }
+    var archivedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var workspaces by remember { mutableStateOf<List<WorkspaceView>>(emptyList()) }
     var archiveTarget by remember { mutableStateOf<SessionSummary?>(null) }
     // 长按会话弹出的操作菜单目标（sessionId；null = 无菜单打开）
@@ -126,7 +126,9 @@ fun HomeScreen(
     // 置顶会话 id（本地 pin；列表排序置顶在前，长按菜单可切换）
     val pinnedIds by remember(computerScope) { settingsStore.pinnedSessionIds(computerScope) }.collectAsState(initial = emptySet())
 
-    val sessions = remember(rawSessions, pinnedIds) { sortSessionsWithPinned(rawSessions, pinnedIds) }
+    val sessions = remember(rawSessions, pinnedIds, archivedIds) {
+        sortSessionsWithPinned(rawSessions.filterNot { it.sessionId in archivedIds }, pinnedIds)
+    }
 
     // —— 新对话工作区选择 ——
     var selectedWorkspaceId by remember { mutableStateOf("") }
@@ -319,7 +321,7 @@ fun HomeScreen(
                     refreshArchivedAgain = false
                     val w = connection.workspaceList()
                     workspaces = w.items
-                    archivedIds = w.archivedSessionIds
+                    archivedIds = w.archivedSessionIds.toSet()
                 } while (refreshArchivedAgain)
             } catch (e: Exception) {
                 listError = "工作区加载失败：${e.message}"
@@ -513,12 +515,13 @@ fun HomeScreen(
             AlertDialog(
                 onDismissRequest = { archiveTarget = null },
                 title = { Text("归档会话") },
-                text = { Text("「${target.sessionId.take(8)}」将从会话列表移除，可在已归档区恢复。") },
+                text = { Text("「${sessionDisplayTitle(target)}」将从最近会话移除，可在设置 → 会话中恢复。") },
                 confirmButton = {
                     TextButton(onClick = {
                         scope.launch {
                             try {
                                 connection.archiveSession(target.sessionId)
+                                archivedIds = archivedIds + target.sessionId
                                 archiveTarget = null
                                 refreshSessions()
                                 refreshArchived()
@@ -640,7 +643,6 @@ fun HomeScreen(
                 loadingSessions = !loadedList && sessions.isEmpty(),
                 sessions = sessions,
                 taskEditor = taskEditor,
-                archivedIds = archivedIds,
                 preset = preset,
                 presets = presets,
                 presetMenu = presetMenu,
@@ -656,22 +658,6 @@ fun HomeScreen(
                 onRefresh = {
                     refreshSessions()
                     refreshArchived()
-                },
-                onRestoreArchived = { id ->
-                    scope.launch {
-                        val ws = workspaces.firstOrNull()?.workspaceId
-                        if (ws.isNullOrBlank()) {
-                            listError = "没有可用工作区，无法恢复"
-                        } else {
-                            try {
-                                connection.restoreSession(ws, id)
-                                refreshSessions()
-                                refreshArchived()
-                            } catch (e: Exception) {
-                                listError = e.message
-                            }
-                        }
-                    }
                 },
                 pinnedIds = pinnedIds,
                 onTogglePin = { id -> scope.launch { settingsStore.setPinned(id, id !in pinnedIds, computerScope) } },
@@ -690,7 +676,6 @@ fun HomeScreen(
                 loadingSessions = !loadedList && sessions.isEmpty(),
                 sessions = sessions,
                 taskEditor = taskEditor,
-                archivedIds = archivedIds,
                 pendingImages = pendingImages,
                 onRemoveImage = { i -> pendingImages = pendingImages.filterIndexed { j, _ -> j != i } },
                 onNewChat = {
@@ -705,22 +690,6 @@ fun HomeScreen(
                 onRefresh = {
                     refreshSessions()
                     refreshArchived()
-                },
-                onRestoreArchived = { id ->
-                    scope.launch {
-                        val ws = workspaces.firstOrNull()?.workspaceId
-                        if (ws.isNullOrBlank()) {
-                            listError = "没有可用工作区，无法恢复"
-                        } else {
-                            try {
-                                connection.restoreSession(ws, id)
-                                refreshSessions()
-                                refreshArchived()
-                            } catch (e: Exception) {
-                                listError = e.message
-                            }
-                        }
-                    }
                 },
                 pinnedIds = pinnedIds,
                 onTogglePin = { id -> scope.launch { settingsStore.setPinned(id, id !in pinnedIds, computerScope) } },
@@ -932,7 +901,7 @@ fun HomeScreen(
                                 else TextButton(onClick = onConnect) { Text("连接电脑") }
                             }
                         }
-                    } else if (sessions.isEmpty() && archivedIds.isEmpty()) {
+                    } else if (sessions.isEmpty()) {
                         item(key = "empty") {
                             Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                                 if (DshThemeId != "blue" && DshThemeId != "warm") {
@@ -983,34 +952,6 @@ fun HomeScreen(
                                     recentLimit = 5
                                     greeting.heightOffset = 0f
                                     scope.launch { recentListState.scrollToItem(0) }
-                                })
-                            }
-                        }
-                        if (archivedIds.isNotEmpty()) {
-                            item(key = "arch_header") {
-                                Text(
-                                    "已归档（点击恢复）",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(top = 8.dp),
-                                )
-                            }
-                            items(archivedIds, key = { "a_" + it }) { id ->
-                                ArchivedRow(id = id, onRestore = {
-                                    scope.launch {
-                                        val ws = workspaces.firstOrNull()?.workspaceId
-                                        if (ws.isNullOrBlank()) {
-                                            listError = "没有可用工作区，无法恢复"
-                                        } else {
-                                            try {
-                                                connection.restoreSession(ws, id)
-                                                refreshSessions()
-                                                refreshArchived()
-                                            } catch (e: Exception) {
-                                                listError = e.message
-                                            }
-                                        }
-                                    }
                                 })
                             }
                         }
@@ -1632,8 +1573,7 @@ private fun SessionCard(
     val values = runCatching {
         session.projections?.jsonObject?.get("values")?.jsonObject
     }.getOrNull()
-    val title = values?.get("title")?.jsonPrimitive?.contentOrNull
-        ?: "会话 ${session.sessionId.take(8)}"
+    val title = sessionDisplayTitle(session)
     val preview = values?.get("preview")?.jsonPrimitive?.contentOrNull ?: ""
     val model = values?.get("model")?.jsonPrimitive?.contentOrNull
     val time = remember(session.updatedAt) {
@@ -1784,7 +1724,6 @@ private fun ClaudeHomeLayout(
     loadingSessions: Boolean,
     sessions: List<SessionSummary>,
     taskEditor: @Composable (String) -> Unit,
-    archivedIds: List<String>,
     pendingImages: List<DshConnection.ImagePart>,
     onRemoveImage: (Int) -> Unit,
     onNewChat: () -> Unit,
@@ -1794,7 +1733,6 @@ private fun ClaudeHomeLayout(
     onPending: () -> Unit,
     pendingCount: Int,
     onRefresh: () -> Unit,
-    onRestoreArchived: (String) -> Unit,
     pinnedIds: Set<String>,
     onTogglePin: (String) -> Unit,
     onArchive: (SessionSummary) -> Unit,
@@ -1932,7 +1870,7 @@ private fun ClaudeHomeLayout(
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState()),
                 ) {
-                    if (loadingSessions) RecentLoading() else if (sessions.isEmpty() && archivedIds.isEmpty()) {
+                    if (loadingSessions) RecentLoading() else if (sessions.isEmpty()) {
                         Text(
                             "暂无会话",
                             style = MaterialTheme.typography.bodyMedium,
@@ -1974,7 +1912,7 @@ private fun ClaudeHomeLayout(
                                     Spacer(Modifier.width(6.dp))
                                 }
                                 Text(
-                                    chatGptTitleOf(s),
+                                    sessionDisplayTitle(s),
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = Color(0xFFF5F5F4),
                                     maxLines = 1,
@@ -1993,34 +1931,6 @@ private fun ClaudeHomeLayout(
                     }
                     if (recentLimit < filtered.size || recentLimit > 5) {
                         RecentSessionControls(filtered.size, recentLimit, { recentLimit += 5 }, { recentLimit = 5 })
-                    }
-                    if (archivedIds.isNotEmpty()) {
-                        Text(
-                            "已归档",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Medium,
-                            color = Color(0xFFA8A29E),
-                            modifier = Modifier.padding(start = 32.dp, top = 12.dp, bottom = 4.dp),
-                        )
-                        archivedIds.forEach { id ->
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .height(48.dp)
-                                    .padding(horizontal = 32.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    "会话 ${id.take(8)}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFFA8A29E),
-                                    modifier = Modifier.weight(1f),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                TextButton(onClick = { onRestoreArchived(id) }) { Text("恢复") }
-                            }
-                        }
                     }
                 }
 
@@ -2400,7 +2310,7 @@ private fun DeepLookHomeLayout(
                                     ) {
                                         Column(Modifier.weight(1f)) {
                                             Text(
-                                                chatGptTitleOf(s),
+                                                sessionDisplayTitle(s),
                                                 style = MaterialTheme.typography.bodyLarge,
                                                 fontWeight = FontWeight.Medium,
                                                 color = MaterialTheme.colorScheme.onSurface,
@@ -2518,41 +2428,10 @@ private fun DeepLookTab(
     )
 }
 
-@Composable
-private fun ArchivedRow(id: String, onRestore: () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                Icons.Default.Archive,
-                null,
-                Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(
-                "会话 ${id.take(8)}",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = onRestore) { Text("恢复") }
-        }
-    }
-}
-
 // ════════════════════════ ChatGPT 移动端布局（主题包风格）════════════════════════
 // 按用户提供的 1:1 设计令牌落地：
 // 纯黑 #000000 底、次级 #1C1C1E、品牌 #3B82F6、强调 #60A5FA、二级文本 #9CA3AF
 // 顶部导航 56dp / 胶囊输入 52dp(圆角26) / 抽屉 85% 宽 + 50% 遮罩 / 菜单项 56dp / 会话项 48dp
-
-private fun chatGptTitleOf(s: SessionSummary): String = sessionTitleOf(s)
-    ?: "会话 ${s.sessionId.take(8)}"
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -2560,7 +2439,6 @@ private fun ChatGptHomeLayout(
     loadingSessions: Boolean,
     sessions: List<SessionSummary>,
     taskEditor: @Composable (String) -> Unit,
-    archivedIds: List<String>,
     preset: String,
     presets: List<Pair<String, String>>,
     presetMenu: Boolean,
@@ -2574,7 +2452,6 @@ private fun ChatGptHomeLayout(
     onPending: () -> Unit,
     pendingCount: Int,
     onRefresh: () -> Unit,
-    onRestoreArchived: (String) -> Unit,
     pinnedIds: Set<String>,
     onTogglePin: (String) -> Unit,
     onArchive: (SessionSummary) -> Unit,
@@ -2584,7 +2461,6 @@ private fun ChatGptHomeLayout(
     val scope = rememberCoroutineScope()
     var searchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
-    var showArchived by remember { mutableStateOf(false) }
     var menuTarget by remember { mutableStateOf<String?>(null) }
 
     var recentLimit by remember(searchQuery) { mutableIntStateOf(5) }
@@ -2671,9 +2547,6 @@ private fun ChatGptHomeLayout(
                         closeDrawer()
                         onUpgrade()
                     },
-                    Triple(Icons.Default.Archive, "已归档") {
-                        showArchived = !showArchived
-                    },
                     Triple(Icons.Default.Settings, "设置") {
                         closeDrawer()
                         onSettings()
@@ -2719,7 +2592,7 @@ private fun ChatGptHomeLayout(
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState()),
                 ) {
-                    if (loadingSessions) RecentLoading() else if (filtered.isEmpty() && !showArchived) {
+                    if (loadingSessions) RecentLoading() else if (filtered.isEmpty()) {
                         // 骨架屏样式空态：40dp #1C1C1E 圆角 8 长条
                         Box(
                             Modifier
@@ -2756,7 +2629,7 @@ private fun ChatGptHomeLayout(
                                     Spacer(Modifier.width(6.dp))
                                 }
                                 Text(
-                                    chatGptTitleOf(s),
+                                    sessionDisplayTitle(s),
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = Color.White,
                                     maxLines = 1,
@@ -2775,34 +2648,6 @@ private fun ChatGptHomeLayout(
                     }
                     if (recentLimit < filtered.size || recentLimit > 5) {
                         RecentSessionControls(filtered.size, recentLimit, { recentLimit += 5 }, { recentLimit = 5 })
-                    }
-                    if (showArchived && archivedIds.isNotEmpty()) {
-                        Text(
-                            "已归档",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFF9CA3AF),
-                            modifier = Modifier.padding(start = 32.dp, top = 12.dp, bottom = 4.dp),
-                        )
-                        archivedIds.forEach { id ->
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .height(48.dp)
-                                    .padding(horizontal = 32.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    "会话 ${id.take(8)}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFF9CA3AF),
-                                    modifier = Modifier.weight(1f),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                TextButton(onClick = { onRestoreArchived(id) }) { Text("恢复") }
-                            }
-                        }
                     }
                 }
 

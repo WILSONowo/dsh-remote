@@ -46,6 +46,8 @@ import com.dsh.mobile.data.McpResourceServer
 import com.dsh.mobile.data.McpServer
 import com.dsh.mobile.data.OkHttpClientFactory
 import com.dsh.mobile.data.ReleaseInfo
+import com.dsh.mobile.data.sessionTitleOf
+import com.dsh.mobile.data.shortSessionId
 import com.dsh.mobile.data.SettingsStore
 import com.dsh.mobile.data.Sha3
 import com.dsh.mobile.data.VaultStatus
@@ -97,6 +99,7 @@ fun SettingsScreen(
     fun goBack() {
         when {
             showAppearanceDetail -> showAppearanceDetail = false
+            category == "归档会话" -> category = "会话"
             category != null -> category = null
             else -> onBack()
         }
@@ -241,6 +244,17 @@ fun SettingsScreen(
                 SettingsGroup {
                     SettingsToggle("自适应模型", "按任务难度自动选 Flash / Pro（短问答→Flash，复杂任务→Pro）",
                         autoModel, { autoModel = it; scope.launch { settingsStore.setAutoModel(it) } })
+                    SettingsRow("归档会话", { category = "归档会话" }, icon = Icons.Default.Archive)
+                }
+            }
+            if (category == "归档会话") {
+                val connected = connState as? DshConnection.State.Connected
+                if (remoteReady && connected != null) {
+                    key(connected.profileId, connected.generation) {
+                        ArchivedSessionsSettings(connection, connected)
+                    }
+                } else {
+                    Text("请先连接电脑")
                 }
             }
             if (category == "外观" && !showAppearanceDetail) {
@@ -1076,4 +1090,60 @@ private fun VaultUnlockDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+@Composable
+private fun ArchivedSessionsSettings(connection: DshConnection, target: DshConnection.State.Connected) {
+    val scope = rememberCoroutineScope()
+    var ids by remember { mutableStateOf<List<String>?>(null) }
+    var titles by remember { mutableStateOf<Map<String, String?>>(emptyMap()) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var restoring by remember { mutableStateOf<String?>(null) }
+    var load by remember { mutableIntStateOf(0) }
+    LaunchedEffect(load) {
+        error = null
+        try {
+            val archived = connection.workspaceList().archivedSessionIds.distinct()
+            ids = archived
+            if (archived.isNotEmpty()) {
+                titles = connection.listSessions().associate { it.sessionId to sessionTitleOf(it) }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            error = e.message ?: "加载失败"
+        }
+    }
+    error?.let { message ->
+        Text(message, color = MaterialTheme.colorScheme.error)
+        TextButton(onClick = { load++ }) { Text("重试") }
+    }
+    when {
+        ids == null && error == null -> CircularProgressIndicator()
+        ids?.isEmpty() == true -> Text("暂无归档会话")
+        !ids.isNullOrEmpty() -> SettingsGroup {
+            for (id in ids.orEmpty()) {
+                Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(titles[id] ?: "会话 ${shortSessionId(id)}", Modifier.weight(1f))
+                    TextButton(enabled = restoring == null, onClick = {
+                        if (connection.state.value != target || restoring != null) return@TextButton
+                        restoring = id
+                        scope.launch {
+                            try {
+                                if (connection.state.value != target) return@launch
+                                connection.restoreSession(id)
+                                ids = ids.orEmpty() - id
+                                error = null
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                error = e.message ?: "恢复失败"
+                            } finally { restoring = null }
+                        }
+                    }) { Text(if (restoring == id) "恢复中…" else "恢复") }
+                }
+            }
+        }
+    }
 }

@@ -1121,7 +1121,7 @@ fun SessionScreen(
                 IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
                 Column(Modifier.weight(1f).padding(horizontal = 4.dp, vertical = 6.dp)) {
                     Text(
-                        title ?: "会话 ${sessionId.take(8)}",
+                        title ?: "会话 ${shortSessionId(sessionId)}",
                         style = MaterialTheme.typography.titleLarge,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
