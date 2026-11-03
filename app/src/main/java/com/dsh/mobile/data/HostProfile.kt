@@ -46,6 +46,8 @@ data class HostProfile(
     val connectionMode: String = "direct",
     val relayServerUrl: String = "",
     val relayHostId: String = "",
+    /** Last verified host.describe version for this computer, never the plugin version. */
+    val lastHostVersion: String? = null,
 )
 
 /** One endpoint for RPC, pairing, uploads and WS/SSE; no separately concatenated relay paths. */
@@ -66,7 +68,7 @@ fun HostProfile.connectionUrl(): String {
 
 fun resetPairingIfEndpointChanged(previous: HostProfile?, next: HostProfile): HostProfile =
     if (previous != null && runCatching { previous.connectionUrl() }.getOrNull() != runCatching { next.connectionUrl() }.getOrNull())
-        next.copy(paired = false, channelToken = "", deviceModel = "", deviceMac = "", computerId = "")
+        next.copy(paired = false, channelToken = "", deviceModel = "", deviceMac = "", computerId = "", lastHostVersion = null)
     else next
 
 /**

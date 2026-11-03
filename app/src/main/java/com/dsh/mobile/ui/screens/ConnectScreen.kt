@@ -17,6 +17,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -44,8 +45,8 @@ fun ConnectScreen(
     onEditHost: (String?) -> Unit = {},
     startupPending: Boolean = false,
     onStartupHandled: () -> Unit = {},
-    onConnecting: (String) -> Unit = {},
     onOpenSessions: () -> Unit = {},
+    verifyingAccess: Boolean = false,
     onDisconnect: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -69,7 +70,6 @@ fun ConnectScreen(
     val activeProfile = profiles.firstOrNull { it.id == activeId }
 
     fun connectTo(profile: HostProfile, link: PairingLink? = null) {
-        onConnecting(profile.id)
         scope.launch {
             val target = profile.copy(autoConnect = true)
             // 多设备记录共存：仅当前主机保留「启动自动连接」（记住上次使用），其余只取消标记、不删记录
@@ -83,7 +83,7 @@ fun ConnectScreen(
                 appCtx?.pairingCoordinator?.prepareScan(target, link)
             }
             connection.connect(target) { info ->
-                scope.launch { settingsStore.markAttempt(info.profileId, info.errorCode, info.hostVersion) }
+                scope.launch { settingsStore.markAttempt(info.profileId, info.errorCode) }
             }
         }
     }
@@ -234,15 +234,16 @@ fun ConnectScreen(
             activeProfile?.let { p ->
                 item {
                     Card(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().testTag("active_computer"),
                         shape = DshShape.card,
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surface,
                         ),
                     ) {
                         Column(Modifier.padding(14.dp)) {
-                            val connected = connState as? DshConnection.State.Connected
-                            val dotColor = when (connState) {
+                            val hostState = if (connection.currentProfile()?.id == p.id) connState else DshConnection.State.Disconnected
+                            val connected = hostState as? DshConnection.State.Connected
+                            val dotColor = when (hostState) {
                                 is DshConnection.State.Connected -> if (p.paired) DshSuccess else DshBrand
                                 is DshConnection.State.Error -> MaterialTheme.colorScheme.error
                                 is DshConnection.State.Connecting -> DshBrand
@@ -260,7 +261,7 @@ fun ConnectScreen(
                                 ) {
                                     Text(deviceTitle(p), style = MaterialTheme.typography.titleMedium)
                                     Text(
-                                        connected?.hostVersion?.let { "版本 $it" } ?: "版本未知",
+                                        (connected?.takeIf { it.profileId == p.id }?.hostVersion ?: p.lastHostVersion)?.let { "版本 $it" } ?: "版本未知",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.align(Alignment.CenterVertically),
@@ -272,8 +273,8 @@ fun ConnectScreen(
                                 ) {
                                     Box(Modifier.size(8.dp).background(dotColor, DshShape.pill))
                                     Text(
-                                        when (connState) {
-                                            is DshConnection.State.Connected -> if (p.paired) "已连接" else "待配对"
+                                        when (hostState) {
+                                            is DshConnection.State.Connected -> if (verifyingAccess) "正在验证" else if (p.paired && connection.currentProfile()?.paired == true) "已连接" else "待配对"
                                             is DshConnection.State.Connecting -> "连接中…"
                                             is DshConnection.State.Error -> "连接失败"
                                             else -> "未连接"
@@ -297,8 +298,8 @@ fun ConnectScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 if (connected != null && p.paired) {
-                                    Button(onClick = onOpenSessions) { Text("会话") }
-                                } else if (connState !is DshConnection.State.Connecting && connected == null) {
+                                    Button(onClick = onOpenSessions, enabled = !verifyingAccess && connection.currentProfile()?.paired == true) { Text("会话") }
+                                } else if (hostState !is DshConnection.State.Connecting && connected == null) {
                                     Button(onClick = { connectTo(p) }) { Text("连接") }
                                 }
                                 TextButton(onClick = { onEditHost(p.id) }) { Text("编辑") }
@@ -362,7 +363,12 @@ fun ConnectScreen(
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(deviceTitle(p), modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text(deviceTitle(p), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(p.lastHostVersion?.let { "版本 $it" } ?: "版本未知",
+                                            modifier = Modifier.align(Alignment.CenterVertically),
+                                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
                                     if (isActive) {
                                         Spacer(Modifier.width(6.dp))
                                         Text(

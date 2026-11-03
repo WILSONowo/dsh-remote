@@ -17,6 +17,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import com.dsh.mobile.ui.components.ModelPickerMenu
+import com.dsh.mobile.ui.components.composerModelLabel
 import com.dsh.mobile.ui.components.NewTaskEditor
 import com.dsh.mobile.ui.components.RecentSessionControls
 import com.dsh.mobile.ui.components.rememberVoiceInput
@@ -116,6 +118,28 @@ fun HomeScreen(
 
     // —— 新对话工作区选择 ——
     var selectedWorkspaceId by remember { mutableStateOf("") }
+    val adaptive by settingsStore.autoModel.collectAsState(initial = false)
+    var draftChoice by rememberSaveable(computerScope) { mutableStateOf<ModelSelection?>(null) }
+    var draftCatalog by remember(computerScope) { mutableStateOf<SessionModelsValue?>(null) }
+    var loadingCatalog by remember { mutableStateOf(false) }
+    var showModels by remember { mutableStateOf(false) }
+    var retrySession by rememberSaveable(computerScope, selectedWorkspaceId, preset) { mutableStateOf<String?>(null) }
+
+    fun loadCatalog() {
+        if (loadingCatalog) return
+        loadingCatalog = true
+        scope.launch {
+            try {
+                // Older plugins require a real session for this read. Its personal selection
+                // is not the computer default and must not be inherited by a new session.
+                draftCatalog = connection.sessionModels() ?: sessions.firstOrNull()?.let {
+                    connection.sessionModels(it.sessionId)?.copy(current = ModelSelection("", ""))
+                }
+            } finally {
+                loadingCatalog = false
+            }
+        }
+    }
     var workspaceSheet by remember { mutableStateOf(false) }
     var newWsPath by remember { mutableStateOf("") }
     var newWsTitle by remember { mutableStateOf("") }
@@ -257,6 +281,7 @@ fun HomeScreen(
     LaunchedEffect(Unit) {
         refreshSessions()
         refreshArchived()
+        loadCatalog()
         selectedWorkspaceId = settingsStore.workspaceId(computerScope).first()
         presets = try {
             val p = connection.agentPresets()
@@ -314,11 +339,21 @@ fun HomeScreen(
         sendError = null
         scope.launch {
             try {
-                val sid = connection.createSession(
+                val choice = draftChoice
+                val sid = retrySession ?: connection.createSession(
                     agentPreset = preset,
                     workspaceId = selectedWorkspaceId.ifBlank { null },
-                )
+                ).also { retrySession = it }
+                val useAdaptive = settingsStore.autoModel.first()
+                if (choice != null) {
+                    connection.selectModel(sid, choice.provider, choice.model, choice.reasoningEffort)
+                } else if (useAdaptive && text.isNotBlank()) {
+                    connection.applyAdaptiveModel(sid, text)
+                }
+                settingsStore.setManualModel(computerScope, sid, choice != null && useAdaptive)
                 connection.prompt(sid, text, images = pendingImages)
+                retrySession = null
+                draftChoice = null
                 input = ""
                 pendingImages = emptyList()
                 onSessionClick(sid)
@@ -328,6 +363,22 @@ fun HomeScreen(
                 sending = false
             }
         }
+    }
+
+    val taskEditor: @Composable (String) -> Unit = { placeholder ->
+        val info = draftChoice?.let { draftCatalog?.copy(current = it) } ?: draftCatalog
+        NewTaskEditor(input, { input = it }, placeholder, sending, input.isNotBlank() || pendingImages.isNotEmpty(),
+            { send() }, voiceInput, preset, presets, { preset = it }, { imagePicker.launch("image/*") }, sendError,
+            modelLabel = if (adaptive && draftChoice == null) "自适应模型" else composerModelLabel(info),
+            onModel = { showModels = true; loadCatalog() },
+            modelMenu = {
+                ModelPickerMenu(showModels, info, loadingCatalog, sending, { showModels = false }, ::loadCatalog,
+                    onApply = { provider, model, effort ->
+                        draftChoice = ModelSelection(provider, model, effort)
+                        showModels = false
+                    }, autoSelected = adaptive && draftChoice == null,
+                    onAuto = if (adaptive) ({ draftChoice = null; showModels = false }) else null)
+            })
     }
 
     // 工作区选择面板（所有布局分支共用的覆盖层；DeepLook 分支不渲染 Scaffold，也必须挂这里）
@@ -543,19 +594,13 @@ fun HomeScreen(
         Box {
             ChatGptHomeLayout(
                 sessions = sessions,
+                taskEditor = taskEditor,
                 archivedIds = archivedIds,
-                input = input,
-                onInputChange = { input = it },
-                sending = sending,
-                onSend = { send() },
-                sendError = sendError,
                 preset = preset,
                 presets = presets,
                 presetMenu = presetMenu,
                 onPresetMenuChange = { presetMenu = it },
                 pendingImages = pendingImages,
-                onPickImage = { imagePicker.launch("image/*") },
-                onVoice = voiceInput,
                 onPresetSelect = { preset = it },
                 onRemoveImage = { i -> pendingImages = pendingImages.filterIndexed { j, _ -> j != i } },
                 onSessionClick = onSessionClick,
@@ -598,20 +643,9 @@ fun HomeScreen(
         Box {
             ClaudeHomeLayout(
                 sessions = sessions,
+                taskEditor = taskEditor,
                 archivedIds = archivedIds,
-                input = input,
-                onInputChange = { input = it },
-                sending = sending,
-                onSend = { send() },
-                sendError = sendError,
-                preset = preset,
-                presets = presets,
-                presetMenu = presetMenu,
-                onPresetMenuChange = { presetMenu = it },
                 pendingImages = pendingImages,
-                onPickImage = { imagePicker.launch("image/*") },
-                onVoice = voiceInput,
-                onPresetSelect = { preset = it },
                 onRemoveImage = { i -> pendingImages = pendingImages.filterIndexed { j, _ -> j != i } },
                 onNewChat = {
                     input = ""
@@ -657,22 +691,11 @@ fun HomeScreen(
         Box {
             DeepLookHomeLayout(
                 sessions = sessions,
+                taskEditor = taskEditor,
                 workspaces = workspaces,
                 selectedWorkspaceId = selectedWorkspaceId,
                 onWorkspaceClick = { workspaceSheet = true },
-                input = input,
-                onInputChange = { input = it },
-                sending = sending,
-                onSend = { send() },
-                sendError = sendError,
-                preset = preset,
-                presets = presets,
-                presetMenu = presetMenu,
-                onPresetMenuChange = { presetMenu = it },
                 pendingImages = pendingImages,
-                onPickImage = { imagePicker.launch("image/*") },
-                onVoice = voiceInput,
-                onPresetSelect = { preset = it },
                 onRemoveImage = { i -> pendingImages = pendingImages.filterIndexed { j, _ -> j != i } },
                 onSessionClick = onSessionClick,
                 onSettings = onSettings,
@@ -695,9 +718,7 @@ fun HomeScreen(
     }
 
     val recentTools: @Composable () -> Unit = {
-        Surface(color = if (DshThemeId == "blue" && recentListState.firstVisibleItemIndex == 0) Color.Transparent
-            else MaterialTheme.colorScheme.background.copy(alpha = 0.96f),
-            contentColor = MaterialTheme.colorScheme.onBackground) {
+        CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onBackground) {
             Column(Modifier.fillMaxWidth().testTag("recent_session_tools")) {
                 Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = if (compactHeight) 0.dp else 8.dp, bottom = if (compactHeight) 0.dp else 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
@@ -727,12 +748,12 @@ fun HomeScreen(
     }
 
     Scaffold(
-        containerColor = if (DshThemeId == "blue") Color.Transparent else MaterialTheme.colorScheme.background,
+        containerColor = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onBackground,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 16.dp, vertical = 8.dp)
-                .testTag("home_task_dock")) {
+            val dock = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).testTag("home_task_dock")
+            val picker: @Composable () -> Unit = {
                 // —— 工作区选择 chip（新对话创建在该工作区，对齐 Web 的 Session Intent hero）——
                 val wsSelected = workspaces.firstOrNull { it.workspaceId == selectedWorkspaceId }
                 val wsLabel = when {
@@ -764,9 +785,8 @@ fun HomeScreen(
                         Icon(Icons.Default.ArrowDropDown, null, Modifier.size(20.dp))
                     },
                 )
-                Spacer(Modifier.height(10.dp))
-
-                // 待发送图片
+            }
+            val editor: @Composable () -> Unit = {
                 if (pendingImages.isNotEmpty()) {
                     Row(
                         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -785,10 +805,19 @@ fun HomeScreen(
                     Spacer(Modifier.height(6.dp))
                 }
 
-                NewTaskEditor(input, { input = it },
-                    if (DshThemeStyle == ThemeStyle.CODEX) "> 输入任务指令…" else "描述你的任务…",
-                    sending, input.isNotBlank() || pendingImages.isNotEmpty(), { send() }, voiceInput,
-                    preset, presets, { preset = it }, { imagePicker.launch("image/*") }, sendError)
+                taskEditor(if (DshThemeStyle == ThemeStyle.CODEX) "> 输入任务指令…" else "描述你的任务…")
+            }
+            if (compactHeight && LocalConfiguration.current.screenWidthDp >= 600) {
+                Row(dock, horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.widthIn(max = 164.dp)) { picker() }
+                    Column(Modifier.weight(1f)) { editor() }
+                }
+            } else {
+                Column(dock) {
+                    picker()
+                    Spacer(Modifier.height(8.dp))
+                    editor()
+                }
             }
         },
         topBar = {
@@ -809,240 +838,221 @@ fun HomeScreen(
                     }
                 },
                 actions = {
+                    if (compactHeight && (DshThemeId == "blue" || DshThemeId == "warm")) {
+                        Image(androidx.compose.ui.res.painterResource(R.drawable.maid_left), "鲸鱼娘",
+                            Modifier.size(width = 40.dp, height = 54.dp), contentScale = ContentScale.Fit)
+                    }
                     PendingBell(pendingCount = pendingCount, onPending = onPending)
                 },
             )
         },
     ) { padding ->
-        LazyColumn(
-            state = recentListState,
-            modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).testTag("home_recent_list"),
-            contentPadding = PaddingValues(bottom = 24.dp),
-        ) {
-            item(key = "greeting") {
-            // —— 新任务输入卡（Trae 首页风格）——
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-            ) {
-                Spacer(Modifier.height(8.dp))
-                // 问候区：STANDARD 用官方风格大标题；CODEX 用终端提示符风格；CYBERPUNK 用 HUD 风格
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            when (DshThemeStyle) {
-                                ThemeStyle.CODEX -> Text(
-                                    "❯",
-                                    style = MaterialTheme.typography.headlineLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    color = DshBrand,
-                                )
-                                ThemeStyle.CYBERPUNK -> Text(
-                                    "◈",
-                                    style = MaterialTheme.typography.headlineLarge,
-                                    fontWeight = FontWeight.Black,
-                                    color = DshBrand,
-                                )
-                                else -> {}
-                            }
-                            if (DshThemeStyle != ThemeStyle.STANDARD) Spacer(Modifier.width(10.dp))
-                            Text(
-                                when (DshThemeStyle) {
-                                    ThemeStyle.CODEX -> "新任务"
-                                    ThemeStyle.CYBERPUNK -> "新任务"
-                                    else -> "你好 👋"
-                                },
-                                style = MaterialTheme.typography.headlineLarge,
-                                fontWeight = FontWeight.Bold,
-                            )
-                        }
-                        Text(
-                            "今天想交给大肥鱼什么任务？",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    // 内置主题：鲸鱼娘女仆立绘（dsh-deep-whale 皮肤资产，CC BY-NC-SA 4.0）
-                    if (DshThemeId == "blue" || DshThemeId == "warm") {
-                        Spacer(Modifier.width(8.dp))
-                        Image(
-                            painter = androidx.compose.ui.res.painterResource(R.drawable.maid_left),
-                            contentDescription = "鲸鱼娘",
-                            modifier = Modifier
-                                .width(if (compactHeight) 64.dp else 128.dp)
-                                .height(if (compactHeight) 87.dp else 174.dp)
-                                .graphicsLayer { alpha = 0.95f },
-                            contentScale = ContentScale.Fit,
-                        )
-                    }
-                }
-                // 品牌装饰：STANDARD 用渐变条；CODEX 用终端字符分隔线；CYBERPUNK 用双线 HUD 条
-                Spacer(Modifier.height(10.dp))
-                when (DshThemeStyle) {
-                    ThemeStyle.CODEX -> Text(
-                        "─".repeat(26),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = DshBrand,
-                        maxLines = 1,
-                        overflow = TextOverflow.Clip,
-                    )
-                    ThemeStyle.CYBERPUNK -> Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.width(18.dp).height(3.dp).background(DshBrand))
-                        Spacer(Modifier.width(4.dp))
-                        Box(Modifier.width(10.dp).height(3.dp).background(DshBrandSoft))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            "NIGHT CITY // 2077",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = DshBrandSoft,
-                        )
-                    }
-                    else -> Box(
-                        Modifier
-                            .width(36.dp)
-                            .height(3.dp)
-                            .background(brandGradient(), DshShape.small),
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-
-
-
-            }
-
-            }
-            if (compactHeight) {
-                item(key = "recent_header") { recentTools() }
-            } else {
-                stickyHeader(key = "recent_header") { recentTools() }
-            }
-            if (sessions.isEmpty() && archivedIds.isEmpty()) {
-                item(key = "empty") {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(24.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
+            val bodyHeight = maxHeight
+            Column(Modifier.fillMaxSize()) {
+                if (!compactHeight && bodyHeight >= 180.dp) {
+                    SessionGreeting(compactHeight || bodyHeight < 360.dp)
+                } else if (!compactHeight && bodyHeight >= 96.dp) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (DshThemeStyle == ThemeStyle.STANDARD) "你好 👋" else "新任务", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
                         if (DshThemeId == "blue" || DshThemeId == "warm") {
-                            // 内置主题：鲸鱼娘立绘空态
-                            Image(
-                                painter = androidx.compose.ui.res.painterResource(R.drawable.maid_left),
-                                contentDescription = "鲸鱼娘",
-                                modifier = Modifier.width(130.dp),
-                                contentScale = ContentScale.Fit,
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                "还没有会话，从下面的输入框开始第一个任务吧",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        } else {
-                            // 官方风格空态：品牌底圆 + 鲸鱼 logo
-                            Box(
-                                modifier = Modifier
-                                    .size(72.dp)
-                                    .background(DshBrand.copy(alpha = 0.12f), CircleShape),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Image(
-                                    painter = androidx.compose.ui.res.painterResource(com.dsh.mobile.R.drawable.ic_dsh_desktop),
-                                    contentDescription = null,
-                                    modifier = Modifier.size(40.dp),
+                            Image(androidx.compose.ui.res.painterResource(R.drawable.maid_left), "鲸鱼娘",
+                                Modifier.size(36.dp), contentScale = ContentScale.Fit)
+                        }
+                    }
+                }
+                recentTools()
+                LazyColumn(
+                    state = recentListState,
+                    modifier = Modifier.weight(1f).fillMaxWidth().testTag("home_recent_list"),
+                    contentPadding = PaddingValues(bottom = 24.dp),
+                ) {
+                    if (sessions.isEmpty() && archivedIds.isEmpty()) {
+                        item(key = "empty") {
+                            Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                if (DshThemeId != "blue" && DshThemeId != "warm") {
+                                    Box(Modifier.size(72.dp).background(DshBrand.copy(alpha = 0.12f), CircleShape),
+                                        contentAlignment = Alignment.Center) {
+                                        Image(androidx.compose.ui.res.painterResource(R.drawable.ic_dsh_desktop), null, Modifier.size(40.dp))
+                                    }
+                                    Spacer(Modifier.height(12.dp))
+                                }
+                                Text(if (DshThemeStyle == ThemeStyle.CYBERPUNK) "— NIGHT CITY // 2077 —" else "还没有会话，从下面的输入框开始第一个任务吧",
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    } else {
+                        if (stdFiltered.isEmpty() && stdSearchQuery.isNotBlank()) {
+                            item(key = "no_match") {
+                                Text(
+                                    "无匹配会话",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(16.dp),
                                 )
                             }
-                            Spacer(Modifier.height(12.dp))
-                            Text(
-                                if (DshThemeStyle == ThemeStyle.CYBERPUNK) "— NIGHT CITY // 2077 —" else "还没有会话，从下面的输入框开始第一个任务吧",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
                         }
-                    }
-                }
-                }
-            } else {
-                    if (stdFiltered.isEmpty() && stdSearchQuery.isNotBlank()) {
-                        item(key = "no_match") {
-                            Text(
-                                "无匹配会话",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(16.dp),
-                            )
+                        items(stdFiltered.take(recentLimit), key = { "s_" + it.sessionId }) { s ->
+                            Box(Modifier.padding(horizontal = 12.dp)) {
+                                SessionCard(
+                                    session = s,
+                                    pinned = s.sessionId in pinnedIds,
+                                    onClick = { onSessionClick(s.sessionId) },
+                                    onLongClick = { menuTarget = s.sessionId },
+                                )
+                                SessionActionMenu(
+                                    session = s,
+                                    pinnedIds = pinnedIds,
+                                    expanded = menuTarget == s.sessionId,
+                                    onDismiss = { menuTarget = null },
+                                    onTogglePin = {
+                                        scope.launch { settingsStore.setPinned(s.sessionId, s.sessionId !in pinnedIds, computerScope) }
+                                    },
+                                    onArchive = { archiveTarget = s },
+                                )
+                            }
                         }
-                    }
-                    items(stdFiltered.take(recentLimit), key = { "s_" + it.sessionId }) { s ->
-                        Box(Modifier.padding(horizontal = 12.dp)) {
-                            SessionCard(
-                                session = s,
-                                pinned = s.sessionId in pinnedIds,
-                                onClick = { onSessionClick(s.sessionId) },
-                                onLongClick = { menuTarget = s.sessionId },
-                            )
-                            SessionActionMenu(
-                                session = s,
-                                pinnedIds = pinnedIds,
-                                expanded = menuTarget == s.sessionId,
-                                onDismiss = { menuTarget = null },
-                                onTogglePin = {
-                                    scope.launch { settingsStore.setPinned(s.sessionId, s.sessionId !in pinnedIds, computerScope) }
-                                },
-                                onArchive = { archiveTarget = s },
-                            )
+                        if (recentLimit < stdFiltered.size || recentLimit > 5) {
+                            item(key = "recent_more") {
+                                RecentSessionControls(stdFiltered.size, recentLimit, { recentLimit += 5 }, {
+                                    recentLimit = 5
+                                    scope.launch { recentListState.scrollToItem(0) }
+                                })
+                            }
                         }
-                    }
-                    if (recentLimit < stdFiltered.size || recentLimit > 5) {
-                        item(key = "recent_more") {
-                            RecentSessionControls(stdFiltered.size, recentLimit, { recentLimit += 5 }, {
-                                recentLimit = 5
-                                scope.launch { recentListState.scrollToItem(1) }
-                            })
-                        }
-                    }
-                    if (archivedIds.isNotEmpty()) {
-                        item(key = "arch_header") {
-                            Text(
-                                "已归档（点击恢复）",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(top = 8.dp),
-                            )
-                        }
-                        items(archivedIds, key = { "a_" + it }) { id ->
-                            ArchivedRow(id = id, onRestore = {
-                                scope.launch {
-                                    val ws = workspaces.firstOrNull()?.workspaceId
-                                    if (ws.isNullOrBlank()) {
-                                        listError = "没有可用工作区，无法恢复"
-                                    } else {
-                                        try {
-                                            connection.restoreSession(ws, id)
-                                            refreshSessions()
-                                            refreshArchived()
-                                        } catch (e: Exception) {
-                                            listError = e.message
+                        if (archivedIds.isNotEmpty()) {
+                            item(key = "arch_header") {
+                                Text(
+                                    "已归档（点击恢复）",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 8.dp),
+                                )
+                            }
+                            items(archivedIds, key = { "a_" + it }) { id ->
+                                ArchivedRow(id = id, onRestore = {
+                                    scope.launch {
+                                        val ws = workspaces.firstOrNull()?.workspaceId
+                                        if (ws.isNullOrBlank()) {
+                                            listError = "没有可用工作区，无法恢复"
+                                        } else {
+                                            try {
+                                                connection.restoreSession(ws, id)
+                                                refreshSessions()
+                                                refreshArchived()
+                                            } catch (e: Exception) {
+                                                listError = e.message
+                                            }
                                         }
                                     }
-                                }
-                            })
+                                })
+                            }
                         }
                     }
                 }
             }
+        }
 
-            // 归档确认（共享覆盖层；长按菜单「归档」触发）
-            archiveDialogOverlay()
-            filePreviewOverlay()
+        // 归档确认（共享覆盖层；长按菜单「归档」触发）
+        archiveDialogOverlay()
+        filePreviewOverlay()
 
-            // 工作区选择面板（对齐 Web WorkspacePicker：默认 / 已有工作区 / 新建）
-            workspaceSheetOverlay()
+        // 工作区选择面板（对齐 Web WorkspacePicker：默认 / 已有工作区 / 新建）
+        workspaceSheetOverlay()
+    }
+}
+
+@Composable
+private fun SessionGreeting(compactGreeting: Boolean) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Spacer(Modifier.height(8.dp))
+        // 问候区：STANDARD 用官方风格大标题；CODEX 用终端提示符风格；CYBERPUNK 用 HUD 风格
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    when (DshThemeStyle) {
+                        ThemeStyle.CODEX -> Text(
+                            "❯",
+                            style = MaterialTheme.typography.headlineLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = DshBrand,
+                        )
+                        ThemeStyle.CYBERPUNK -> Text(
+                            "◈",
+                            style = MaterialTheme.typography.headlineLarge,
+                            fontWeight = FontWeight.Black,
+                            color = DshBrand,
+                        )
+                        else -> {}
+                    }
+                    if (DshThemeStyle != ThemeStyle.STANDARD) Spacer(Modifier.width(10.dp))
+                    Text(
+                        when (DshThemeStyle) {
+                            ThemeStyle.CODEX -> "新任务"
+                            ThemeStyle.CYBERPUNK -> "新任务"
+                            else -> "你好 👋"
+                        },
+                        style = MaterialTheme.typography.headlineLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Text(
+                    "今天想交给大肥鱼什么任务？",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // 内置主题：鲸鱼娘女仆立绘（dsh-deep-whale 皮肤资产，CC BY-NC-SA 4.0）
+            if (DshThemeId == "blue" || DshThemeId == "warm") {
+                Spacer(Modifier.width(8.dp))
+                Image(
+                    painter = androidx.compose.ui.res.painterResource(R.drawable.maid_left),
+                    contentDescription = "鲸鱼娘",
+                    modifier = Modifier
+                        .width(if (compactGreeting) 64.dp else 128.dp)
+                        .height(if (compactGreeting) 87.dp else 174.dp)
+                        .graphicsLayer { alpha = 0.95f },
+                    contentScale = ContentScale.Fit,
+                )
+            }
+        }
+        // 品牌装饰：STANDARD 用渐变条；CODEX 用终端字符分隔线；CYBERPUNK 用双线 HUD 条
+        Spacer(Modifier.height(10.dp))
+        when (DshThemeStyle) {
+            ThemeStyle.CODEX -> Text(
+                "─".repeat(26),
+                style = MaterialTheme.typography.labelSmall,
+                color = DshBrand,
+                maxLines = 1,
+                overflow = TextOverflow.Clip,
+            )
+            ThemeStyle.CYBERPUNK -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(18.dp).height(3.dp).background(DshBrand))
+                Spacer(Modifier.width(4.dp))
+                Box(Modifier.width(10.dp).height(3.dp).background(DshBrandSoft))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "NIGHT CITY // 2077",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = DshBrandSoft,
+                )
+            }
+            else -> Box(
+                Modifier
+                    .width(36.dp)
+                    .height(3.dp)
+                    .background(brandGradient(), DshShape.small),
+            )
+        }
+        Spacer(Modifier.height(10.dp))
     }
 }
 
@@ -1700,20 +1710,9 @@ private fun SessionActionMenu(
 @Composable
 private fun ClaudeHomeLayout(
     sessions: List<SessionSummary>,
+    taskEditor: @Composable (String) -> Unit,
     archivedIds: List<String>,
-    input: String,
-    onInputChange: (String) -> Unit,
-    sending: Boolean,
-    onSend: () -> Unit,
-    sendError: String?,
-    preset: String,
-    presets: List<Pair<String, String>>,
-    presetMenu: Boolean,
-    onPresetMenuChange: (Boolean) -> Unit,
     pendingImages: List<DshConnection.ImagePart>,
-    onPickImage: () -> Unit,
-    onVoice: () -> Unit,
-    onPresetSelect: (String) -> Unit,
     onRemoveImage: (Int) -> Unit,
     onNewChat: () -> Unit,
     onSessionClick: (String) -> Unit,
@@ -2081,9 +2080,7 @@ private fun ClaudeHomeLayout(
             }
 
             Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                NewTaskEditor(input, onInputChange, "给 DeepSeek Harness 发消息…", sending,
-                    input.isNotBlank() || pendingImages.isNotEmpty(), onSend, onVoice,
-                    preset, presets, onPresetSelect, onPickImage, sendError)
+                taskEditor("给 DeepSeek Harness 发消息…")
             }
         }
     }
@@ -2098,22 +2095,11 @@ private fun ClaudeHomeLayout(
 @Composable
 private fun DeepLookHomeLayout(
     sessions: List<SessionSummary>,
+    taskEditor: @Composable (String) -> Unit,
     workspaces: List<WorkspaceView>,
     selectedWorkspaceId: String,
     onWorkspaceClick: () -> Unit,
-    input: String,
-    onInputChange: (String) -> Unit,
-    sending: Boolean,
-    onSend: () -> Unit,
-    sendError: String?,
-    preset: String,
-    presets: List<Pair<String, String>>,
-    presetMenu: Boolean,
-    onPresetMenuChange: (Boolean) -> Unit,
     pendingImages: List<DshConnection.ImagePart>,
-    onPickImage: () -> Unit,
-    onVoice: () -> Unit,
-    onPresetSelect: (String) -> Unit,
     onRemoveImage: (Int) -> Unit,
     onSessionClick: (String) -> Unit,
     onSettings: () -> Unit,
@@ -2209,7 +2195,7 @@ private fun DeepLookHomeLayout(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .verticalScroll(rememberScrollState()),
+                .then(if (tab == "new") Modifier.verticalScroll(rememberScrollState()) else Modifier),
         ) {
             if (tab == "new") {
                 // 分组「工作区」
@@ -2263,9 +2249,7 @@ private fun DeepLookHomeLayout(
                                 }
                             }
                         }
-                NewTaskEditor(input, onInputChange, "描述你的任务…", sending,
-                    input.isNotBlank() || pendingImages.isNotEmpty(), onSend, onVoice,
-                    preset, presets, onPresetSelect, onPickImage, sendError)
+                taskEditor("描述你的任务…")
 
             } else {
                 // 会话列表分组卡片
@@ -2277,127 +2261,129 @@ private fun DeepLookHomeLayout(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 4.dp),
                 )
-                if (sessions.isEmpty()) {
-                    // 空状态：72dp 虚线圆环 + 内部图标 + 「暂无会话」14sp
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 48.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Box(Modifier.size(72.dp), contentAlignment = Alignment.Center) {
-                            Canvas(Modifier.fillMaxSize()) {
-                                drawCircle(
-                                    color = dashTint,
-                                    style = Stroke(
-                                        width = 2.dp.toPx(),
-                                        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
-                                            floatArrayOf(8f, 8f), 0f,
+                Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
+                    if (sessions.isEmpty()) {
+                        // 空状态：72dp 虚线圆环 + 内部图标 + 「暂无会话」14sp
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 48.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Box(Modifier.size(72.dp), contentAlignment = Alignment.Center) {
+                                Canvas(Modifier.fillMaxSize()) {
+                                    drawCircle(
+                                        color = dashTint,
+                                        style = Stroke(
+                                            width = 2.dp.toPx(),
+                                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
+                                                floatArrayOf(8f, 8f), 0f,
+                                            ),
                                         ),
-                                    ),
-                                )
-                            }
-                            Icon(
-                                Icons.Default.ChatBubbleOutline,
-                                null,
-                                Modifier.size(28.dp),
-                                tint = dashTint,
-                            )
-                        }
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            "暂无会话",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = faintIcon,
-                        )
-                    }
-                } else if (filtered.isEmpty()) {
-                    // 有会话但搜索无命中
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Text(
-                            "无匹配会话",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = faintIcon,
-                        )
-                    }
-                } else {
-                    DeepLookCard {
-                        filtered.take(recentLimit).forEachIndexed { index, s ->
-                            Box {
-                                Row(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .combinedClickable(
-                                            onClick = { onSessionClick(s.sessionId) },
-                                            onLongClick = { menuTarget = s.sessionId },
-                                        )
-                                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(
-                                            chatGptTitleOf(s),
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            fontWeight = FontWeight.Medium,
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        Text(
-                                            SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
-                                                .format(Date(s.updatedAt)),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = faintIcon,
-                                        )
-                                    }
-                                    if (s.running) {
-                                        Box(
-                                            Modifier
-                                                .size(8.dp)
-                                                .background(MaterialTheme.colorScheme.primary, CircleShape),
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                    }
-                                    if (s.sessionId in pinnedIds) {
-                                        Icon(
-                                            Icons.Rounded.PushPin,
-                                            null,
-                                            Modifier.size(14.dp),
-                                            tint = deepAccent,
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                    }
-                                    Icon(
-                                        Icons.Default.ChevronRight,
-                                        null,
-                                        Modifier.size(16.dp),
-                                        tint = chevronTint,
                                     )
                                 }
-                                SessionActionMenu(
-                                    session = s,
-                                    pinnedIds = pinnedIds,
-                                    expanded = menuTarget == s.sessionId,
-                                    onDismiss = { menuTarget = null },
-                                    onTogglePin = { onTogglePin(s.sessionId) },
-                                    onArchive = { onArchive(s) },
+                                Icon(
+                                    Icons.Default.ChatBubbleOutline,
+                                    null,
+                                    Modifier.size(28.dp),
+                                    tint = dashTint,
                                 )
                             }
-                            if (index < minOf(recentLimit, filtered.size) - 1) {
-                                HorizontalDivider(
-                                    color = MaterialTheme.colorScheme.surfaceVariant,
-                                    thickness = 1.dp,
-                                    modifier = Modifier.padding(horizontal = 14.dp),
-                                )
-                            }
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                "暂无会话",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = faintIcon,
+                            )
                         }
-                        if (recentLimit < filtered.size || recentLimit > 5) {
-                            RecentSessionControls(filtered.size, recentLimit, { recentLimit += 5 }, { recentLimit = 5 })
+                    } else if (filtered.isEmpty()) {
+                        // 有会话但搜索无命中
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 32.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(
+                                "无匹配会话",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = faintIcon,
+                            )
+                        }
+                    } else {
+                        DeepLookCard {
+                            filtered.take(recentLimit).forEachIndexed { index, s ->
+                                Box {
+                                    Row(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .combinedClickable(
+                                                onClick = { onSessionClick(s.sessionId) },
+                                                onLongClick = { menuTarget = s.sessionId },
+                                            )
+                                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Column(Modifier.weight(1f)) {
+                                            Text(
+                                                chatGptTitleOf(s),
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                fontWeight = FontWeight.Medium,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            Text(
+                                                SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+                                                    .format(Date(s.updatedAt)),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = faintIcon,
+                                            )
+                                        }
+                                        if (s.running) {
+                                            Box(
+                                                Modifier
+                                                    .size(8.dp)
+                                                    .background(MaterialTheme.colorScheme.primary, CircleShape),
+                                            )
+                                            Spacer(Modifier.width(8.dp))
+                                        }
+                                        if (s.sessionId in pinnedIds) {
+                                            Icon(
+                                                Icons.Rounded.PushPin,
+                                                null,
+                                                Modifier.size(14.dp),
+                                                tint = deepAccent,
+                                            )
+                                            Spacer(Modifier.width(8.dp))
+                                        }
+                                        Icon(
+                                            Icons.Default.ChevronRight,
+                                            null,
+                                            Modifier.size(16.dp),
+                                            tint = chevronTint,
+                                        )
+                                    }
+                                    SessionActionMenu(
+                                        session = s,
+                                        pinnedIds = pinnedIds,
+                                        expanded = menuTarget == s.sessionId,
+                                        onDismiss = { menuTarget = null },
+                                        onTogglePin = { onTogglePin(s.sessionId) },
+                                        onArchive = { onArchive(s) },
+                                    )
+                                }
+                                if (index < minOf(recentLimit, filtered.size) - 1) {
+                                    HorizontalDivider(
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        thickness = 1.dp,
+                                        modifier = Modifier.padding(horizontal = 14.dp),
+                                    )
+                                }
+                            }
+                            if (recentLimit < filtered.size || recentLimit > 5) {
+                                RecentSessionControls(filtered.size, recentLimit, { recentLimit += 5 }, { recentLimit = 5 })
+                            }
                         }
                     }
                 }
@@ -2498,19 +2484,13 @@ private fun chatGptTitleOf(s: SessionSummary): String = sessionTitleOf(s)
 @Composable
 private fun ChatGptHomeLayout(
     sessions: List<SessionSummary>,
+    taskEditor: @Composable (String) -> Unit,
     archivedIds: List<String>,
-    input: String,
-    onInputChange: (String) -> Unit,
-    sending: Boolean,
-    onSend: () -> Unit,
-    sendError: String?,
     preset: String,
     presets: List<Pair<String, String>>,
     presetMenu: Boolean,
     onPresetMenuChange: (Boolean) -> Unit,
     pendingImages: List<DshConnection.ImagePart>,
-    onPickImage: () -> Unit,
-    onVoice: () -> Unit,
     onPresetSelect: (String) -> Unit,
     onRemoveImage: (Int) -> Unit,
     onSessionClick: (String) -> Unit,
@@ -2904,9 +2884,7 @@ private fun ChatGptHomeLayout(
             }
 
             Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                NewTaskEditor(input, onInputChange, "询问 DeepSeek Harness…", sending,
-                    input.isNotBlank() || pendingImages.isNotEmpty(), onSend, onVoice,
-                    preset, presets, onPresetSelect, onPickImage, sendError)
+                taskEditor("询问 DeepSeek Harness…")
             }
         }
     }

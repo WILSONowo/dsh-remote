@@ -180,7 +180,7 @@ data class ModelSelection(
     val provider: String,
     val model: String,
     val reasoningEffort: String? = null,
-)
+) : java.io.Serializable
 
 @Serializable
 data class SessionModelsValue(

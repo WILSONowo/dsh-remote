@@ -48,7 +48,7 @@ def handler_for(index, trace=False):
                 return self.reply({"ok": True, "name": name, "model": name,
                                    "platform": "fixture", "computerId": computer_id})
             if path == "/api/remote-access/pair/check":
-                return self.reply({"paired": self.headers.get("Authorization") == f"Bearer {token}"})
+                return self.reply({"ok": True, "paired": self.headers.get("Authorization") == f"Bearer {token}"})
             if path == "/api/remote-access/pair/status":
                 return self.reply({"ok": True, "state": "approved"})
             if path.startswith("/api/events."):

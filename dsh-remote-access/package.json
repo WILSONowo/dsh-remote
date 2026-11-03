@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-access",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Remote access to DSH: supports direct LAN connections, tunneling, and self-hosted servers, with protocol compatibility for 0.2.1-rc.5.",
   "type": "module",
   "main": "lib/index.js",

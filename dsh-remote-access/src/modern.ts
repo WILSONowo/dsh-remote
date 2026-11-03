@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { DEVICE_ID, type Request, reply } from './security.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -45,6 +47,16 @@ async function readEnvelope(req: IncomingMessage) {
 }
 
 export function createModernAdapter(ctx: any, register: (route: any) => void) {
+  // The desktop launcher passes its active runtime directory as argv[2], including for ASAR installations.
+  const runtimeDir = process.argv[2];
+  let hostVersion: string | undefined;
+  if (runtimeDir && isAbsolute(runtimeDir)) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(runtimeDir, 'desktop-runtime.json'), 'utf8'));
+      const version = manifest.release?.version;
+      if (typeof version === 'string' && /^\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/.test(version)) hostVersion = version;
+    } catch { /* The existing client displays an unknown version when runtime metadata is unavailable. */ }
+  }
   const gateway = ctx.typertGateway;
   const streams = new Set<Stream>();
   const wanted = new Map<string, Map<string, number>>();
@@ -87,7 +99,8 @@ export function createModernAdapter(ctx: any, register: (route: any) => void) {
       }
       case 'session.models': {
         const catalog = await invoke(p, signal, 'session/modelCatalog', {});
-        const projections = await invoke(p, signal, 'session/projections', { request: { sessionId: request.sessionId } });
+        const projections = request.sessionId === undefined ? undefined
+          : await invoke(p, signal, 'session/projections', { request: { sessionId: request.sessionId } });
         const current = projections?.values?.modelSelection?.next ?? projections?.values?.modelSelection?.lastUsed ?? catalog.default;
         return { current, routable: catalog.routableProviders.includes(current.provider), groups: catalog.groups, failures: catalog.failures };
       }
@@ -169,7 +182,7 @@ export function createModernAdapter(ctx: any, register: (route: any) => void) {
     if (req.method !== 'POST') return reply(res, 405, { error: 'method_not_allowed' });
     try {
       const body = await readEnvelope(req);
-      reply(res, 200, { type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: { protocol: 'dsh-remote-v3', hostProtocol: 'typert', pairingRequired: true } } });
+      reply(res, 200, { type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: { protocol: 'dsh-remote-v3', hostProtocol: 'typert', pairingRequired: true, version: hostVersion } } });
     } catch { reply(res, 400, { error: 'invalid_request' }); }
   }});
 

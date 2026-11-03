@@ -50,7 +50,7 @@ class PairingCoordinator(
         handshakeJob?.cancel()
         handshakingFor = null
         _waitingForApproval.value = null
-        scan = if (profile.paired) null else profile.id to link
+        scan = profile.id to link
         _awaitingDecision.value = null
     }
 
@@ -74,8 +74,10 @@ class PairingCoordinator(
                 if (scan?.first != profile.id) scan = null
                 if (discovery?.first != profile.id) discovery = null
                 if (state is DshConnection.State.Connected) {
-                    if (profile.paired) refreshPaired(profile)
-                    else if (handshakingFor != profile.id) {
+                    if (profile.paired) {
+                        scan = null
+                        refreshPaired(profile)
+                    } else if (handshakingFor != profile.id) {
                         val scanned = scan?.second
                         scan = null
                         if (scanned != null && scanned.expiresAt > System.currentTimeMillis()) {
@@ -85,8 +87,6 @@ class PairingCoordinator(
                             _awaitingDecision.value = profile.id
                         }
                     }
-                } else if (state is DshConnection.State.Error && state.code == ConnectionErrorCode.AUTH_FAILED && profile.paired) {
-                    refreshPaired(profile)
                 }
             }
         }
@@ -193,17 +193,6 @@ class PairingCoordinator(
 
     private suspend fun refreshPaired(profile: HostProfile) {
         val rpc = HttpPairingRpc(connection, OkHttpClientFactory.build(profile).first)
-        val check = try { rpc.check(settingsStore.ensureDeviceId()) }
-            catch (e: CancellationException) { throw e } catch (_: Exception) { return }
-        if (!current(profile)) return
-        if (!check.paired) {
-            val revoked = profile.copy(paired = false, channelToken = "")
-            OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, null)
-            settingsStore.upsertProfile(revoked)
-            connection.syncCurrentProfile(revoked)
-            _awaitingDecision.value = profile.id
-            return
-        }
         val info = try { rpc.deviceInfo() }
             catch (e: CancellationException) { throw e } catch (_: Exception) { return }
         if (info == null || !current(profile)) return
@@ -212,13 +201,7 @@ class PairingCoordinator(
             connection.disconnect()
             return
         }
-        val updated = profile.copy(
-            computerId = info.computerId.ifBlank { profile.computerId }, deviceMac = "",
-            deviceModel = info.name.ifBlank { info.model.ifBlank { profile.deviceModel } },
-        )
-        if (updated != profile) {
-            settingsStore.upsertProfile(updated)
-            if (current(profile)) connection.syncCurrentProfile(updated)
-        }
+        val updated = settingsStore.refreshDeviceDetails(profile, info) ?: return
+        if (updated != profile && current(profile)) connection.syncCurrentProfile(updated)
     }
 }

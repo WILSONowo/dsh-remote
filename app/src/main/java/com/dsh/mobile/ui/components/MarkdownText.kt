@@ -249,7 +249,7 @@ private sealed interface MdBlock {
     data class Paragraph(val text: String) : MdBlock
 }
 
-private val ORDERED_LIST_RE = Regex("""^(d{1,3})[.)]s+(.*)$""")
+private val ORDERED_LIST_RE = Regex("""^(\d{1,3})[.)]\s+(.*)$""")
 
 private fun parseMarkdownBlocks(text: String): List<MdBlock> {
     val lines = text.split("\n")
@@ -312,7 +312,8 @@ private fun parseMarkdownBlocks(text: String): List<MdBlock> {
                     !lines[i].trimStart().startsWith("```") &&
                     !lines[i].startsWith("#") &&
                     !lines[i].startsWith("- ") &&
-                    !lines[i].startsWith("* ")
+                    !lines[i].startsWith("* ") &&
+                    !ORDERED_LIST_RE.containsMatchIn(lines[i])
                 ) {
                     buf.append("\n").append(lines[i])
                     i++

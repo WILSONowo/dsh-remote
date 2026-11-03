@@ -1,6 +1,8 @@
 package com.dsh.mobile.ui
 
 import android.app.Application
+import java.io.File
+import java.nio.file.Files
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalDensity
@@ -21,19 +23,33 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import okio.buffer
+import okio.source
+import org.json.JSONObject
 import java.net.ServerSocket
 import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 
+// Robolectric can reuse the Kotlin process singleton for Preferences DataStore across
+// activities while deleting each test application's data directory. Give this suite
+// one temporary files directory for the same lifetime as that singleton.
+class NavigationFixtureApplication : Application() {
+    override fun getFilesDir(): File = directory
+    companion object {
+        val directory: File by lazy { Files.createTempDirectory("dsh-navigation-fixture-").toFile() }
+    }
+}
+
 /** Real Compose layouts, synthetic saved computers, no external server or LAN discovery. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], qualifiers = "w360dp-h720dp-mdpi", application = Application::class)
+@Config(sdk = [34], qualifiers = "w360dp-h720dp-mdpi", application = NavigationFixtureApplication::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class NavigationUiTest {
     @get:Rule val compose = createComposeRule()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val connection = DshConnection()
+    private var checkIntervalMs = 10_000L
+    private val connection by lazy { DshConnection(RuntimeEnvironment.getApplication(), accessCheckIntervalMs = checkIntervalMs) }
 
     @Before fun resetSyntheticProfiles() = runBlocking {
         val store = SettingsStore(RuntimeEnvironment.getApplication())
@@ -78,6 +94,33 @@ class NavigationUiTest {
         Assert.assertTrue(connection.state.value is DshConnection.State.Disconnected)
     }
 
+    @Test fun lastKnownVersionSurvivesStaleProfileWritesAndUnknownVersions() = runBlocking {
+        val store = SettingsStore(RuntimeEnvironment.getApplication())
+        val profile = HostProfile("version-a", "Computer A", "http://192.0.2.20:7941")
+        store.upsertProfile(profile)
+        store.rememberHostVersion(profile, "0.2.1-rc.5")
+        store.rememberHostVersion(profile, VersionPolicy.PLACEHOLDER_VERSION)
+        store.upsertProfile(profile.copy(remark = "Renamed"))
+        assertVersion(store, "0.2.1-rc.5")
+        val otherEndpoint = profile.copy(url = "http://192.0.2.21:7941")
+        store.upsertProfile(otherEndpoint)
+        store.rememberHostVersion(profile, "1.0.0")
+        assertVersion(store, null)
+    }
+
+    private suspend fun assertVersion(store: SettingsStore, expected: String?) {
+        Assert.assertEquals(expected, store.profiles.first().single { it.id == "version-a" }.lastHostVersion)
+    }
+
+    @Test fun numberedMarkdownAfterParagraphKeepsItsNumbersAndLiteralText() {
+        compose.setContent {
+            com.dsh.mobile.ui.components.MarkdownText("开头\n1. 第一项\n12) 第二项\n\nd.s 普通文本")
+        }
+        compose.onNodeWithText("1.  ").assertExists()
+        compose.onNodeWithText("12.  ").assertExists()
+        compose.onNodeWithText("d.s 普通文本").assertExists()
+    }
+
     @Test fun workspaceAndPinnedSessionsAreIndependentForEachComputer() = runBlocking {
         val store = SettingsStore(RuntimeEnvironment.getApplication())
         store.setWorkspaceId("workspace-a", "scope-a")
@@ -95,7 +138,23 @@ class NavigationUiTest {
     @Test @Config(qualifiers = "w667dp-h400dp-land-mdpi")
     fun landscapeKeepsHomeComposerAndWorkspaceAboveNavigation() = exerciseConnectedHome()
 
-    private fun exerciseConnectedHome() {
+    @Test
+    fun revokedDeviceCannotEnterSessions() = exerciseConnectedHome(revoke = "before")
+
+    @Test
+    fun idleRevocationReturnsToPairing() = exerciseConnectedHome(revoke = "idle")
+
+    @Test fun temporaryCheckFailureKeepsPairingAndStaysOnConnections() = exerciseConnectedHome(revoke = "offline")
+
+    @Test fun firstTaskUsesManualModelAndEffortBeforePrompt() = exerciseConnectedHome(firstTask = "manual")
+
+    @Test fun firstTaskCanUseAdaptiveModelWhenNotOverridden() = exerciseConnectedHome(firstTask = "adaptive")
+
+    private fun exerciseConnectedHome(revoke: String? = null, firstTask: String? = null) {
+        if (revoke == "idle") checkIntervalMs = 300L
+        val calls = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
+        val unavailable = java.util.concurrent.atomic.AtomicBoolean(false)
+        val authorized = java.util.concurrent.atomic.AtomicBoolean(true)
         val release = CountDownLatch(1)
         val executor = Executors.newCachedThreadPool { runnable -> Thread(runnable).apply { isDaemon = true } }
         val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
@@ -104,22 +163,31 @@ class NavigationUiTest {
                 val socket = runCatching { server.accept() }.getOrNull() ?: break
                 executor.execute {
                     socket.use { client ->
-                        val reader = client.getInputStream().bufferedReader()
-                        val request = reader.readLine().orEmpty()
+                        val reader = client.getInputStream().source().buffer()
+                        val request = reader.readUtf8Line().orEmpty()
                         var contentLength = 0
                         while (true) {
-                            val header = reader.readLine() ?: break
+                            val header = reader.readUtf8Line() ?: break
                             if (header.isEmpty()) break
                             if (header.startsWith("Content-Length:", true)) contentLength = header.substringAfter(':').trim().toInt()
                         }
-                        repeat(contentLength) { reader.read() }
+                        if (contentLength > 0) calls.add(JSONObject(reader.readUtf8(contentLength.toLong())))
                         val output = client.getOutputStream()
-                        if (request.contains("/api/events")) {
+                        if (request.contains("/pair/check?")) {
+                            val payload = """{"ok":true,"paired":${authorized.get()}}""".toByteArray()
+                            val status = if (unavailable.get()) "503 Unavailable" else "200 OK"
+                            output.write("HTTP/1.1 $status\r\nContent-Type: application/json\r\nContent-Length: ${payload.size}\r\nConnection: close\r\n\r\n".toByteArray())
+                            output.write(payload)
+                            output.flush()
+                        } else if (request.contains("/api/events")) {
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: fixture\n\n".toByteArray())
                             output.flush()
                             release.await()
                         } else {
                             val value = if (request.contains("describe")) """{"version":"0.2.1-rc.5"}"""
+                                else if (request.contains("/api/session.models ")) """{"current":{"provider":"fixture","model":"pro"},"groups":[{"id":"fixture","models":[{"id":"flash","name":"Fixture Flash"},{"id":"pro","name":"Fixture Pro","reasoning":{"efforts":[{"id":"high","name":"高"}]}}]}]}"""
+                                else if (request.contains("/api/session.create ")) """{"sessionId":"new-fixture"}"""
+                                else if (request.contains("/api/session.list ") && firstTask != null) """{"items":[]}"""
                                 else if (request.contains("/api/session.list ")) {
                                     val items = (1..13).joinToString(",") { n ->
                                         """{"sessionId":"recent-$n","updatedAt":${1000 - n},"projections":{"values":{"title":"Recent ${n.toString().padStart(2, '0')}"}}}"""
@@ -139,20 +207,108 @@ class NavigationUiTest {
             val store = SettingsStore(RuntimeEnvironment.getApplication())
             runBlocking {
                 store.setBackgroundNotify(false)
+                store.setAutoModel(firstTask != null)
                 listOf("a", "b").forEach { id ->
                     store.upsertProfile(HostProfile("paired-$id", "Computer $id", "http://127.0.0.1:${server.localPort}", paired = true))
                 }
             }
             val style = mutableStateOf(ThemeStyle.STANDARD)
             val bluePreview = mutableStateOf(false)
+            lateinit var hostView: android.view.View
+            val coordinator = if (revoke != null) PairingCoordinator(connection, store, scope).also { it.start() } else null
             compose.setContent {
+                hostView = androidx.compose.ui.platform.LocalView.current
                 DshTheme(if (bluePreview.value) ThemeRegistry.blue else ThemeRegistry.warm.copy(style = style.value)) {
                     Surface { AppNavigation(rememberNavController(), connection, remember { ApprovalCenter(connection, scope) }) }
                 }
             }
             compose.waitUntil(10_000) { compose.onAllNodesWithText("Computer a").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Computer a").performClick()
-            compose.waitUntil(10_000) { compose.onAllNodesWithText("切换").fetchSemanticsNodes().isNotEmpty() }
+            compose.waitUntil("Connected fixture: ${connection.state.value}", 10_000) {
+                val state = connection.state.value
+                check(state !is DshConnection.State.Error) { state.toString() }
+                compose.onAllNodesWithText("断开连接").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("添加电脑").assertIsDisplayed()
+            compose.onNodeWithText("切换").assertDoesNotExist()
+            if (revoke == "before") authorized.set(false)
+            if (revoke == "offline") unavailable.set(true)
+            compose.onNode(hasText("会话") and !hasTestTag("nav_sessions")).performClick()
+            if (revoke == "offline") {
+                compose.waitUntil(10_000) {
+                    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                    connection.state.value is DshConnection.State.Error
+                }
+                Assert.assertTrue(runBlocking { store.profiles.first().single { it.id == "paired-a" }.paired })
+                unavailable.set(false)
+                compose.waitUntil(10_000) { compose.onAllNodesWithText("断开连接").fetchSemanticsNodes().isNotEmpty() }
+                compose.onNodeWithText("添加电脑").assertIsDisplayed()
+                compose.onNodeWithText("切换").assertDoesNotExist()
+                return
+            }
+            if (revoke != "before") {
+                compose.waitUntil(10_000) { compose.onAllNodesWithText("切换").fetchSemanticsNodes().isNotEmpty() }
+            }
+            if (revoke != null) {
+                authorized.set(false)
+                compose.waitUntil(10_000) {
+                    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                    coordinator?.awaitingDecision?.value == "paired-a"
+                }
+                compose.onNodeWithText("切换").assertDoesNotExist()
+                compose.onNodeWithText("添加电脑").assertIsDisplayed()
+                val saved = runBlocking { store.profiles.first() }
+                Assert.assertFalse(saved.single { it.id == "paired-a" }.paired)
+                Assert.assertTrue(saved.single { it.id == "paired-b" }.paired)
+                return
+            }
+            if (firstTask != null) {
+                if (firstTask == "manual") {
+                    compose.onNodeWithContentDescription("切换模型").performClick()
+                    compose.waitUntil(5_000) { compose.onAllNodesWithText("模型").fetchSemanticsNodes().isNotEmpty() }
+                    compose.onNodeWithText("模型").performClick()
+                    compose.onNodeWithText("Fixture Pro").performClick()
+                    compose.onNodeWithContentDescription("切换模型").performClick()
+                    compose.waitUntil(5_000) { compose.onAllNodesWithText("高").fetchSemanticsNodes().isNotEmpty() }
+                    compose.onNodeWithText("高").performClick()
+                    compose.onNodeWithText("Fixture Pro 高").assertExists()
+                }
+                Assert.assertFalse(calls.any { it.optString("method") == "session.create" })
+                compose.onNodeWithTag("message_editor").performTextInput("hello")
+                compose.onNodeWithTag("message_action").performClick()
+                compose.waitUntil(10_000) {
+                    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                    calls.any { it.optString("method") == "session.prompt" }
+                }
+                val writes = calls.filter { it.optString("method") in setOf("session.create", "session.selectModel", "session.prompt") }
+                Assert.assertEquals(listOf("session.create", "session.selectModel", "session.prompt"), writes.map { it.getString("method") })
+                val choice = writes[1].getJSONObject("payload")
+                Assert.assertEquals("new-fixture", choice.getString("sessionId"))
+                Assert.assertEquals(if (firstTask == "manual") "pro" else "flash", choice.getString("model"))
+                if (firstTask == "manual") Assert.assertEquals("high", choice.getString("reasoningEffort"))
+                Assert.assertEquals(firstTask == "manual", runBlocking { store.manualModel(connection.currentProfile().computerScope(), "new-fixture").first() })
+                return
+            }
+            if (RuntimeEnvironment.getApplication().resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT) {
+                val nav = compose.onNodeWithTag("nav_sessions")
+                val before = nav.fetchSemanticsNode().boundsInRoot
+                val original = androidx.core.view.ViewCompat.getRootWindowInsets(hostView)
+                val ime = androidx.core.view.WindowInsetsCompat.Type.ime()
+                fun deliverIme(height: Int) {
+                    compose.runOnUiThread {
+                        val insets = androidx.core.view.WindowInsetsCompat.Builder(original ?: androidx.core.view.WindowInsetsCompat.CONSUMED)
+                            .setInsets(ime, androidx.core.graphics.Insets.of(0, 0, 0, height))
+                            .setVisible(ime, height > 0).build()
+                        androidx.core.view.ViewCompat.dispatchApplyWindowInsets(hostView, insets)
+                    }
+                }
+                deliverIme(160)
+                nav.assertIsDisplayed()
+                Assert.assertEquals(before.top - 160f, nav.fetchSemanticsNode().boundsInRoot.top, 1f)
+                deliverIme(0)
+                nav.assertIsDisplayed()
+                Assert.assertEquals(before.top, nav.fetchSemanticsNode().boundsInRoot.top, 1f)
+            }
             ThemeStyle.entries.forEach { theme ->
                 compose.runOnIdle { style.value = theme }
                 compose.onNodeWithTag("nav_connections").assertIsDisplayed()
@@ -167,18 +323,17 @@ class NavigationUiTest {
             compose.onNodeWithTag("workspace_theme_decoration", useUnmergedTree = true).assertIsDisplayed()
             compose.onNodeWithContentDescription("鲸鱼娘").assertIsDisplayed()
             // Compact windows show the greeting first; scroll the list independently of the dock.
-            compose.onNodeWithTag("home_recent_list").performScrollToIndex(2)
+            compose.onNodeWithTag("home_recent_list").performScrollToIndex(0)
             compose.waitUntil(10_000) { compose.onAllNodesWithText("Recent 01").fetchSemanticsNodes().isNotEmpty() }
             val dock = compose.onNodeWithTag("home_task_dock").fetchSemanticsNode().boundsInRoot
             val editor = compose.onNodeWithTag("message_editor").fetchSemanticsNode().boundsInRoot
             val workspace = compose.onNodeWithText("默认工作区").fetchSemanticsNode().boundsInRoot
-            Assert.assertTrue(workspace.bottom <= editor.top)
+            Assert.assertTrue(workspace.bottom <= editor.top || workspace.right <= editor.left)
             Assert.assertTrue(compose.onNodeWithTag("home_recent_list").fetchSemanticsNode().boundsInRoot.bottom <= dock.top)
             compose.onNodeWithText("默认工作区").performClick()
             compose.onAllNodesWithText("默认工作区").onLast().performClick()
             val list = compose.onNode(hasScrollToIndexAction())
             Assert.assertTrue(compose.onNodeWithTag("home_workspace_picker").fetchSemanticsNode().boundsInRoot.height >= 44f)
-            list.performScrollToNode(hasContentDescription("搜索会话"))
             compose.onNodeWithContentDescription("搜索会话").performClick()
             compose.onNode(hasSetTextAction() and hasAnyAncestor(hasTestTag("home_session_search")))
                 .performTextInput("Recent 13")
@@ -186,13 +341,14 @@ class NavigationUiTest {
             compose.onNode(hasText("Recent 13") and !hasSetTextAction()).assertIsDisplayed()
             val date = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(987))
             compose.onNodeWithText(date).assertExists()
-            list.performScrollToNode(hasContentDescription("关闭搜索"))
             compose.onNodeWithContentDescription("关闭搜索").performClick()
             list.performScrollToNode(hasText("显示更多"))
             compose.onNodeWithText("Recent 06").assertDoesNotExist()
             compose.onNodeWithText("显示更多").performClick()
+            val toolbar = compose.onNodeWithTag("recent_session_tools").fetchSemanticsNode().boundsInRoot
             list.performScrollToNode(hasText("Recent 10"))
             compose.onNodeWithText("Recent 10").assertIsDisplayed()
+            Assert.assertEquals(toolbar, compose.onNodeWithTag("recent_session_tools").fetchSemanticsNode().boundsInRoot)
             Assert.assertEquals(dock.top, compose.onNodeWithTag("home_task_dock").fetchSemanticsNode().boundsInRoot.top, 0.5f)
             compose.onNodeWithTag("message_editor").assertIsDisplayed()
             list.performScrollToNode(hasText("显示更多"))
@@ -214,6 +370,7 @@ class NavigationUiTest {
             compose.onNodeWithText("切换").performClick()
             compose.onNodeWithText("Computer b").performClick()
             compose.waitUntil(10_000) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
                 connection.currentProfile()?.id == "paired-b" && compose.onAllNodesWithText("切换").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("添加电脑").assertDoesNotExist()
@@ -222,7 +379,7 @@ class NavigationUiTest {
             compose.onNodeWithTag("nav_connections").performClick()
             compose.onNodeWithText("添加电脑").assertIsDisplayed()
             Assert.assertEquals("paired-b", connection.currentProfile()?.id)
-            compose.onNodeWithText("版本 0.2.1-rc.5").performScrollTo().assertIsDisplayed()
+            compose.onNode(hasText("版本 0.2.1-rc.5") and hasAnyAncestor(hasTestTag("active_computer"))).performScrollTo().assertIsDisplayed()
             compose.onNodeWithContentDescription("发送文件到电脑").assertDoesNotExist()
             val sessions = compose.onNode(hasText("会话") and !hasTestTag("nav_sessions"))
             val edit = compose.onNodeWithText("编辑")
@@ -241,7 +398,17 @@ class NavigationUiTest {
             compose.onNodeWithContentDescription("返回").performClick()
             compose.onNodeWithText("断开连接").performScrollTo().performClick()
             compose.waitUntil(5_000) { connection.state.value is DshConnection.State.Disconnected }
+            compose.onNode(hasText("版本 0.2.1-rc.5") and hasAnyAncestor(hasTestTag("active_computer"))).assertExists()
+            Assert.assertEquals("0.2.1-rc.5", runBlocking { store.profiles.first().single { it.id == "paired-b" }.lastHostVersion })
         } finally {
+            if (firstTask != null) {
+                val reset = scope.async(Dispatchers.IO) { SettingsStore(RuntimeEnvironment.getApplication()).setAutoModel(false) }
+                compose.waitUntil(5_000) {
+                    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                    reset.isCompleted
+                }
+                runBlocking { reset.await() }
+            }
             connection.disconnect()
             release.countDown()
             server.close()

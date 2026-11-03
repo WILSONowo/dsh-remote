@@ -122,6 +122,7 @@ fun MarketScreen(onBack: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MarketThemeCard(
     theme: MarketTheme,
@@ -138,10 +139,9 @@ private fun MarketThemeCard(
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(theme.name, style = MaterialTheme.typography.titleMedium)
                         if (installedVersion != null) {
-                            Spacer(Modifier.width(8.dp))
                             Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
                                 Text(
                                     if (updatable) "v$installedVersion → v${theme.version}" else "已装 v$installedVersion",

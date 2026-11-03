@@ -43,6 +43,7 @@ fun SettingsGroup(modifier: Modifier = Modifier, content: @Composable ColumnScop
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsRow(
     title: String,
@@ -52,25 +53,24 @@ fun SettingsRow(
     summary: String? = null,
     icon: ImageVector? = null,
 ) {
-    BoxWithConstraints(modifier.fillMaxWidth()) {
-        val valueWidth = maxWidth * 0.48f
-        Row(Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick)
-            .heightIn(min = 64.dp).padding(horizontal = 20.dp, vertical = 16.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (icon != null) Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
-                Icon(icon, null, Modifier.padding(9.dp).size(22.dp), tint = MaterialTheme.colorScheme.primary)
-            }
-            Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                if (summary != null) Text(summary, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
-            }
-            if (!value.isNullOrBlank()) Text(value, Modifier.widthIn(max = valueWidth), textAlign = TextAlign.End,
-                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, Modifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f))
+    Row(modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick)
+        .heightIn(min = 64.dp).padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (icon != null) Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
+            Icon(icon, null, Modifier.padding(9.dp).size(22.dp), tint = MaterialTheme.colorScheme.primary)
         }
+        Column(Modifier.weight(1f)) {
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(title, Modifier.padding(end = 12.dp), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                if (!value.isNullOrBlank()) Text(value, style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (summary != null) Text(summary, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+        }
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, Modifier.size(20.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f))
     }
 }
 

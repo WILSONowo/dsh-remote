@@ -116,7 +116,7 @@ class DshConnectionService : Service() {
                 profiles.firstOrNull { it.id == activeId }
             }.distinctUntilChanged { old, new ->
                 fun comparable(p: com.dsh.mobile.data.HostProfile?) = p?.copy(lastUsedAt = 0,
-                    lastErrorCode = null, remark = "", deviceModel = "", autoConnect = false)
+                    lastErrorCode = null, remark = "", deviceModel = "", autoConnect = false, lastHostVersion = null)
                 comparable(old) == comparable(new)
             }.collect { profile ->
                     eventsJob?.cancel()
@@ -159,7 +159,7 @@ class DshConnectionService : Service() {
                     connection.connect(profile) { info ->
                         if (info.errorCode != null) {
                             scope.launch {
-                                settings.markAttempt(info.profileId, info.errorCode, info.hostVersion)
+                                settings.markAttempt(info.profileId, info.errorCode)
                             }
                         }
                     }

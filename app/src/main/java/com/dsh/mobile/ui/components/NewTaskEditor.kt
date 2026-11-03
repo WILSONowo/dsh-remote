@@ -11,24 +11,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 
-/** Session creation uses an agent preset; session-only model/permission controls appear after creation. */
+/** The first prompt uses the same model menu as the conversation. Agent presets live in Add. */
 @Composable
 fun NewTaskEditor(input: String, onInputChange: (String) -> Unit, placeholder: String,
     sending: Boolean, canSend: Boolean, onSend: () -> Unit, onVoice: () -> Unit,
     preset: String, presets: List<Pair<String, String>>, onPresetSelect: (String) -> Unit,
-    onPickImage: () -> Unit, error: String?) {
+    onPickImage: () -> Unit, error: String?, modelLabel: String, onModel: () -> Unit,
+    modelMenu: @Composable () -> Unit) {
     var addMenu by remember { mutableStateOf(false) }
     var presetMenu by remember { mutableStateOf(false) }
     MessageEditor(input, onInputChange, placeholder, RoundedCornerShape(28.dp), canSend, sending, false, onSend, {},
-        showPermissions = false, modelLabel = presets.firstOrNull { it.first == preset }?.second ?: preset,
-        modelDescription = "预设", onModel = { presetMenu = true }, onVoice = onVoice, onAdd = { addMenu = true },
+        showPermissions = false, modelLabel = modelLabel,
+        modelDescription = "切换模型", onModel = onModel, onVoice = onVoice, onAdd = { addMenu = true },
         maxLines = if (LocalConfiguration.current.screenHeightDp < 600) 3 else 6,
         addMenu = {
             ComposerPopup(addMenu, { addMenu = false }) {
                 ComposerMenuItem(text = { Text("添加图片") }, leadingIcon = { Icon(Icons.Outlined.Image, null) },
                     onClick = { addMenu = false; onPickImage() })
+                ComposerMenuItem(text = { Text("预设") }, trailingIcon = { Icon(Icons.Default.ChevronRight, null) },
+                    onClick = { addMenu = false; presetMenu = true })
             }
-        }, modelMenu = {
             ComposerPopup(presetMenu, { presetMenu = false }) {
                 presets.forEach { (id, name) ->
                     ComposerMenuItem(text = { Text(name) },
@@ -36,7 +38,7 @@ fun NewTaskEditor(input: String, onInputChange: (String) -> Unit, placeholder: S
                         onClick = { onPresetSelect(id); presetMenu = false })
                 }
             }
-        })
+        }, modelMenu = modelMenu)
     error?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
 }

@@ -23,7 +23,11 @@ class ApiException(message: String, val code: String? = null) : Exception(messag
  *           payload = MuxFrame（session/event、approval/requested、question/requested…）
  * - 应答: POST /api/respond  body = client-response {type, rpcId, result}
  */
-class DshConnection(private val appContext: Context? = null) {
+class DshConnection(private val appContext: Context, private val accessCheckIntervalMs: Long = 10_000L) {
+    private val store by lazy { SettingsStore(appContext.applicationContext) }
+    private var generation = 0L
+    private data class AccessProbe(val profile: HostProfile, val client: OkHttpClient, val generation: Long)
+
 
     sealed class State {
         data object Disconnected : State()
@@ -35,7 +39,6 @@ class DshConnection(private val appContext: Context? = null) {
     data class AttemptInfo(
         val profileId: String,
         val errorCode: ConnectionErrorCode?,
-        val hostVersion: String?,
     )
 
     /** 领域事件（解析后的 mux/host 帧） */
@@ -133,6 +136,7 @@ class DshConnection(private val appContext: Context? = null) {
         streamClient = stream
         _state.value = State.Connecting(normalized)
         registerNetworkCallback()
+        val probe = AccessProbe(profile, unary, generation)
         connectJob = scope.launch {
             var attempt = 0
             while (isActive) {
@@ -141,6 +145,10 @@ class DshConnection(private val appContext: Context? = null) {
                     val version = runCatching {
                         value.jsonObject["version"]?.jsonPrimitive?.contentOrNull
                     }.getOrNull()
+                    if (version != null && VersionPolicy.evaluate(version) == VersionVerdict.OK && isCurrent(probe)) {
+                        store.rememberHostVersion(profile, version)
+                    }
+                    if (profile.paired && !verifyAccess(probe)) return@launch
                     ConnectionResult.Ok(version)
                 } catch (e: Exception) {
                     val code = classifyConnectError(e)
@@ -154,15 +162,19 @@ class DshConnection(private val appContext: Context? = null) {
                             failPermanently(ConnectionErrorCode.VERSION_MISMATCH, "版本不兼容（远端 ${result.version}）")
                             break
                         }
-                        onAttempt?.invoke(AttemptInfo(profile.id, null, result.version))
+                        onAttempt?.invoke(AttemptInfo(profile.id, null))
                         // UNKNOWN（占位/缺失/无法解析）时 hostVersion 置 null → UI 显示「版本未知」
                         val hostVersion = if (verdict == VersionVerdict.OK) result.version else null
                         _state.value = State.Connected(normalized, hostVersion, profile.id)
                         // Unpaired devices can probe the host but cannot open authenticated event streams.
                         // Starting these before pairing races the dialog with an AUTH_FAILED state.
                         if (profile.paired) {
-                            streamLoop("mux", "/api/events.mux")
-                            streamLoop("host", "/api/events.host")
+                            streamLoop("mux", "/api/events.mux", probe)
+                            streamLoop("host", "/api/events.host", probe)
+                            while (isActive) {
+                                delay(accessCheckIntervalMs)
+                                if (!confirmAccess(profile.id)) break
+                            }
                         }
                         break
                     }
@@ -172,7 +184,7 @@ class DshConnection(private val appContext: Context? = null) {
                             break
                         }
                         val backoff = RetryPolicy.nextBackoff(result.code, attempt) ?: break
-                        onAttempt?.invoke(AttemptInfo(profile.id, result.code, null))
+                        onAttempt?.invoke(AttemptInfo(profile.id, result.code))
                         val msg = "连接失败（${result.code.name}），${backoff / 1000} 秒后自动重连"
                         _events.tryEmit(Event.StreamError(msg))
                         _state.value = State.Error(msg, result.code, profile.id)
@@ -183,6 +195,55 @@ class DshConnection(private val appContext: Context? = null) {
                     }
                 }
             }
+        }
+    }
+
+    @Synchronized private fun isCurrent(probe: AccessProbe) = generation == probe.generation
+
+    private suspend fun verifyAccess(probe: AccessProbe): Boolean {
+        if (!isCurrent(probe)) return false
+        val profile = probe.profile
+        val rpc = HttpPairingRpc(this, probe.client, endpoint = profile.connectionUrl())
+        val check = rpc.check(store.ensureDeviceId())
+        if (!isCurrent(probe)) return false
+        if (check.paired) return true
+        val revoked = store.clearRevokedAccess(profile)
+        synchronized(this) {
+            if (isCurrent(probe)) {
+                disconnectInternal()
+                if (revoked != null) connect(revoked, onAttempt)
+            }
+        }
+        return false
+    }
+
+    /** Recheck access before opening a protected page, also while idle on an existing stream. */
+    suspend fun confirmAccess(id: String): Boolean {
+        val probe = synchronized(this) {
+            val p = connectedProfile ?: return false
+            if (p.id != id || !p.paired || _state.value !is State.Connected) return false
+            AccessProbe(p, unaryClient, generation)
+        }
+        return try {
+            verifyAccess(probe) && isCurrent(probe)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // An unreachable check is not evidence of revocation. Retry the normal handshake.
+            synchronized(this) {
+                if (isCurrent(probe)) {
+                    disconnectInternal()
+                    connect(probe.profile, onAttempt)
+                }
+            }
+            false
+        }
+    }
+
+    private suspend fun streamDenied(probe: AccessProbe) {
+        if (!isCurrent(probe)) return
+        if (confirmAccess(probe.profile.id)) synchronized(this) {
+            if (isCurrent(probe)) failPermanently(ConnectionErrorCode.AUTH_FAILED, "电脑拒绝了连接")
         }
     }
 
@@ -204,7 +265,7 @@ class DshConnection(private val appContext: Context? = null) {
     private fun currentProfileHasProxy(): Boolean = connectedProfile?.proxy != null
 
     private fun failPermanently(code: ConnectionErrorCode, detail: String) {
-        onAttempt?.invoke(AttemptInfo(profileId ?: "", code, null))
+        onAttempt?.invoke(AttemptInfo(profileId ?: "", code))
         _events.tryEmit(Event.StreamError("$detail（已停止自动重连）"))
         _state.value = State.Error("$detail（已停止自动重连）", code, profileId)
     }
@@ -213,6 +274,7 @@ class DshConnection(private val appContext: Context? = null) {
     fun disconnect() = disconnectInternal()
 
     private fun disconnectInternal() {
+        generation++
         unregisterNetworkCallback()
         scope.coroutineContext.cancelChildren()
         _state.value = State.Disconnected
@@ -223,7 +285,7 @@ class DshConnection(private val appContext: Context? = null) {
     }
 
     private fun registerNetworkCallback() {
-        val context = appContext ?: return
+        val context = appContext
         val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
             as? ConnectivityManager ?: return
         val cb = object : ConnectivityManager.NetworkCallback() {
@@ -237,7 +299,7 @@ class DshConnection(private val appContext: Context? = null) {
     }
 
     private fun unregisterNetworkCallback() {
-        val context = appContext ?: return
+        val context = appContext
         val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
             as? ConnectivityManager ?: return
         networkCallback?.let { runCatching { cm.unregisterNetworkCallback(it) } }
@@ -262,30 +324,30 @@ class DshConnection(private val appContext: Context? = null) {
 
     /** 事件流循环（WebSocket 优先，SSE 兜底，指数退避自动重连）
      *  连接成功后立即重置退避：3s → 6s → 12s → 24s → 30s（封顶）。 */
-    private fun streamLoop(name: String, path: String) {
+    private fun streamLoop(name: String, path: String, probe: AccessProbe) {
         scope.launch {
             // 事件流重连退避（指数退避 3→6→12→24→30s 封顶）
             var backoffMs = 3_000L
             while (isActive) {
                 var lastError = "流结束"
                 try {
-                    openWsStream(path)
+                    openWsStream(path, probe)
                     backoffMs = 3_000L
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                     if (e is ApiException && e.code == "auth_failed") {
-                        _state.value = State.Error("设备凭证已失效，请重新配对", ConnectionErrorCode.AUTH_FAILED, profileId)
+                        streamDenied(probe)
                         return@launch
                     }
                     lastError = e.message ?: "ws 失败"
                     // 回退：部分 dsh web 服务器用 SSE 承载该流
                     try {
-                        readSse(path)
+                        readSse(path, probe)
                         backoffMs = 3_000L
                     } catch (e2: Exception) {
                         if (e2 is CancellationException) throw e2
                         if (e2 is ApiException && e2.code == "auth_failed") {
-                            _state.value = State.Error("设备凭证已失效，请重新配对", ConnectionErrorCode.AUTH_FAILED, profileId)
+                            streamDenied(probe)
                             return@launch
                         }
                         lastError = "ws/see 均失败: ${e2.message}"
@@ -303,18 +365,19 @@ class DshConnection(private val appContext: Context? = null) {
 
     /** WebSocket 方式读取事件流：每条文本消息 = server-request 信封 JSON。
      *  协程保持挂起直到 socket 关闭/失败，关闭后由外层循环触发重连。 */
-    private suspend fun openWsStream(path: String) = suspendCancellableCoroutine { cont ->
+    private suspend fun openWsStream(path: String, probe: AccessProbe) = suspendCancellableCoroutine { cont ->
+        val baseUrl = probe.profile.connectionUrl()
         val wsUrl = if (baseUrl.startsWith("https://")) "wss://" + baseUrl.removePrefix("https://") + path
         else "ws://" + baseUrl.removePrefix("http://") + path
         val request = Request.Builder().url(wsUrl).build()
         val ws = streamClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (path == "/api/events.mux") _events.tryEmit(Event.Reconnected(baseUrl))
+                if (isCurrent(probe) && path == "/api/events.mux") _events.tryEmit(Event.Reconnected(baseUrl))
                 // 保持挂起：等 socket 关闭或失败才返回，交给外层重连
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                handleStreamData(text)
+                if (isCurrent(probe)) handleStreamData(text)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -327,7 +390,7 @@ class DshConnection(private val appContext: Context? = null) {
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (cont.isActive) {
-                    cont.resumeWith(Result.failure(if (response?.code == 401)
+                    cont.resumeWith(Result.failure(if (response?.code in setOf(401, 403))
                         ApiException("HTTP 401", "auth_failed") else t))
                 }
             }
@@ -336,40 +399,41 @@ class DshConnection(private val appContext: Context? = null) {
     }
 
     /** SSE 方式读取事件流（dsh web CLI 服务器兼容路径） */
-    private suspend fun readSse(path: String) {
-        val request = Request.Builder()
-            .url(baseUrl + path)
-            .header("Accept", "text/event-stream")
-            .header("Cache-Control", "no-cache")
-            .build()
-        val response = streamClient.newCall(request).execute()
-        if (!response.isSuccessful) {
-            response.close()
-            throw ApiException("HTTP ${response.code}", if (response.code == 401) "auth_failed" else null)
-        }
-        val source = response.body?.source() ?: run {
-            response.close()
-            throw ApiException("空响应体")
-        }
-        if (path == "/api/events.mux") _events.tryEmit(Event.Reconnected(baseUrl))
-        try {
-            val dataLines = mutableListOf<String>()
-            while (currentCoroutineContext().isActive) {
-                val line = source.readUtf8Line() ?: break
-                if (line.isEmpty()) {
-                    if (dataLines.isNotEmpty()) {
-                        val data = dataLines.joinToString("\n")
-                        dataLines.clear()
-                        handleStreamData(data)
+    private suspend fun readSse(path: String, probe: AccessProbe): Unit = suspendCancellableCoroutine { cont ->
+        val endpoint = probe.profile.connectionUrl()
+        val request = Request.Builder().url(endpoint + path)
+            .header("Accept", "text/event-stream").header("Cache-Control", "no-cache").build()
+        val call = streamClient.newCall(request)
+        cont.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: java.io.IOException) {
+                if (cont.isActive) cont.resumeWith(Result.failure(e))
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    response.use { resp ->
+                        if (!resp.isSuccessful) throw ApiException("HTTP ${resp.code}",
+                            if (resp.code in setOf(401, 403)) "auth_failed" else null)
+                        val source = resp.body?.source() ?: throw ApiException("空响应体")
+                        if (isCurrent(probe) && path == "/api/events.mux") _events.tryEmit(Event.Reconnected(endpoint))
+                        val dataLines = mutableListOf<String>()
+                        while (cont.isActive && isCurrent(probe)) {
+                            val line = source.readUtf8Line() ?: break
+                            if (line.isEmpty() && dataLines.isNotEmpty()) {
+                                if (isCurrent(probe)) handleStreamData(dataLines.joinToString("\n"))
+                                dataLines.clear()
+                            } else if (line.startsWith("data:")) {
+                                dataLines.add(line.removePrefix("data:").trim())
+                            }
+                        }
                     }
-                } else if (line.startsWith("data:")) {
-                    dataLines.add(line.removePrefix("data:").trim())
+                    if (cont.isActive) cont.resumeWith(Result.failure(ApiException("SSE 流结束")))
+                } catch (e: Exception) {
+                    if (cont.isActive) cont.resumeWith(Result.failure(e))
                 }
             }
-        } finally {
-            response.close()
-        }
-        if (_state.value is State.Connected) throw ApiException("SSE 流结束")
+        })
     }
 
     private fun handleStreamData(data: String) {
@@ -649,10 +713,12 @@ class DshConnection(private val appContext: Context? = null) {
         })
     }
 
-    suspend fun sessionModels(sessionId: String): SessionModelsValue? {
+    suspend fun sessionModels(sessionId: String? = null): SessionModelsValue? {
         return try {
-            val value = call(DshEndpoints.SESSION_MODELS, buildJsonObject { put("sessionId", sessionId) })
+            val value = call(DshEndpoints.SESSION_MODELS, buildJsonObject { sessionId?.let { put("sessionId", it) } })
             json.decodeFromJsonElement(SessionModelsValue.serializer(), value)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             null
         }

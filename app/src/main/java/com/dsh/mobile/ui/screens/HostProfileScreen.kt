@@ -25,7 +25,7 @@ import java.util.UUID
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () -> Unit, onConnecting: (String) -> Unit = {}) {
+fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () -> Unit) {
     val context = LocalContext.current
     val settingsStore = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
@@ -127,7 +127,6 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
                     settingsStore.upsertProfile(it.copy(autoConnect = false))
                 }
                 settingsStore.setActiveProfile(profile.id)
-                onConnecting(profile.id)
                 connection.connect(profile)
                 onBack()
                 return@launch
@@ -228,7 +227,6 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
                     saved.filter { it.autoConnect && it.id != profile.id }.forEach { settingsStore.upsertProfile(it.copy(autoConnect = false)) }
                     settingsStore.upsertProfile(profile)
                     settingsStore.setActiveProfile(profile.id)
-                    onConnecting(profile.id)
                     connection.connect(profile)
                     onBack()
                 })

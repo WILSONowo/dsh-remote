@@ -8,7 +8,6 @@ import androidx.compose.material3.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
@@ -34,6 +33,7 @@ import com.dsh.mobile.DshApplication
 import com.dsh.mobile.data.ApprovalCenter
 import com.dsh.mobile.data.DshConnection
 import com.dsh.mobile.data.SettingsStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import com.dsh.mobile.service.DshConnectionService
@@ -74,10 +74,9 @@ fun AppNavigation(
     val profiles by store.profiles.collectAsState(initial = emptyList())
     val activeId by store.activeProfileId.collectAsState(initial = null)
     val activeProfile = profiles.firstOrNull { it.id == activeId }
-    val navigation = remember { ConnectionNavigation() }
     var startupPending by rememberSaveable { mutableStateOf(true) }
-    var requestVersion by remember { mutableIntStateOf(0) }
     var computerMenu by remember { mutableStateOf(false) }
+    var verifying by remember { mutableStateOf(false) }
     var switching by remember { mutableStateOf(false) }
     var notificationAsked by rememberSaveable { mutableStateOf(false) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -95,26 +94,50 @@ fun AppNavigation(
     val entry by navController.currentBackStackEntryAsState()
     val route = entry?.destination?.route
     val ready = connState is DshConnection.State.Connected &&
-        connection.currentProfile()?.id == activeId && connection.currentProfile()?.paired == true
+        activeProfile?.paired == true && connection.currentProfile()?.id == activeId && connection.currentProfile()?.paired == true
 
     fun openRoot(destination: Screen) {
-        navigation.cancel()
         navController.navigate(destination.route) {
             popUpTo(Screen.Connect.route)
             launchSingleTop = true
         }
     }
-    fun requestSessions(id: String) { navigation.request(id); requestVersion++ }
+    fun openWithAccess(destination: String) {
+        val id = activeId ?: return
+        if (verifying) return
+        val origin = navController.currentBackStackEntry
+        verifying = true
+        opScope.launch(Dispatchers.Main.immediate) {
+            try {
+                val permitted = connection.confirmAccess(id)
+                if (navController.currentBackStackEntry !== origin || connection.currentProfile()?.id != id) return@launch
+                if (!permitted) openRoot(Screen.Connect)
+                else if (destination == Screen.Home.route) openRoot(Screen.Home)
+                else navController.navigate(destination) { launchSingleTop = true }
+            } finally {
+                verifying = false
+            }
+        }
+    }
+    fun selectRoot(screen: Screen) {
+        if (screen == Screen.Home) openWithAccess(screen.route) else openRoot(screen)
+    }
+    LaunchedEffect(connState, activeProfile?.paired, awaitingId, route) {
+        if (route in listOf(Screen.Home.route, Screen.Session.route, Screen.Pending.route) &&
+            (connection.currentProfile()?.paired == false || connState == DshConnection.State.Disconnected ||
+                (connState as? DshConnection.State.Error)?.code == com.dsh.mobile.data.ConnectionErrorCode.AUTH_FAILED)) {
+            openRoot(Screen.Connect)
+        }
+    }
     BackHandler(enabled = route == Screen.Home.route || route == Screen.Settings.route) {
         openRoot(Screen.Connect)
     }
 
     /** 用户主动断开：停后台服务 + 清各主机自动连接标记（连接页不再自动重连旧地址），清理完再回连接页 */
     fun onUserDisconnect() {
-        navigation.cancel()
         connection.disconnect()
         runCatching { context.stopService(Intent(context, DshConnectionService::class.java)) }
-        opScope.launch {
+        opScope.launch(Dispatchers.Main.immediate) {
             val store = SettingsStore(context)
             store.profiles.first().filter { it.autoConnect }.forEach {
                 store.upsertProfile(it.copy(autoConnect = false))
@@ -123,39 +146,31 @@ fun AppNavigation(
         }
     }
 
-    LaunchedEffect(connState, awaitingId, activeProfile?.paired, requestVersion, pending) {
+    LaunchedEffect(connState, activeProfile?.paired, pending) {
         val profile = connection.currentProfile()
         if (connState !is DshConnection.State.Connected || profile?.paired != true) return@LaunchedEffect
-        if (pending != null) {
-            DshApplication.pendingSession.value = null
-            navigation.cancel()
-            if (pending?.profileId == profile.id && pending?.computer == profile.computerScope()) {
-                navController.navigate(Screen.Session.createRoute(pending!!.sessionId))
-            } else openRoot(Screen.Connect)
-        } else if (navigation.consume(profile.id, true, profile.paired) &&
-            navController.currentDestination?.route == Screen.Connect.route) {
-            navController.navigate(Screen.Home.route) {
-                popUpTo(Screen.Connect.route)
-                launchSingleTop = true
-            }
-        }
+        val target = pending ?: return@LaunchedEffect
+        DshApplication.pendingSession.value = null
+        if (target.profileId == profile.id && target.computer == profile.computerScope()) {
+            openWithAccess(Screen.Session.createRoute(target.sessionId))
+        } else openRoot(Screen.Connect)
     }
 
     val configuration = LocalConfiguration.current
     val useRail = configuration.screenWidthDp >= 600 && configuration.screenWidthDp > configuration.screenHeightDp
     val rootScreen = route in listOf(Screen.Connect.route, Screen.Home.route, Screen.Settings.route)
     val showNavigation = rootScreen
-    val homeKeyboardOpen = route == Screen.Home.route && WindowInsets.ime.getBottom(LocalDensity.current) > 0
     Scaffold(
+        modifier = if (route == Screen.Home.route) Modifier.imePadding() else Modifier,
         containerColor = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onBackground,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            if (showNavigation && !useRail && !homeKeyboardOpen) RootNavigation(false, route, ready, ::openRoot)
+            if (showNavigation && !useRail) RootNavigation(false, route, ready, ::selectRoot)
         },
     ) { padding ->
         Row(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
-            if (showNavigation && useRail) RootNavigation(true, route, ready, ::openRoot)
+            if (showNavigation && useRail) RootNavigation(true, route, ready, ::selectRoot)
             Column(Modifier.weight(1f).fillMaxHeight()) {
                 if (route == Screen.Home.route) {
                     Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
@@ -179,7 +194,7 @@ fun AppNavigation(
                                                 computerMenu = false
                                                 if (profile.id != activeId || !ready) {
                                                     switching = true
-                                                    opScope.launch {
+                                                    opScope.launch(Dispatchers.Main.immediate) {
                                                         try {
                                                             val target = profile.copy(autoConnect = true)
                                                             store.upsertProfile(target)
@@ -188,10 +203,9 @@ fun AppNavigation(
                                                                 .forEach { store.upsertProfile(it.copy(autoConnect = false)) }
                                                             if (!target.paired) {
                                                                 openRoot(Screen.Connect)
-                                                                requestSessions(target.id)
                                                             }
                                                             connection.connect(target) { info ->
-                                                                opScope.launch { store.markAttempt(info.profileId, info.errorCode, info.hostVersion) }
+                                                                opScope.launch(Dispatchers.Main.immediate) { store.markAttempt(info.profileId, info.errorCode) }
                                                             }
                                                         } finally { switching = false }
                                                     }
@@ -215,8 +229,8 @@ fun AppNavigation(
                                 onEditHost = { id -> navController.navigate(Screen.HostProfile.createRoute(id)) },
                                 startupPending = startupPending,
                                 onStartupHandled = { startupPending = false },
-                                onConnecting = ::requestSessions,
-                                onOpenSessions = { openRoot(Screen.Home) },
+                                onOpenSessions = { openWithAccess(Screen.Home.route) },
+                                verifyingAccess = verifying,
                                 onDisconnect = ::onUserDisconnect,
                             )
                         }
@@ -230,7 +244,7 @@ fun AppNavigation(
                                     connection = connection,
                                     approvalCenter = approvalCenter,
                                     onPending = { navController.navigate(Screen.Pending.route) },
-                                    onSessionClick = { id -> navController.navigate(Screen.Session.createRoute(id)) },
+                                    onSessionClick = { id -> openWithAccess(Screen.Session.createRoute(id)) },
                                     onSettings = { openRoot(Screen.Settings) },
                                     onUpgrade = { navController.navigate(Screen.Pro.route) },
                                     onDisconnect = { onUserDisconnect() },
@@ -258,7 +272,7 @@ fun AppNavigation(
                                 center = approvalCenter,
                                 connection = connection,
                                 onBack = { navController.popBackStack() },
-                                onOpenSession = { sid, seq -> navController.navigate(Screen.Session.createRoute(sid, seq)) },
+                                onOpenSession = { sid, seq -> openWithAccess(Screen.Session.createRoute(sid, seq)) },
                             )
                         }
                         composable(Screen.Settings.route) {
@@ -285,7 +299,6 @@ fun AppNavigation(
                                 profileId = it.arguments?.getString("profileId")?.takeIf { v -> v != "new" },
                                 connection = connection,
                                 onBack = { navController.popBackStack() },
-                                onConnecting = ::requestSessions,
                             )
                         }
                     }

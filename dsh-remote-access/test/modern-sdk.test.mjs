@@ -1,7 +1,7 @@
 import { decodePairingTestLink } from './pairing-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -44,10 +44,10 @@ test('0.2.1-rc.5 real Gateway + generated schemas: mobile RPC, history, WS, inte
   class Sessions extends TypertRemoteService {
     constructor(c) { super(c, 'sessionController', { namespace: 'session' }); }
     list(request) { calls.push({ method: 'list', request, principal: this.ctx.invocation.peer.principal }); return { items: [{ sessionId: 's1', updatedAt: 1002, running: false, blank: false }] }; }
-    create() { return { sessionId: 's1' }; }
+    create() { calls.push({ method: 'create' }); return { sessionId: 's1' }; }
     prompt(request) { calls.push({ method: 'prompt', request }); return { accepted: true }; }
-    modelCatalog() { return { default: { provider: 'test', model: 'test' }, routableProviders: ['test'], groups: [], failures: [] }; }
-    projections() { return { kind: 'sequenced', asOfSeq: 2, values: {} }; }
+    modelCatalog() { calls.push({ method: 'modelCatalog' }); return { default: { provider: 'test', model: 'test' }, routableProviders: ['test'], groups: [], failures: [] }; }
+    projections(request) { calls.push({ method: 'projections', request }); return { kind: 'sequenced', asOfSeq: 2, values: { modelSelection: { next: { provider: 'offline', model: 'custom' } } } }; }
     page(request) { calls.push({ method: 'page', request }); return { records: durable.filter(e => e.seq < request.beforeSeq).map(event => ({ type: 'event', event })), hasMore: false }; }
     async *follow(request, signal) {
       yield { type: 'snapshot', cursor: 2, records: [{ type: 'event', event: durable[2] }], hasMore: true, projections: { asOfSeq: 2, values: { title: 'SDK fixture' } } };
@@ -121,7 +121,11 @@ test('0.2.1-rc.5 real Gateway + generated schemas: mobile RPC, history, WS, inte
   assert.equal((await rpc('session.list')).items[0].sessionId, 's1');
   assert.equal(calls[0].principal.kind, 'owner');
   assert.deepEqual(await rpc('workspace.list'), { items: [], archivedSessionIds: [] });
-  assert.equal((await rpc('session.models', { sessionId: 's1' })).current.provider, 'test');
+  const beforeCatalog = calls.length;
+  assert.deepEqual(await rpc('session.models', {}), { current: { provider: 'test', model: 'test' }, routable: true, groups: [], failures: [] });
+  assert.deepEqual(calls.slice(beforeCatalog), [{ method: 'modelCatalog' }]);
+  assert.deepEqual(await rpc('session.models', { sessionId: 's1' }), { current: { provider: 'offline', model: 'custom' }, routable: false, groups: [], failures: [] });
+  assert.deepEqual(calls.at(-1), { method: 'projections', request: { sessionId: 's1' } });
   const history = await rpc('session.history', { sessionId: 's1', beforeSeq: 2 });
   assert.deepEqual(history.events.map(x => x.event.seq), [0, 1]);
   assert.equal(calls.find(x => x.method === 'page').request.throughSeq, 2);
@@ -197,6 +201,12 @@ test('0.2.1-rc.5 actual WebServer/Connection: plugin mounting, native auth, rela
   ctx.webServer.register(native);
   const staticRoute = { kind: 'exact', path: '/assets/test.js', handler: (_, res) => res.end('static') };
   ctx.webServer.register(staticRoute);
+  // Match the desktop launcher's argv layout while mounting the plugin into the isolated SDK.
+  const runtimeDir = join(runtime, '..', '..');
+  const expectedVersion = JSON.parse(readFileSync(join(runtimeDir, 'desktop-runtime.json'), 'utf8')).release.version;
+  const savedArgv = process.argv;
+  process.argv = [...savedArgv.slice(0, 2), runtimeDir];
+  t.after(() => { process.argv = savedArgv; });
   const mounted = ctx.plugin(plugin); await mounted.await();
   assert.ok(ctx.connection, 'native Connection service must be ready');
   assert.ok(ctx.typertGateway, 'native Gateway service must be ready');
@@ -215,7 +225,9 @@ test('0.2.1-rc.5 actual WebServer/Connection: plugin mounting, native auth, rela
   assert.equal(await (await get('/api/commands/list', 'fixture=browser')).text(), 'native browser');
   assert.equal((await get('/api/remote-access/pair/code/current', 'fixture=browser')).status, 401);
   const describe = await fetch(base + '/api/host.describe', { method: 'POST', headers: { 'Content-Type': 'application/json', Host: 'phone.test' }, body: JSON.stringify({ type: 'client-request', rpcId: 'describe', method: 'host.describe' }) });
-  assert.equal((await describe.json()).result.value.hostProtocol, 'typert');
+  const description = (await describe.json()).result.value;
+  assert.equal(description.hostProtocol, 'typert');
+  assert.equal(description.version, expectedVersion);
   const { createRelayServer } = await import(pathToFileURL(join(backend, 'src/server.mjs')).href);
   const relay = createRelayServer({ registration: { enabled: true, database: ':memory:' }, allowInsecureLoopback: true });
   await listenLoopback(relay.server);
@@ -229,6 +241,8 @@ test('0.2.1-rc.5 actual WebServer/Connection: plugin mounting, native auth, rela
   for (let i = 0; i < 100 && !relay.online.size; i++) await new Promise(r => setTimeout(r, 10));
   assert.equal(relay.online.size, 1);
   const hostId = [...relay.online.keys()][0];
+  const forwarded = await post(relayUrl + '/h/' + hostId + '/api/host.describe', { type: 'client-request', rpcId: 'version', method: 'host.describe' });
+  assert.equal(forwarded.body.result.value.version, expectedVersion);
   const qr = (await post(base + '/api/remote-access/relay/pairing', {})).body;
   const ticket = decodePairingTestLink(qr.link).ticket;
   const proof = { 'X-DSH-Pairing-Secret': randomBytes(32).toString('hex') };

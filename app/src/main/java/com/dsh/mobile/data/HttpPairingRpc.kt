@@ -14,14 +14,14 @@ import org.json.JSONObject
  * client 由调用方在握手前用活跃 profile 构建并传入（见 PairingCoordinator）。
  */
 class HttpPairingRpc(
-    private val connection: DshConnection,
+    connection: DshConnection,
     private val client: OkHttpClient,
     private val scanTicket: String? = null,
+    private val endpoint: String = connection.baseUrl(),
 ) : PairingRpc {
     private val pairingSecret = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
         .joinToString("") { "%02x".format(it.toInt() and 0xff) }
     private var pairingDeviceId = ""
-    private val endpoint = connection.baseUrl()
 
 
     private suspend fun post(path: String, body: JSONObject): String = withContext(Dispatchers.IO) {
@@ -111,9 +111,10 @@ class HttpPairingRpc(
             .build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+            if (!resp.isSuccessful) throw ApiException("HTTP ${resp.code}", resp.code.toString())
             val obj = JSONObject(text)
-            CheckResult(obj.optBoolean("paired", false))
+            require(obj.opt("ok") == true && obj.opt("paired") is Boolean) { "配对检查响应无效" }
+            CheckResult(obj.getBoolean("paired"))
         }
     }
 

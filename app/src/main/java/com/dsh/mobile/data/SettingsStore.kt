@@ -99,6 +99,36 @@ class SettingsStore(
         }
     }
 
+    /** A late check from an old connection must never clear a newly paired credential. */
+    suspend fun clearRevokedAccess(expected: HostProfile): HostProfile? =
+        updateMatchingCredential(expected, allowAlreadyRevoked = true) { it.copy(paired = false, channelToken = "") }
+
+    suspend fun refreshDeviceDetails(expected: HostProfile, info: HttpPairingRpc.DeviceInfo): HostProfile? =
+        updateMatchingCredential(expected) { profile -> profile.copy(
+            computerId = info.computerId.ifBlank { profile.computerId }, deviceMac = "",
+            deviceModel = info.name.ifBlank { info.model.ifBlank { profile.deviceModel } },
+        ) }
+
+    private suspend fun updateMatchingCredential(
+        expected: HostProfile, allowAlreadyRevoked: Boolean = false, change: (HostProfile) -> HostProfile,
+    ): HostProfile? {
+        var result: HostProfile? = null
+        context.dataStore.edit { prefs ->
+            val rows = ProfileCodec.decode(prefs[PROFILE_LIST_KEY] ?: "")
+            val stored = rows.firstOrNull { it.id == expected.id } ?: return@edit
+            val current = decryptProfileFromStorage(stored, secretBox)
+            if (!sameComputerRecord(current, expected)) return@edit
+            if (current.paired && current.channelToken != expected.channelToken) return@edit
+            if (!current.paired && !allowAlreadyRevoked) return@edit
+            val updated = change(current)
+            result = updated
+            if (updated != current) {
+                prefs[PROFILE_LIST_KEY] = ProfileCodec.encode(upsertProfileInStore(rows, updated, secretBox))
+            }
+        }
+        return result
+    }
+
     suspend fun deleteProfile(id: String) {
         context.dataStore.edit { prefs ->
             applyLegacyMigration(prefs)
@@ -115,7 +145,17 @@ class SettingsStore(
         }
     }
 
-    suspend fun markAttempt(profileId: String, errorCode: ConnectionErrorCode?, hostVersion: String?) {
+    suspend fun rememberHostVersion(profile: HostProfile, version: String) {
+        if (VersionPolicy.evaluate(version) != VersionVerdict.OK) return
+        context.dataStore.edit { prefs ->
+            val rows = ProfileCodec.decode(prefs[PROFILE_LIST_KEY] ?: "")
+            val row = rows.firstOrNull { it.id == profile.id } ?: return@edit
+            if (!sameComputerRecord(row, profile) || row.lastHostVersion == version) return@edit
+            prefs[PROFILE_LIST_KEY] = ProfileCodec.encode(rows.map { if (it.id == row.id) it.copy(lastHostVersion = version) else it })
+        }
+    }
+
+    suspend fun markAttempt(profileId: String, errorCode: ConnectionErrorCode?) {
         context.dataStore.edit { prefs ->
             applyLegacyMigration(prefs)
             val current = ProfileCodec.decode(prefs[PROFILE_LIST_KEY] ?: "")
@@ -301,6 +341,18 @@ class SettingsStore(
         }
     }
 
+    fun manualModel(scope: String, sessionId: String): Flow<Boolean> = context.dataStore.data.map {
+        sessionId in it[stringSetPreferencesKey("manual_model_$scope")].orEmpty()
+    }
+
+    suspend fun setManualModel(scope: String, sessionId: String, manual: Boolean) {
+        context.dataStore.edit {
+            val key = stringSetPreferencesKey("manual_model_$scope")
+            val ids = it[key].orEmpty()
+            it[key] = if (manual) ids + sessionId else ids - sessionId
+        }
+    }
+
     /** 自适应模型：按任务难度自动选择 Flash / Pro（默认关） */
     val autoModel: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[AUTO_MODEL_KEY] ?: false
@@ -396,8 +448,16 @@ internal fun upsertProfileInStore(
     current: List<HostProfile>,
     incoming: HostProfile,
     box: SecretBox,
-): List<HostProfile> =
-    current.filterNot { it.id == incoming.id } + encryptProfileForStorage(incoming, box)
+): List<HostProfile> {
+    val previous = current.firstOrNull { it.id == incoming.id }
+    val version = previous?.takeIf { sameComputerRecord(it, incoming) }?.lastHostVersion
+    return current.filterNot { it.id == incoming.id } + encryptProfileForStorage(incoming.copy(lastHostVersion = version), box)
+}
+
+private fun sameComputerRecord(a: HostProfile, b: HostProfile): Boolean =
+    a.id == b.id && (a.computerId.isBlank() || b.computerId.isBlank() || a.computerId == b.computerId) &&
+        runCatching { a.connectionUrl() == b.connectionUrl() }.getOrDefault(false)
+
 
 /** 读出后解密代理密码与通道 token；解密失败时按形态判定：合法 Base64 且长度>=28 视为「密文但密钥丢失」保留密文，否则按旧明文迁移。 */
 internal fun decryptProfileFromStorage(p: HostProfile, box: SecretBox): HostProfile {
