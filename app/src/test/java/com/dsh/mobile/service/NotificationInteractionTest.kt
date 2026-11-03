@@ -178,7 +178,9 @@ class NotificationInteractionTest {
             click(switched)
             val previousMux = mux.get()
             runBlocking { settings.setActiveProfile(profile.id) }
-            waitFor { mux.get() !== previousMux }
+            waitFor { org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                manager.activeNotifications.any { it.notification.extras.getCharSequence(Notification.EXTRA_TEXT).toString().startsWith("已连接") } }
+            assertSame(previousMux, mux.get())
             approval("disconnect", "fetch")
             val disconnected = alertWith("fetch").actions.first()
             mux.get().close()
@@ -189,6 +191,7 @@ class NotificationInteractionTest {
             shadowOf(Looper.getMainLooper()).idle()
             assertEquals(listOf("first", "danger", "new", "batch", "expired"), replies.map { it.getString("rpcId") })
         } finally {
+            (service.application as com.dsh.mobile.ConnectionOwner).connection.disconnect()
             closeStreams.countDown()
             server.close()
             workers.shutdownNow()

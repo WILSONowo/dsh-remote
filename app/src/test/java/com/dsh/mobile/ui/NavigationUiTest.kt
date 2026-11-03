@@ -34,7 +34,8 @@ import java.util.concurrent.Executors
 // Robolectric can reuse the Kotlin process singleton for Preferences DataStore across
 // activities while deleting each test application's data directory. Give this suite
 // one temporary files directory for the same lifetime as that singleton.
-class NavigationFixtureApplication : Application() {
+class NavigationFixtureApplication : Application(), com.dsh.mobile.ConnectionOwner {
+    override val connection by lazy { DshConnection(this) }
     override fun getFilesDir(): File = directory
     companion object {
         val directory: File by lazy { Files.createTempDirectory("dsh-navigation-fixture-").toFile() }
@@ -501,15 +502,15 @@ class NavigationUiTest {
             compose.onNodeWithText("归档").performClick()
             compose.waitUntil(5_000) { archived.get() && compose.onAllNodesWithText("会话 abcdef01").fetchSemanticsNodes().isEmpty() }
             compose.onNodeWithTag("nav_connections").performClick()
-            workspaceReply.set(CountDownLatch(1))
-            val listCount = calls.count { it.optString("method") == "session.list" }
-            compose.onNodeWithTag("nav_sessions").performClick()
-            compose.waitUntil(5_000) { calls.count { it.optString("method") == "session.list" } > listCount }
-            compose.onNodeWithTag("session_page_loading").assertIsDisplayed()
-            compose.onNodeWithText("会话 abcdef01").assertDoesNotExist()
-            workspaceReply.get().countDown()
-            compose.waitUntil(5_000) { compose.onAllNodesWithText("Recent 01").fetchSemanticsNodes().isNotEmpty() }
-            compose.onNodeWithText("会话 abcdef01").assertDoesNotExist()
+            val before = calls.groupingBy { it.optString("method") }.eachCount()
+            repeat(10) {
+                compose.onNodeWithTag("nav_sessions").performClick()
+                compose.onNodeWithText("Recent 01").assertExists()
+                compose.onNodeWithTag("session_page_loading").assertDoesNotExist()
+                compose.onNodeWithText("会话 abcdef01").assertDoesNotExist()
+                compose.onNodeWithTag("nav_connections").performClick()
+            }
+            Assert.assertEquals(before, calls.groupingBy { it.optString("method") }.eachCount())
             Assert.assertEquals(checksBeforeReturn, accessChecks.get())
         } finally {
             if (firstTask != null) {

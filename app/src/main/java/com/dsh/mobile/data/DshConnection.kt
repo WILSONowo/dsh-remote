@@ -96,6 +96,9 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
 
     private var baseUrl = ""
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile internal var directory = SessionDirectory(this)
+        private set
+    private var muxOpened = false
     private val retryScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /** approvalId → server-request rpcId（应答时回显） */
@@ -131,7 +134,8 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
             _state.value = State.Error(e.message ?: "连接设置无效", ConnectionErrorCode.PROTOCOL_ERROR, profile.id)
             return
         }
-        if (_state.value is State.Connected && connectedProfile == profile && baseUrl == normalized) return
+        if ((_state.value is State.Connected || _state.value is State.Connecting) &&
+            connectedProfile?.sameConnection(profile) == true) return
         disconnectInternal()
         profileId = profile.id
         connectedProfile = profile
@@ -284,6 +288,9 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
     fun disconnect() = disconnectInternal()
 
     private fun disconnectInternal() {
+        directory.close()
+        directory = SessionDirectory(this)
+        muxOpened = false
         modelCatalog = ModelCatalog()
         generation++
         unregisterNetworkCallback()
@@ -383,7 +390,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
         val request = Request.Builder().url(wsUrl).build()
         val ws = streamClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (isCurrent(probe) && path == "/api/events.mux") _events.tryEmit(Event.Reconnected(baseUrl))
+                streamOpened(path, probe)
                 // 保持挂起：等 socket 关闭或失败才返回，交给外层重连
             }
 
@@ -427,7 +434,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
                         if (!resp.isSuccessful) throw ApiException("HTTP ${resp.code}",
                             if (resp.code in setOf(401, 403)) "auth_failed" else null)
                         val source = resp.body?.source() ?: throw ApiException("空响应体")
-                        if (isCurrent(probe) && path == "/api/events.mux") _events.tryEmit(Event.Reconnected(endpoint))
+                        streamOpened(path, probe)
                         val dataLines = mutableListOf<String>()
                         while (cont.isActive && isCurrent(probe)) {
                             val line = source.readUtf8Line() ?: break
@@ -445,6 +452,18 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
                 }
             }
         })
+    }
+
+    @Synchronized private fun streamOpened(path: String, probe: AccessProbe) {
+        if (!isCurrent(probe) || path != "/api/events.mux") return
+        // Also close the initial gap if a page fetched its snapshot before subscribing.
+        directory.sessions.invalidate()
+        if (muxOpened) {
+            directory.workspace.invalidate()
+            directory.presets.invalidate()
+        }
+        muxOpened = true
+        _events.tryEmit(Event.Reconnected(baseUrl))
     }
 
     @Synchronized private fun invalidateStream(path: String, probe: AccessProbe) {
@@ -510,19 +529,41 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
             DshEventTypes.FRAME_PROJECTION -> {
                 val sid = f.sessionId ?: return
                 val key = f.key ?: return
+                if (key == "title") directory.sessions.edit { rows ->
+                    rows.map { row ->
+                        if (row.sessionId != sid) row else {
+                            val projections = row.projections as? JsonObject ?: JsonObject(emptyMap())
+                            val values = projections["values"] as? JsonObject ?: JsonObject(emptyMap())
+                            val updated = JsonObject(values + ("title" to (f.value ?: JsonNull)))
+                            row.copy(projections = JsonObject(projections + ("values" to updated)))
+                        }
+                    }
+                }
                 _events.tryEmit(Event.Projection(sid, key, f.value ?: JsonNull))
             }
             DshEventTypes.FRAME_STREAM_ERROR -> {
                 _events.tryEmit(Event.StreamError(f.error?.message ?: "stream error"))
             }
+            DshEventTypes.HOST_WORKSPACE_CHANGED -> directory.workspace.invalidate()
             DshEventTypes.HOST_SESSION_ADDED -> {
+                directory.sessions.invalidate()
                 f.sessionId?.let { _events.tryEmit(Event.SessionAdded(it)) }
             }
             DshEventTypes.HOST_SESSION_REMOVED -> {
-                f.sessionId?.let { _events.tryEmit(Event.SessionRemoved(it)) }
+                f.sessionId?.let { id ->
+                    directory.sessions.edit { rows -> rows.filterNot { it.sessionId == id } }
+                    _events.tryEmit(Event.SessionRemoved(id))
+                }
             }
             DshEventTypes.HOST_SESSION_STATUS -> {
-                f.sessionId?.let { _events.tryEmit(Event.SessionStatus(it, f.status ?: "unknown")) }
+                f.sessionId?.let { id ->
+                    directory.sessions.edit { rows -> rows.map {
+                        if (it.sessionId == id) it.copy(running = f.status == "running") else it
+                    } }
+                    // Status has no timestamp. On completion reconcile ordering and titles.
+                    if (f.status == "idle") directory.sessions.invalidate()
+                    _events.tryEmit(Event.SessionStatus(id, f.status ?: "unknown"))
+                }
             }
             else -> { /* 未知帧忽略 */ }
         }
@@ -628,18 +669,16 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
 
     suspend fun listSessions(): List<SessionSummary> {
         val value = call(DshEndpoints.SESSION_LIST)
-        return try {
-            json.decodeFromJsonElement(SessionListValue.serializer(), value).items
-        } catch (e: Exception) {
-            emptyList()
-        }
+        return json.decodeFromJsonElement<List<SessionSummary>>(value.jsonObject.getValue("items"))
     }
 
     suspend fun createSession(agentPreset: String? = null, workspaceId: String? = null): String {
+        val current = directory
         val value = call(DshEndpoints.SESSION_CREATE, buildJsonObject {
             agentPreset?.let { put("agentPreset", it) }
             workspaceId?.let { put("workspaceId", it) }
         })
+        current.sessions.invalidate()
         return json.decodeFromJsonElement(SessionCreateValue.serializer(), value).sessionId
     }
 
@@ -1033,14 +1072,18 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
 
     /** 归档会话（从会话列表移除，进入已归档区） */
     suspend fun archiveSession(sessionId: String) {
+        val current = directory
         call(DshEndpoints.WORKSPACE_ARCHIVE_SESSION, buildJsonObject { put("sessionId", sessionId) })
+        current.archive(sessionId, true)
     }
 
     /** 恢复会话时只取消归档，保留原工作区 */
     suspend fun restoreSession(sessionId: String) {
+        val current = directory
         call(DshEndpoints.WORKSPACE_UNARCHIVE_SESSION, buildJsonObject {
             put("sessionId", sessionId)
         })
+        current.archive(sessionId, false)
     }
 
     data class SkillEntry(val name: String, val description: String)

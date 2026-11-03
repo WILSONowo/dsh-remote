@@ -13,10 +13,14 @@ import com.dsh.mobile.data.SettingsStore
 import com.dsh.mobile.data.UpdateChecker
 import kotlinx.coroutines.*
 
-class DshApplication : Application() {
+interface ConnectionOwner {
+    val connection: DshConnection
+}
+
+class DshApplication : Application(), ConnectionOwner {
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    val connection = DshConnection(this)
+    override val connection = DshConnection(this)
     val approvalCenter by lazy { ApprovalCenter(connection, appScope) }
     val pairingCoordinator by lazy { PairingCoordinator(connection, SettingsStore(this), appScope) }
 

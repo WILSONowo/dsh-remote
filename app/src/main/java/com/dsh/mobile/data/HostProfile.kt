@@ -99,3 +99,9 @@ object ProfileCodec {
 
 private fun <T> ListSerializer(element: kotlinx.serialization.KSerializer<T>) =
     kotlinx.serialization.builtins.ListSerializer(element)
+
+/** Only transport, trust and pairing changes require a new connection. */
+internal fun HostProfile.sameConnection(other: HostProfile) =
+    copy(remark = other.remark, autoConnect = other.autoConnect, lastUsedAt = other.lastUsedAt,
+        lastErrorCode = other.lastErrorCode, deviceModel = other.deviceModel,
+        lastHostVersion = other.lastHostVersion) == other

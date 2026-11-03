@@ -9,26 +9,19 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import com.dsh.mobile.data.AgentPreset
 import com.dsh.mobile.data.DshConnection
-import kotlinx.coroutines.CancellationException
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 
 @Composable
 internal fun presetRoster(connection: DshConnection, enabled: Boolean, reload: Int): Result<List<AgentPreset>>? {
-    val roster by produceState<Result<List<AgentPreset>>?>(null, connection.generation, enabled, reload) {
-        value = null
-        if (enabled) {
-            value = try {
-                Result.success(connection.agentPresets())
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Result.failure(e)
-            }
-        }
+    val presets = connection.directory.presets
+    val snapshot by presets.state.collectAsState()
+    LaunchedEffect(presets, enabled, reload) {
+        if (enabled) presets.load(force = reload > 0)
     }
-    return roster
+    if (!enabled) return null
+    return snapshot.error?.let { Result.failure(it) } ?: snapshot.value?.let { Result.success(it) }
 }
 
 @Composable

@@ -31,12 +31,11 @@ fun PendingScreen(
     val items by center.items.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     var busy by remember { mutableStateOf(false) }
-    var titles by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
-
-    // 会话标题映射（一次拉取；失败回退 sessionId 前 8 位）
-    LaunchedEffect(Unit) {
-        titles = runCatching { connection.listSessions() }.getOrDefault(emptyList())
-            .associate { it.sessionId to (sessionTitleOf(it) ?: shortSessionId(it.sessionId)) }
+    val sessions = connection.directory.sessions
+    val snapshot by sessions.state.collectAsState()
+    LaunchedEffect(sessions) { sessions.load() }
+    val titles = remember(snapshot.value) {
+        snapshot.value.orEmpty().associate { it.sessionId to (sessionTitleOf(it) ?: shortSessionId(it.sessionId)) }
     }
 
     suspend fun runBatch(label: String, block: suspend () -> List<String>) {

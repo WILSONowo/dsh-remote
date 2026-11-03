@@ -60,7 +60,6 @@ import com.dsh.mobile.ui.theme.DshThemeId
 import com.dsh.mobile.ui.theme.DshThemeStyle
 import com.dsh.mobile.ui.theme.ThemeStyle
 import com.dsh.mobile.ui.theme.brandGradient
-import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -72,10 +71,8 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.layout
 import kotlin.math.roundToInt
 import androidx.compose.ui.layout.ContentScale
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -101,13 +98,16 @@ fun HomeScreen(
     val profile = connection.currentProfile()
     val computerScope = remember(profile) { profile.computerScope() }
     val scope = rememberCoroutineScope()
-    var rawSessions by remember { mutableStateOf<List<SessionSummary>>(emptyList()) }
+    val directory = connection.directory
+    val list by directory.sessions.state.collectAsState()
+    val workspace by directory.workspace.state.collectAsState()
+    val rawSessions = list.value.orEmpty()
     var input by draft
     val voiceInput = rememberVoiceInput { text -> input = if (input.isBlank()) text else input.trimEnd() + " " + text }
     var sending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
-    var archivedIds by remember { mutableStateOf<Set<String>?>(null) }
-    var workspaces by remember { mutableStateOf<List<WorkspaceView>>(emptyList()) }
+    val archivedIds = remember(workspace.value) { workspace.value?.archivedSessionIds?.toSet() }
+    val workspaces = workspace.value?.items.orEmpty()
     var archiveTarget by remember { mutableStateOf<SessionSummary?>(null) }
     // 长按会话弹出的操作菜单目标（sessionId；null = 无菜单打开）
     var menuTarget by remember { mutableStateOf<String?>(null) }
@@ -118,7 +118,6 @@ fun HomeScreen(
     var stdSearchQuery by remember { mutableStateOf("") }
     val context = LocalContext.current
     val settingsStore = remember { SettingsStore(context) }
-    val cache = remember(computerScope) { HistoryCache(context, computerScope) }
     // 置顶会话 id（本地 pin；列表排序置顶在前，长按菜单可切换）
     val pinnedIds by remember(computerScope) { settingsStore.pinnedSessionIds(computerScope) }.collectAsState(initial = emptySet())
 
@@ -232,88 +231,11 @@ fun HomeScreen(
 
     val pendingCount by approvalCenter.pendingCount.collectAsState()
 
-    /** 后台预取最近 3 个会话首屏进内存缓存：点开即消费（SessionChatState.load 取走），跳过网络等待 */
-    val recentHeads = remember(sessions) {
-        sessions.sortedByDescending { it.updatedAt }.take(3).filterNot { it.running }.map { it.sessionId to it.updatedAt }
-    }
-    LaunchedEffect(accessReady, recentHeads) {
-        if (!accessReady || recentHeads.isEmpty()) return@LaunchedEffect
-        kotlinx.coroutines.delay(350)
-        withContext(Dispatchers.Default) {
-            for ((id, _) in recentHeads) {
-                if (!cache.hasHistory(id)) {
-                    try {
-                        cache.putPrefetch(id, connection.history(id, maxMessages = 3))
-                    } catch (e: kotlinx.coroutines.CancellationException) {
-                        throw e
-                    } catch (_: Exception) { /* Opening the session can retry. */ }
-                }
-            }
-        }
-    }
-
-    var listLoading by remember { mutableStateOf(false) }
-    var loadedList by remember { mutableStateOf(false) }
-    var refreshAgain by remember { mutableStateOf(false) }
-    fun refreshSessions() {
-        if (!accessReady) return
-        if (listLoading) {
-            refreshAgain = true
-            return
-        }
-        listLoading = true
-        // 冷热分离：先渲染本地缓存（秒开；gzip 解压+解码移出主线程），再刷网络
-        scope.launch {
-            try {
-                if (!loadedList) withContext(Dispatchers.Default) { cache.loadSessionList() }?.let {
-                    rawSessions = it
-                }
-                do {
-                    refreshAgain = false
-                    val net = connection.listSessions()
-                    rawSessions = net
-                    withContext(Dispatchers.Default) { cache.saveSessionList(net) }
-                    listError = null
-                } while (refreshAgain)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                if (rawSessions.isEmpty()) listError = "会话列表加载失败：" + e.message
-            } finally {
-                loadedList = true
-                listLoading = false
-            }
-        }
-    }
-
-    var loadingArchived by remember { mutableStateOf(false) }
-    var refreshArchivedAgain by remember { mutableStateOf(false) }
-    var archiveError by remember { mutableStateOf<String?>(null) }
-    val waitingForList = sessions.isEmpty() && (!loadedList || (archivedIds == null && archiveError == null))
-    fun refreshArchived() {
-        if (!accessReady) return
-        if (loadingArchived) {
-            refreshArchivedAgain = true
-            return
-        }
-        loadingArchived = true
-        scope.launch {
-            try {
-                do {
-                    refreshArchivedAgain = false
-                    val w = connection.workspaceList()
-                    if (refreshArchivedAgain) continue
-                    archiveError = null
-                    workspaces = w.items
-                    archivedIds = w.archivedSessionIds.toSet()
-                } while (refreshArchivedAgain)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                archiveError = "工作区加载失败：${e.message}"
-            } finally { loadingArchived = false }
-        }
-    }
+    val listLoading = list.loading || workspace.loading
+    val waitingForList = (list.value == null || workspace.value == null) && list.error == null && workspace.error == null
+    val archiveError = workspace.error?.let { "工作区加载失败：${it.message}" }
+    fun refreshSessions() { if (accessReady) directory.sessions.load(force = true) }
+    fun refreshArchived() { if (accessReady) directory.workspace.load(force = true) }
 
     LaunchedEffect(accessReady) {
         if (!accessReady) return@LaunchedEffect
@@ -326,31 +248,11 @@ fun HomeScreen(
 
     var recentLimit by remember(stdSearchQuery) { mutableIntStateOf(5) }
 
-    // 事件驱动的列表刷新（断线重连成功后立即补拉，避免列表停留在空态）
-    LaunchedEffect(accessReady) {
-        if (!accessReady) return@LaunchedEffect
-        connection.events.collect { ev ->
-            when (ev) {
-                is DshConnection.Event.SessionStatus -> refreshSessions()
-                is DshConnection.Event.SessionAdded,
-                is DshConnection.Event.SessionRemoved,
-                is DshConnection.Event.Reconnected,
-                -> {
-                    refreshSessions()
-                    refreshArchived()
-                }
-                else -> {}
-            }
+    LaunchedEffect(directory, accessReady) {
+        if (accessReady) {
+            directory.sessions.load()
+            directory.workspace.load()
         }
-    }
-
-    // 从设置页/会话页返回、App 回前台时强制刷新会话列表，
-    // 修复「从设置界面出来之后会话加载不出来」：返回时组合重建但拉取被静默失败吞掉后
-    // 列表停在空态，必须在这里兜底重拉。
-    LifecycleResumeEffect(accessReady) {
-        refreshSessions()
-        refreshArchived()
-        onPauseOrDispose {}
     }
 
     fun send() {
@@ -480,10 +382,8 @@ fun HomeScreen(
                         scope.launch {
                             try {
                                 connection.archiveSession(target.sessionId)
-                                archivedIds = archivedIds?.plus(target.sessionId)
                                 archiveTarget = null
-                                refreshSessions()
-                                refreshArchived()
+                                listError = null
                             } catch (e: Exception) {
                                 listError = e.message
                                 archiveTarget = null
@@ -710,7 +610,7 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 8.dp)
                             .testTag("home_session_search"))
                 }
-                (archiveError ?: listError)?.let {
+                (archiveError ?: listError ?: list.error?.let { "会话列表加载失败：${it.message}" })?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(horizontal = 16.dp))
                 }

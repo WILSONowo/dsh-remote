@@ -1157,28 +1157,22 @@ private fun VaultUnlockDialog(
 @Composable
 private fun ArchivedSessionsSettings(connection: DshConnection, target: DshConnection.State.Connected) {
     val scope = rememberCoroutineScope()
-    var ids by remember { mutableStateOf<List<String>?>(null) }
-    var titles by remember { mutableStateOf<Map<String, String?>>(emptyMap()) }
-    var error by remember { mutableStateOf<String?>(null) }
+    val directory = connection.directory
+    val workspace by directory.workspace.state.collectAsState()
+    val sessions by directory.sessions.state.collectAsState()
+    val ids = workspace.value?.archivedSessionIds
+    val titles = remember(sessions.value) { sessions.value.orEmpty().associate { it.sessionId to sessionTitleOf(it) } }
+    var mutationError by remember { mutableStateOf<String?>(null) }
     var restoring by remember { mutableStateOf<String?>(null) }
-    var load by remember { mutableIntStateOf(0) }
-    LaunchedEffect(load) {
-        error = null
-        try {
-            val archived = connection.workspaceList().archivedSessionIds.distinct()
-            ids = archived
-            if (archived.isNotEmpty()) {
-                titles = connection.listSessions().associate { it.sessionId to sessionTitleOf(it) }
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            error = e.message ?: "加载失败"
-        }
-    }
+    LaunchedEffect(directory) { directory.workspace.load(); directory.sessions.load() }
+    val error = mutationError ?: workspace.error?.message ?: sessions.error?.message
     error?.let { message ->
         Text(message, color = MaterialTheme.colorScheme.error)
-        TextButton(onClick = { load++ }) { Text("重试") }
+        TextButton(onClick = {
+            mutationError = null
+            directory.workspace.load(force = true)
+            directory.sessions.load(force = true)
+        }) { Text("重试") }
     }
     when {
         ids == null && error == null -> CircularProgressIndicator()
@@ -1195,12 +1189,11 @@ private fun ArchivedSessionsSettings(connection: DshConnection, target: DshConne
                             try {
                                 if (connection.state.value != target) return@launch
                                 connection.restoreSession(id)
-                                ids = ids.orEmpty() - id
-                                error = null
+                                mutationError = null
                             } catch (e: kotlinx.coroutines.CancellationException) {
                                 throw e
                             } catch (e: Exception) {
-                                error = e.message ?: "恢复失败"
+                                mutationError = e.message ?: "恢复失败"
                             } finally { restoring = null }
                         }
                     }) { Text(if (restoring == id) "恢复中…" else "恢复") }

@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -38,10 +39,17 @@ class ApprovalCenter(
         answerApprovalFn = connection::answerApproval,
         answerQuestionsFn = connection::answerQuestions,
         state = connection.state,
-        listSessionsFn = connection::listSessions,
+        listSessionsFn = {
+            val sessions = connection.directory.sessions
+            if (connection.currentProfile()?.paired != true) emptyList() else {
+                sessions.load()
+                val snapshot = sessions.state.first { it.value != null || it.error != null }
+                snapshot.value.orEmpty()
+            }
+        },
         historyFn = { connection.history(it) },
         scope = scope,
-        targetKey = { connection.currentProfile()?.computerScope() },
+        targetKey = { connection.currentProfile()?.takeIf { it.paired }?.computerScope() },
     )
 
     private val mutex = Mutex()

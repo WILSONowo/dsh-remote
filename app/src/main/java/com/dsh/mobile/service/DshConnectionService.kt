@@ -13,9 +13,9 @@ import android.os.IBinder
 import com.dsh.mobile.DshApplication
 import com.dsh.mobile.MainActivity
 import com.dsh.mobile.data.DshConnection
-import com.dsh.mobile.data.HostProfile
 import com.dsh.mobile.data.connectionUrl
-import com.dsh.mobile.data.PairingCoordinator
+import com.dsh.mobile.ConnectionOwner
+import kotlinx.coroutines.CoroutineStart
 import com.dsh.mobile.data.SettingsStore
 import com.dsh.mobile.data.TokenUsageWatcher
 import com.dsh.mobile.data.shouldNotifyApproval
@@ -31,7 +31,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
- * 前台服务：持有一条只读连接监听事件。
+ * 前台服务：监听应用当前连接的事件。
  * - 审批/问答请求 → 高优先级横幅通知（去重，点击直达对应会话）
  * - 任务完成（会话从运行态转空闲，8 秒防抖确认）→ 普通通知
  * App 在前台时不重复通知（会话页已有横幅）。
@@ -43,7 +43,6 @@ class DshConnectionService : Service() {
     private var watchJob: Job? = null
     private var eventsJob: Job? = null
     private var stateJob: Job? = null
-    private var pairingJob: Job? = null
     private var notificationSeq = 0
 
     /** 会话活跃状态（运行中→空闲迁移触发完成通知） */
@@ -140,57 +139,52 @@ class DshConnectionService : Service() {
                 stopSelf()
                 return@launch
             }
-            // 跟随活跃主机：切换即重启 watcher（单活跃语义）
+            val connection = (application as ConnectionOwner).connection
             combine(settings.activeProfileId, settings.profiles) { activeId, profiles ->
-                profiles.firstOrNull { it.id == activeId }
-            }.distinctUntilChanged { old, new ->
-                fun comparable(p: com.dsh.mobile.data.HostProfile?) = p?.copy(lastUsedAt = 0,
-                    lastErrorCode = null, remark = "", deviceModel = "", autoConnect = false, lastHostVersion = null)
-                comparable(old) == comparable(new)
-            }.collect { profile ->
-                    eventsJob?.cancel()
-                    stateJob?.cancel()
-                    pairingJob?.cancel()
-                    watcher?.disconnect()
-                    watcher = null
-                    clearInteractions()
-                    sessionActive.clear()
-                    completionJobs.values.forEach { it.cancel() }
-                    completionJobs.clear()
+                profiles.firstOrNull { it.id == activeId && it.paired }
+            }.distinctUntilChanged { old, new -> old?.id == new?.id }.collect { profile ->
+                eventsJob?.cancel()
+                stateJob?.cancel()
+                watcher = null
+                clearInteractions()
+                sessionActive.clear()
+                completionJobs.values.forEach { it.cancel() }
+                completionJobs.clear()
 
-                    if (profile == null || !profile.paired || runCatching { profile.connectionUrl() }.isFailure) {
-                        updateForegroundText("未选择活跃主机")
-                        return@collect
+                if (profile == null || runCatching { profile.connectionUrl() }.isFailure) {
+                    updateForegroundText("未选择活跃主机")
+                    return@collect
+                }
+                watcher = connection
+                eventsJob = launch(start = CoroutineStart.UNDISPATCHED) {
+                    connection.events.collect {
+                        if (connection.currentProfile()?.id == profile.id) handle(it)
                     }
-                    val connection = DshConnection(this@DshConnectionService)
-                    watcher = connection
-                    // 后台重连同样过配对/设备校验：IP 被回收或配对被撤销时断开，不再无限重连
-                    pairingJob = scope.launch {
-                        PairingCoordinator(connection, settings, this).start()
-                    }
-                    eventsJob = launch { connection.events.collect { if (watcher === connection) handle(it) } }
-                    stateJob = launch {
-                        connection.state.collect { st ->
-                            if (st !is DshConnection.State.Connected) clearInteractions()
-                            val text = when (st) {
-                                is DshConnection.State.Connected -> "已连接 " + st.baseUrl
-                                is DshConnection.State.Connecting -> "连接中…"
-                                // st.message 已含「N 秒后自动重连」或「（已停止自动重连）」，直接透传
-                                is DshConnection.State.Error -> st.message
-                                else -> "后台连接已开启"
-                            }
-                            updateForegroundText(text)
-                            WidgetState.push(this@DshConnectionService, text)
+                }
+                stateJob = launch {
+                    connection.state.collect { st ->
+                        if (st !is DshConnection.State.Connected) clearInteractions()
+                        val text = when (st) {
+                            is DshConnection.State.Connected -> "已连接 " + st.baseUrl
+                            is DshConnection.State.Connecting -> "连接中…"
+                            // st.message 已含「N 秒后自动重连」或「（已停止自动重连）」，直接透传
+                            is DshConnection.State.Error -> st.message
+                            else -> "后台连接已开启"
                         }
+                        updateForegroundText(text)
+                        WidgetState.push(this@DshConnectionService, text)
                     }
-                    connection.connect(profile) { info ->
-                        if (info.errorCode != null) {
-                            scope.launch {
-                                settings.markAttempt(info.profileId, info.errorCode)
-                            }
+                }
+                // A sticky service may be the first component after process death.
+                if (connection.state.value == DshConnection.State.Disconnected &&
+                    connection.currentProfile() == null) connection.connect(profile) { info ->
+                    if (info.errorCode != null) {
+                        scope.launch {
+                            settings.markAttempt(info.profileId, info.errorCode)
                         }
                     }
                 }
+            }
         }
     }
 
@@ -355,7 +349,6 @@ class DshConnectionService : Service() {
     override fun onDestroy() {
         eventsJob?.cancel()
         stateJob?.cancel()
-        watcher?.disconnect()
         watcher = null
         watchJob?.cancel()
         watchJob = null

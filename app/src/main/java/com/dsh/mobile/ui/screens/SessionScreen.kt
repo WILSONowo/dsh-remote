@@ -852,7 +852,12 @@ fun SessionScreen(
     var commands by remember { mutableStateOf<List<SlashCommand>>(emptyList()) }
     var commandsLoading by remember { mutableStateOf(false) }
     var actionError by remember { mutableStateOf<String?>(null) }
-    var workspaceLabel by remember { mutableStateOf<String?>(null) }
+    val workspace = connection.directory.workspace
+    val workspaceState by workspace.state.collectAsState()
+    LaunchedEffect(workspace) { workspace.load() }
+    val workspaceLabel = remember(workspaceState.value, sessionId) {
+        workspaceState.value?.items?.firstOrNull { sessionId in it.sessionIds }?.let { it.title.ifBlank { it.path } }
+    }
     val autoModelEnabled by settingsStore.autoModel.collectAsState(initial = false)
     val manualModel by remember(computerScope, sessionId) { settingsStore.manualModel(computerScope, sessionId) }
         .collectAsState(initial = false)
@@ -936,12 +941,6 @@ fun SessionScreen(
         loadModels()
         state.load()
         historyReady = true
-        // 会话所属工作区（只读展示，切换入口在首页新对话）
-        runCatching {
-            val ws = connection.workspaceList().items
-                .firstOrNull { it.sessionIds.contains(sessionId) }
-            workspaceLabel = ws?.let { it.title.ifBlank { it.path } }
-        }
     }
 
     // 实时事件
