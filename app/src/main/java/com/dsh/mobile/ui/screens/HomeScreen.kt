@@ -251,12 +251,20 @@ fun HomeScreen(
     val pendingCount by approvalCenter.pendingCount.collectAsState()
 
     /** 后台预取最近 3 个会话首屏进内存缓存：点开即消费（SessionChatState.load 取走），跳过网络等待 */
-    fun prefetchRecent(list: List<SessionSummary>) {
-        scope.launch(Dispatchers.Default) {
-            list.take(3).forEach { s ->
-                if (!cache.hasHistory(s.sessionId)) {
-                    runCatching { connection.history(s.sessionId, maxMessages = 3) }
-                        .getOrNull()?.let { cache.putPrefetch(s.sessionId, it) }
+    val recentHeads = remember(rawSessions) {
+        rawSessions.sortedByDescending { it.updatedAt }.take(3).filterNot { it.running }.map { it.sessionId to it.updatedAt }
+    }
+    LaunchedEffect(accessReady, recentHeads) {
+        if (!accessReady || recentHeads.isEmpty()) return@LaunchedEffect
+        kotlinx.coroutines.delay(350)
+        withContext(Dispatchers.Default) {
+            for ((id, _) in recentHeads) {
+                if (!cache.hasHistory(id)) {
+                    try {
+                        cache.putPrefetch(id, connection.history(id, maxMessages = 3))
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (_: Exception) { /* Opening the session can retry. */ }
                 }
             }
         }
@@ -284,7 +292,6 @@ fun HomeScreen(
                     rawSessions = net
                     withContext(Dispatchers.Default) { cache.saveSessionList(net) }
                     listError = null
-                    if (!refreshAgain) prefetchRecent(net)
                 } while (refreshAgain)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -346,9 +353,9 @@ fun HomeScreen(
         if (!accessReady) return@LaunchedEffect
         connection.events.collect { ev ->
             when (ev) {
+                is DshConnection.Event.SessionStatus -> refreshSessions()
                 is DshConnection.Event.SessionAdded,
                 is DshConnection.Event.SessionRemoved,
-                is DshConnection.Event.SessionStatus,
                 is DshConnection.Event.Reconnected,
                 -> {
                     refreshSessions()
@@ -406,7 +413,7 @@ fun HomeScreen(
         NewTaskEditor(input, { input = it }, placeholder, sending, input.isNotBlank() || pendingImages.isNotEmpty(),
             { send() }, voiceInput, preset, presets, { preset = it }, { imagePicker.launch("image/*") }, sendError,
             actionsEnabled = accessReady,
-            modelLabel = if (adaptive && draftChoice == null) "自适应模型" else remember(info) { composerModelLabel(info) },
+            modelLabel = remember(info) { composerModelLabel(info) },
             onModel = { if (accessReady) { showModels = true; loadCatalog() } },
             modelMenu = {
                 ModelPickerMenu(showModels, info, loadingCatalog, sending, { showModels = false }, ::loadCatalog,

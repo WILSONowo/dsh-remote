@@ -18,9 +18,9 @@ val hasReleaseSigning = !releaseStoreFile.isNullOrBlank()
 
 // 版本号统管：由根 gradle.properties 提供（避免散落硬编码，CI 可按 tag 覆盖）
 val dsvVersionName =
-    (project.findProperty("DSH_VERSION_NAME") as String?)?.takeIf { it.isNotBlank() } ?: "3.2.3"
+    (project.findProperty("DSH_VERSION_NAME") as String?)?.takeIf { it.isNotBlank() } ?: "3.2.4"
 val dsvVersionCode =
-    ((project.findProperty("DSH_VERSION_CODE") as String?)?.takeIf { it.isNotBlank() } ?: "67").toInt()
+    ((project.findProperty("DSH_VERSION_CODE") as String?)?.takeIf { it.isNotBlank() } ?: "68").toInt()
 
 android {
     namespace = "com.dsh.mobile"
@@ -55,6 +55,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
+            isShrinkResources = true
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -62,6 +63,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        create("compact") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
         }
     }
 

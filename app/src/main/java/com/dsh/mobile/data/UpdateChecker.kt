@@ -191,14 +191,24 @@ object UpdateChecker {
     /** 当前记住的镜像显示名（无则 null） */
     fun lastMirrorName(): String? = lastMirror?.let { mirrorName(it) }
 
+    internal fun pruneDownloads(directory: File, installedAt: Long, now: Long = System.currentTimeMillis()) {
+        directory.listFiles()?.forEach { file ->
+            if (!file.isFile) return@forEach
+            val age = now - file.lastModified()
+            if ((file.name.endsWith(".apk") && (file.lastModified() <= installedAt || age > 7 * 86_400_000L)) ||
+                (file.name.endsWith(".apk.part") && age > 86_400_000L)) file.delete()
+        }
+    }
+
     /** 启动自动检查：距上次检查超过 1 天才真正请求 GitHub（省电省流量） */
     suspend fun autoCheck(context: Context): ReleaseInfo? {
         val prefs = context.getSharedPreferences("dsh_update", Context.MODE_PRIVATE)
         val last = prefs.getLong("last_auto_check", 0L)
         val now = System.currentTimeMillis()
         if (now - last < AUTO_CHECK_INTERVAL_MS) return null
+        val release = checkLatest() ?: return null
         prefs.edit().putLong("last_auto_check", now).apply()
-        return checkLatest()
+        return release
     }
 
     // ── 透明下载事件流（v1.1.1：镜像切换/开始/速度全量上报，UI 全透明展示）──

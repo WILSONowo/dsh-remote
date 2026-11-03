@@ -35,12 +35,12 @@ DeepSeek Harness 的非官方 Android 远程客户端，配套电脑插件为 [d
 Android 要求 JDK 17、Android SDK Platform 36；使用仓库提供的 Gradle Wrapper：
 
 ```sh
-./gradlew testDebugUnitTest assembleDebug
+./gradlew testDebugUnitTest assembleCompact
 ```
 
 Windows 使用 `gradlew.bat`。SDK 路径由本机 `local.properties` 的 `sdk.dir` 配置，不提交该文件。
 发布签名可在同一文件配置 `release.storeFile`、`release.storePassword`、`release.keyAlias`、`release.keyPassword`。
-不要提交密钥库或凭据。Debug APK 在 `app/build/outputs/apk/debug/`。
+不要提交密钥库或凭据。本地体验包使用 Debug 签名并启用代码和资源压缩，输出到 `app/build/outputs/apk/compact/`；开发调试使用 `assembleDebug`。
 
 测试使用合成数据、临时目录和本机回环端口，不自动访问实际部署、用户会话或付费模型。
 见 [测试说明](docs/testing.md)。

@@ -286,7 +286,7 @@ class NavigationUiTest {
                     compose.onNodeWithContentDescription("切换模型").performClick()
                     compose.waitUntil(5_000) { compose.onAllNodesWithText("模型").fetchSemanticsNodes().isNotEmpty() }
                     compose.onNodeWithText("模型").performClick()
-                    compose.onNodeWithText("Fixture Pro").performClick()
+                    compose.onNode(hasText("Fixture Pro") and !hasContentDescription("切换模型")).performClick()
                     compose.onNodeWithContentDescription("切换模型").performClick()
                     compose.waitUntil(5_000) { compose.onAllNodesWithText("高").fetchSemanticsNodes().isNotEmpty() }
                     compose.onNodeWithText("高").performClick()
@@ -444,7 +444,9 @@ class NavigationUiTest {
             compose.onNodeWithText("断开连接").performScrollTo().performClick()
             compose.waitUntil(5_000) { connection.state.value is DshConnection.State.Disconnected }
             compose.onNode(hasText("版本 0.2.1-rc.5") and hasAnyAncestor(hasTestTag("active_computer"))).assertExists()
-            Assert.assertEquals("0.2.1-rc.5", runBlocking { store.profiles.first().single { it.id == "paired-b" }.lastHostVersion })
+            compose.waitUntil(5_000) {
+                runBlocking { store.profiles.first() }.singleOrNull { it.id == "paired-b" }?.lastHostVersion == "0.2.1-rc.5"
+            }
             compose.onNodeWithTag("nav_sessions").assertIsEnabled().performClick()
             compose.waitUntil(10_000) {
                 compose.onAllNodesWithText("Recent 01").fetchSemanticsNodes().isNotEmpty() &&

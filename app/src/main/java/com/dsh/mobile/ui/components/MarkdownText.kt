@@ -69,7 +69,7 @@ fun MarkdownText(
                         else -> 14.sp
                     }
                     Text(
-                        text = renderInline(block.text),
+                        text = remember(block.text, DshSurfaceHigh, DshBrandSoft) { renderInline(block.text) },
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontSize = size,
                             fontWeight = FontWeight.Bold,
@@ -87,7 +87,7 @@ fun MarkdownText(
                             color = DshBrandSoft,
                         )
                         Text(
-                            text = renderInline(block.text),
+                            text = remember(block.text, DshSurfaceHigh, DshBrandSoft) { renderInline(block.text) },
                             style = MaterialTheme.typography.bodyMedium,
                             overflow = TextOverflow.Clip,
                         )
@@ -102,7 +102,7 @@ fun MarkdownText(
                             color = DshBrandSoft,
                         )
                         Text(
-                            text = renderInline(block.text),
+                            text = remember(block.text, DshSurfaceHigh, DshBrandSoft) { renderInline(block.text) },
                             style = MaterialTheme.typography.bodyMedium,
                             overflow = TextOverflow.Clip,
                         )
@@ -119,7 +119,7 @@ fun MarkdownText(
                         )
                         Spacer(Modifier.width(10.dp))
                         Text(
-                            text = renderInline(block.text),
+                            text = remember(block.text, DshSurfaceHigh, DshBrandSoft) { renderInline(block.text) },
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             ),
@@ -130,7 +130,7 @@ fun MarkdownText(
                 is MdBlock.Paragraph -> {
                     if (block.text.isNotBlank()) {
                         Text(
-                            text = renderInline(block.text),
+                            text = remember(block.text, DshSurfaceHigh, DshBrandSoft) { renderInline(block.text) },
                             style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
                             maxLines = maxLines,
                             overflow = TextOverflow.Clip,
@@ -201,43 +201,23 @@ private fun CodeBlock(block: MdBlock.Code) {
     }
 }
 
-private fun renderInline(text: String): AnnotatedString = buildAnnotatedString {    // 支持 **加粗** 与 `行内代码`
-    val bold = Regex("""\*\*(.+?)\*\*""")
-    val code = Regex("""`([^`\n]+)`""")
-    var rest = text
-    while (rest.isNotEmpty()) {
-        val boldMatch = bold.find(rest)
-        val codeMatch = code.find(rest)
-        val b = boldMatch?.range
-        val c = codeMatch?.range
-        val next = when {
-            b != null && (c == null || b.first <= c.first) -> boldMatch
-            c != null -> codeMatch
-            else -> null
-        }
-        if (next == null) {
-            append(rest)
-            rest = ""
+private val inlineMarkup = Regex("""\*\*(.+?)\*\*|`([^`\n]+)`""")
+
+private fun renderInline(text: String): AnnotatedString = buildAnnotatedString {
+    var start = 0
+    for (match in inlineMarkup.findAll(text)) {
+        append(text, start, match.range.first)
+        val bold = match.groups[1]
+        if (bold != null) {
+            withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(bold.value) }
         } else {
-            append(rest.substring(0, next.range.first))
-            if (next == boldMatch) {
-                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-                    append(next.groupValues[1])
-                }
-            } else {
-                withStyle(
-                    SpanStyle(
-                        fontFamily = FontFamily.Monospace,
-                        background = DshSurfaceHigh,
-                        color = DshBrandSoft,
-                    )
-                ) {
-                    append(next.groupValues[1])
-                }
+            withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = DshSurfaceHigh, color = DshBrandSoft)) {
+                append(match.groupValues[2])
             }
-            rest = rest.substring(next.range.last + 1)
         }
+        start = match.range.last + 1
     }
+    append(text, start, text.length)
 }
 
 private sealed interface MdBlock {

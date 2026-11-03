@@ -17,6 +17,9 @@ internal data class ComposerModel(
     val efforts: List<Pair<String, String>>,
 )
 
+private fun modelDisplayName(name: String): String =
+    if (name.length > 9 && name.startsWith("deepseek-", ignoreCase = true)) name.substring(9) else name
+
 internal fun composerModels(info: SessionModelsValue?): List<ComposerModel> = runCatching {
     (info?.groups as? JsonArray).orEmpty().flatMap { group ->
         val g = group.jsonObject
@@ -30,7 +33,7 @@ internal fun composerModels(info: SessionModelsValue?): List<ComposerModel> = ru
                 val eid = e["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
                 eid to (e["name"]?.jsonPrimitive?.contentOrNull ?: eid)
             }
-            ComposerModel(provider, providerName, id, m["name"]?.jsonPrimitive?.contentOrNull ?: id, efforts)
+            ComposerModel(provider, providerName, id, modelDisplayName(m["name"]?.jsonPrimitive?.contentOrNull?.ifBlank { id } ?: id), efforts)
         }
     }
 }.getOrDefault(emptyList())
@@ -39,7 +42,7 @@ internal fun composerModelLabel(info: SessionModelsValue?): String {
     val selection = info?.current ?: return "模型"
     val model = composerModels(info).firstOrNull { it.provider == selection.provider && it.id == selection.model }
     val effort = model?.efforts?.firstOrNull { it.first == selection.reasoningEffort }?.second ?: selection.reasoningEffort
-    return listOfNotNull(model?.name ?: selection.model.ifBlank { "模型" }, effort?.takeIf { it.isNotBlank() }).joinToString(" ")
+    return listOfNotNull(model?.name ?: modelDisplayName(selection.model).ifBlank { "模型" }, effort?.takeIf { it.isNotBlank() }).joinToString(" ")
 }
 
 @Composable

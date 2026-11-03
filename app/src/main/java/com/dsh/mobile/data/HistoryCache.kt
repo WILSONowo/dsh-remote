@@ -4,6 +4,8 @@ import android.content.Context
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
+import kotlinx.serialization.json.encodeToStream
+import kotlinx.serialization.json.decodeFromStream
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
@@ -94,6 +96,7 @@ object HistoryMemoryCache {
  * - 冷：服务器全量历史（loadMore 分页）
  * gzip 同时服务于"传输减少"：缓存命中时零网络；未命中时 OkHttp 已对响应启用透明 gzip。
  */
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 class HistoryCache internal constructor(private val cacheRoot: File, private val scope: String) {
     constructor(context: Context, scope: String = "legacy") : this(context.cacheDir, scope)
     private val directory = if (scope == "legacy") cacheRoot else File(cacheRoot, "computers/${cacheKey(scope)}")
@@ -117,7 +120,7 @@ class HistoryCache internal constructor(private val cacheRoot: File, private val
         if (!f.exists() || f.length() > 8 * 1024 * 1024) return null
         val doc = runCatching {
             GZIPInputStream(f.inputStream()).use {
-                json.decodeFromString<CachedHistory>(it.readBytes().toString(Charsets.UTF_8))
+                json.decodeFromStream<CachedHistory>(it)
             }
         }.getOrNull() ?: return null
         HistoryMemoryCache.putHistory(memoryKey(sessionId), doc.items, doc.completeThroughSeq)
@@ -135,43 +138,51 @@ class HistoryCache internal constructor(private val cacheRoot: File, private val
         }
         runCatching {
             historyDir.mkdirs()
-            val payload = json.encodeToString(
-                CachedHistory.serializer(),
-                CachedHistory(System.currentTimeMillis(), capped, completeThroughSeq),
-            )
             val temp = File.createTempFile("history-", ".tmp", historyDir)
             try {
-                GZIPOutputStream(temp.outputStream()).use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+                GZIPOutputStream(temp.outputStream().buffered()).use {
+                    json.encodeToStream(CachedHistory.serializer(), CachedHistory(System.currentTimeMillis(), capped, completeThroughSeq), it)
+                }
+                if (temp.length() > 8L * 1024 * 1024) {
+                    historyFile(sessionId).delete()
+                    return
+                }
                 java.nio.file.Files.move(temp.toPath(), historyFile(sessionId).toPath(),
                     java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                trimDiskCache()
             } finally {
                 temp.delete()
             }
         }
     }
 
-    /**
-     * 清理过期缓存：会话历史超过 ttlDays 删除（gzip 解压后内容通常很快失效），
-     * 会话列表超过 listTtlDays 删除。损坏文件（解码失败）也一并清除。
-     */
-    fun prune(ttlDays: Int = 7, listTtlDays: Int = 1) {
-        runCatching {
-            if (scope == "legacy") {
-                File(cacheRoot, "computers").listFiles()?.filter { it.isDirectory }?.forEach { dir ->
-                    dir.walkBottomUp().filter { it.isFile }.forEach { file ->
-                        val ttl = if (file.name == "session-list.json.gz") listTtlDays else ttlDays
-                        if (System.currentTimeMillis() - file.lastModified() > ttl * 86400000L) file.delete()
-                    }
-                }
-            }
-            val now = System.currentTimeMillis()
-            val historyTtl = ttlDays * 24L * 3600 * 1000
-            val listTtl = listTtlDays * 24L * 3600 * 1000
-            historyDir.listFiles()?.forEach { f ->
-                if (f.isFile && (now - f.lastModified() > historyTtl)) f.delete()
-            }
-            if (listFile.isFile && (now - listFile.lastModified() > listTtl)) listFile.delete()
+    private fun cacheFiles(): List<File> = buildList {
+        fun collect(dir: File) {
+            File(dir, "history").listFiles()?.filterTo(this) { it.isFile && it.name.endsWith(".json.gz") }
+            File(dir, "session-list.json.gz").takeIf { it.isFile }?.let { add(it) }
         }
+        collect(cacheRoot)
+        File(cacheRoot, "computers").listFiles()?.filter { it.isDirectory }?.forEach { collect(it) }
+    }
+
+    internal fun trimDiskCache(budget: Long = 32L * 1024 * 1024) {
+        val files = cacheFiles()
+        var bytes = files.sumOf { it.length() }
+        if (bytes <= budget) return
+        for (file in files.sortedBy { it.lastModified() }) {
+            val size = file.length()
+            if (file.delete()) bytes -= size
+            if (bytes <= budget) break
+        }
+    }
+
+    fun prune(ttlDays: Int = 7, listTtlDays: Int = 1) {
+        val now = System.currentTimeMillis()
+        cacheFiles().forEach { file ->
+            val ttl = if (file.name == "session-list.json.gz") listTtlDays else ttlDays
+            if (now - file.lastModified() > ttl * 86_400_000L) file.delete()
+        }
+        trimDiskCache()
     }
 
     fun clearHistory(sessionId: String) {
@@ -187,7 +198,7 @@ class HistoryCache internal constructor(private val cacheRoot: File, private val
         if (!listFile.exists() || listFile.length() > 1 * 1024 * 1024) return null
         val items = runCatching {
             GZIPInputStream(listFile.inputStream()).use {
-                json.decodeFromString<SessionListValue>(it.readBytes().toString(Charsets.UTF_8)).items
+                json.decodeFromStream<SessionListValue>(it).items
             }
         }.getOrNull()
         if (items != null) HistoryMemoryCache.putSessionList(items, scope)
@@ -198,10 +209,15 @@ class HistoryCache internal constructor(private val cacheRoot: File, private val
         HistoryMemoryCache.putSessionList(items, scope)
         runCatching {
             directory.mkdirs()
-            val payload = json.encodeToString(SessionListValue.serializer(), SessionListValue(items))
-            GZIPOutputStream(listFile.outputStream()).use {
-                it.write(payload.toByteArray(Charsets.UTF_8))
-            }
+            val temp = File.createTempFile("list-", ".tmp", directory)
+            try {
+                GZIPOutputStream(temp.outputStream().buffered()).use {
+                    json.encodeToStream(SessionListValue.serializer(), SessionListValue(items), it)
+                }
+                java.nio.file.Files.move(temp.toPath(), listFile.toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                trimDiskCache()
+            } finally { temp.delete() }
         }
     }
 

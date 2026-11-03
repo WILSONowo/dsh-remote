@@ -335,7 +335,7 @@ private fun UpdatePromptOverlay(context: android.content.Context) {
 
     // 启动自动检查（后台；无更新则静默）
     LaunchedEffect(Unit) {
-        val latest = UpdateChecker.checkLatest() ?: return@LaunchedEffect
+        val latest = withContext(Dispatchers.IO) { UpdateChecker.autoCheck(context) } ?: return@LaunchedEffect
         val current = runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
         }.getOrNull()

@@ -1671,7 +1671,11 @@ private fun UserBubble(item: ChatItem.User, modifier: Modifier = Modifier) {
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     item.images.forEach { img ->
-                        val bitmap = remember(img.base64) { decodeUserImage(context, img) }
+                        val bitmap = key(img.base64) {
+                            produceState<Bitmap?>(null) {
+                                value = withContext(Dispatchers.Default) { decodeUserImage(context, img) }
+                            }.value
+                        }
                         if (bitmap != null) {
                             Image(
                                 bitmap = bitmap.asImageBitmap(),
