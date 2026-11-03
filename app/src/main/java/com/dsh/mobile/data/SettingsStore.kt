@@ -258,9 +258,17 @@ class SettingsStore(
         )
     }
 
-    suspend fun saveAppearance(cfg: AppearanceConfig) {
+    suspend fun replaceBackgroundUri(uri: String?): String? {
+        var previous: String? = null
         context.dataStore.edit { prefs ->
-            if (cfg.bgUri != null) prefs[BG_URI_KEY] = cfg.bgUri else prefs.remove(BG_URI_KEY)
+            previous = prefs[BG_URI_KEY]
+            if (uri == null) prefs.remove(BG_URI_KEY) else prefs[BG_URI_KEY] = uri
+        }
+        return previous
+    }
+
+    suspend fun saveAppearanceControls(cfg: AppearanceConfig) {
+        context.dataStore.edit { prefs ->
             prefs[BG_OPACITY_KEY] = cfg.bgOpacity
             prefs[BG_BLUR_KEY] = cfg.bgBlur
             prefs[BG_DIM_KEY] = cfg.bgDim

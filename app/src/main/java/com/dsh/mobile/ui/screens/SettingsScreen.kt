@@ -1,11 +1,15 @@
 package com.dsh.mobile.ui.screens
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.provider.Settings
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.compose.BackHandler
 import com.dsh.mobile.ui.components.*
 import androidx.compose.ui.text.font.FontWeight
@@ -35,6 +39,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.dsh.mobile.data.BackgroundImages
 import com.dsh.mobile.data.ApkInstaller
 import com.dsh.mobile.data.AppearanceConfig
 import com.dsh.mobile.data.DshConnection
@@ -61,6 +66,9 @@ import com.dsh.mobile.ui.theme.ThemeRegistry
 import com.dsh.mobile.ui.theme.ThemeRepository
 import com.dsh.mobile.ui.theme.ThemeStore
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -190,18 +198,49 @@ fun SettingsScreen(
 
     fun persist(next: AppearanceConfig) {
         appearance = next
-        scope.launch { settingsStore.saveAppearance(next) }
+        scope.launch { settingsStore.saveAppearanceControls(next) }
     }
 
-    val bgPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
+    var importingBackground by remember { mutableStateOf(false) }
+    fun replaceBackground(uri: Uri?) {
+        scope.launch {
+            importingBackground = true
             try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                )
-            } catch (_: Exception) {}
-            persist(appearance.copy(bgUri = uri.toString()))
+                val next = withContext(NonCancellable + Dispatchers.IO) {
+                    val retained = uri?.let { BackgroundImages.retain(context, it) }
+                    val previous = try {
+                        settingsStore.replaceBackgroundUri(retained?.toString())
+                    } catch (e: Exception) {
+                        if (retained?.scheme == "file") BackgroundImages.release(context, retained)
+                        throw e
+                    }
+                    if (previous != null && previous != retained?.toString()) BackgroundImages.release(context, Uri.parse(previous))
+                    retained
+                }
+                appearance = appearance.copy(bgUri = next?.toString())
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                Toast.makeText(context, "无法保存背景图", Toast.LENGTH_SHORT).show()
+            } finally {
+                importingBackground = false
+            }
+        }
+    }
+
+    val bgPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) result.data?.data?.let(::replaceBackground)
+    }
+    fun pickBackground() {
+        if (importingBackground) return
+        val picker = ActivityResultContracts.PickVisualMedia()
+        val intent = if (ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(context)) {
+            picker.createIntent(context, PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        } else Intent(Intent.ACTION_PICK).setType("image/*")
+        try {
+            bgPicker.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(context, "未找到图库", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -288,8 +327,8 @@ fun SettingsScreen(
                     SettingsRow("代码字体", { fontPicker = "code" }, value = CODE_FONTS.firstOrNull { it.second == codeFont }?.first ?: "默认")
                 }
                 SettingsGroup {
-                    SettingsRow(if (appearance.bgUri != null) "更换背景图" else "选择背景图", { bgPicker.launch(arrayOf("image/*")) })
-                    if (appearance.bgUri != null) SettingsRow("移除", { persist(appearance.copy(bgUri = null)) })
+                    SettingsRow(if (appearance.bgUri != null) "更换背景图" else "选择背景图", ::pickBackground)
+                    if (appearance.bgUri != null) SettingsRow("移除", { if (!importingBackground) replaceBackground(null) })
                     SettingsRow("更多外观设置", { showAppearanceDetail = true })
                 }
                 SettingsGroup {
