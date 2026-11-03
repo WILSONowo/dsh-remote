@@ -48,7 +48,7 @@ class NavigationFixtureApplication : Application() {
 class NavigationUiTest {
     @get:Rule val compose = createComposeRule()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var checkIntervalMs = 10_000L
+    private var checkIntervalMs = 120_000L
     private val connection by lazy { DshConnection(RuntimeEnvironment.getApplication(), accessCheckIntervalMs = checkIntervalMs) }
 
     @Before fun resetSyntheticProfiles() = runBlocking {
@@ -156,7 +156,7 @@ class NavigationUiTest {
     @Test fun firstTaskCanUseAdaptiveModelWhenNotOverridden() = exerciseConnectedHome(firstTask = "adaptive")
 
     private fun exerciseConnectedHome(revoke: String? = null, firstTask: String? = null) {
-        if (revoke == "idle") checkIntervalMs = 300L
+        if (revoke != null) checkIntervalMs = 300L
         val calls = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
         val archived = java.util.concurrent.atomic.AtomicBoolean(true)
         val archivedId = "session-abcdef01-example"
@@ -164,6 +164,8 @@ class NavigationUiTest {
         val authorized = java.util.concurrent.atomic.AtomicBoolean(true)
         val accessReply = CountDownLatch(1)
         val holdAccess = java.util.concurrent.atomic.AtomicBoolean(false)
+        val workspaceReply = java.util.concurrent.atomic.AtomicReference(CountDownLatch(1))
+        val accessChecks = java.util.concurrent.atomic.AtomicInteger()
         val release = CountDownLatch(1)
         val executor = Executors.newCachedThreadPool { runnable -> Thread(runnable).apply { isDaemon = true } }
         val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
@@ -183,6 +185,7 @@ class NavigationUiTest {
                         if (contentLength > 0) calls.add(JSONObject(reader.readUtf8(contentLength.toLong())))
                         val output = client.getOutputStream()
                         if (request.contains("/pair/check?")) {
+                            accessChecks.incrementAndGet()
                             if (holdAccess.get()) accessReply.await()
                             val payload = """{"ok":true,"paired":${authorized.get()}}""".toByteArray()
                             val status = if (unavailable.get()) "503 Unavailable" else "200 OK"
@@ -197,8 +200,12 @@ class NavigationUiTest {
                             val value = if (request.contains("describe")) """{"version":"0.2.1-rc.5"}"""
                                 else if (request.contains("/api/session.models ")) """{"current":{"provider":"fixture","model":"pro"},"groups":[{"id":"fixture","models":[{"id":"flash","name":"Fixture Flash"},{"id":"pro","name":"Fixture Pro","reasoning":{"efforts":[{"id":"high","name":"高"}]}}]}]}"""
                                 else if (request.contains("/api/workspace.list ")) {
+                                    workspaceReply.get().await()
                                     val ids = if (archived.get()) """["$archivedId"]""" else "[]"
                                     """{"items":[],"archivedSessionIds":$ids}"""
+                                } else if (request.contains("/api/workspace.archiveSession ")) {
+                                    archived.set(true)
+                                    "{}"
                                 } else if (request.contains("/api/workspace.unarchiveSession ")) {
                                     archived.set(false)
                                     "{}"
@@ -208,7 +215,7 @@ class NavigationUiTest {
                                     val items = (1..13).joinToString(",") { n ->
                                         """{"sessionId":"recent-$n","updatedAt":${1000 - n},"projections":{"values":{"title":"Recent ${n.toString().padStart(2, '0')}"}}}"""
                                     }
-                                    """{"items":[$items]}"""
+                                    """{"items":[{"sessionId":"$archivedId","updatedAt":9999},$items]}"""
                                 } else """{"items":[],"events":[],"archivedSessionIds":[]}"""
                             val payload = """{"type":"server-response","rpcId":"fixture","result":{"ok":true,"value":$value}}""".toByteArray()
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${payload.size}\r\nConnection: close\r\n\r\n".toByteArray())
@@ -247,16 +254,22 @@ class NavigationUiTest {
             }
             compose.onNodeWithText("添加电脑").assertIsDisplayed()
             compose.onNodeWithText("切换").assertDoesNotExist()
+            val verifiedChecks = accessChecks.get()
+            holdAccess.set(revoke != null)
             if (revoke == "before") authorized.set(false)
             if (revoke == "offline") unavailable.set(true)
-            holdAccess.set(true)
             compose.onNodeWithTag("nav_sessions").assertIsEnabled().performClick()
-            compose.onNodeWithTag("session_page_loading").assertIsDisplayed()
             compose.onNodeWithText("切换").assertIsDisplayed()
-            compose.onNodeWithText("正在验证").assertIsDisplayed()
             compose.onNodeWithText("最近会话").assertIsDisplayed()
             compose.onNodeWithTag("home_recent_list").assertIsDisplayed()
-            compose.onNodeWithTag("message_action").assertIsNotEnabled()
+            if (revoke == null) {
+                compose.waitUntil(5_000) { calls.any { it.optString("method") == "session.list" } }
+                compose.onNodeWithTag("session_page_loading").assertIsDisplayed()
+                compose.onNodeWithText("会话 abcdef01").assertDoesNotExist()
+                compose.onNodeWithText("已连接").assertIsDisplayed()
+                Assert.assertEquals(verifiedChecks, accessChecks.get())
+            }
+            workspaceReply.get().countDown()
             if (firstTask == "manual") compose.onNodeWithTag("message_editor").performTextInput("draft")
             accessReply.countDown()
             if (revoke == "offline") {
@@ -471,6 +484,24 @@ class NavigationUiTest {
             Assert.assertEquals(archivedId, restore.getString("sessionId"))
             Assert.assertFalse(restore.has("workspaceId"))
             Assert.assertFalse(calls.any { it.optString("method") == "workspace.insertSessionBefore" })
+            val checksBeforeReturn = accessChecks.get()
+            compose.onNodeWithTag("nav_sessions").performClick()
+            compose.waitUntil(5_000) { compose.onAllNodesWithText("会话 abcdef01").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("会话 abcdef01").performTouchInput { longClick() }
+            compose.onNodeWithText("归档").performClick()
+            compose.onNodeWithText("归档").performClick()
+            compose.waitUntil(5_000) { archived.get() && compose.onAllNodesWithText("会话 abcdef01").fetchSemanticsNodes().isEmpty() }
+            compose.onNodeWithTag("nav_connections").performClick()
+            workspaceReply.set(CountDownLatch(1))
+            val listCount = calls.count { it.optString("method") == "session.list" }
+            compose.onNodeWithTag("nav_sessions").performClick()
+            compose.waitUntil(5_000) { calls.count { it.optString("method") == "session.list" } > listCount }
+            compose.onNodeWithTag("session_page_loading").assertIsDisplayed()
+            compose.onNodeWithText("会话 abcdef01").assertDoesNotExist()
+            workspaceReply.get().countDown()
+            compose.waitUntil(5_000) { compose.onAllNodesWithText("Recent 01").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("会话 abcdef01").assertDoesNotExist()
+            Assert.assertEquals(checksBeforeReturn, accessChecks.get())
         } finally {
             if (firstTask != null) {
                 val reset = scope.async(Dispatchers.IO) { SettingsStore(RuntimeEnvironment.getApplication()).setAutoModel(false) }
@@ -481,6 +512,7 @@ class NavigationUiTest {
                 runBlocking { reset.await() }
             }
             connection.disconnect()
+            workspaceReply.get().countDown()
             accessReply.countDown()
             release.countDown()
             server.close()

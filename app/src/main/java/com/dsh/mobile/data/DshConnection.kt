@@ -227,8 +227,8 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
         return false
     }
 
-    /** Recheck access before opening a protected page, also while idle on an existing stream. */
-    suspend fun confirmAccess(id: String): Boolean {
+    /** Recheck the active connection periodically and when an event stream denies access. */
+    private suspend fun confirmAccess(id: String): Boolean {
         val probe = synchronized(this) {
             val p = connectedProfile ?: return false
             if (p.id != id || !p.paired || _state.value !is State.Connected) return false

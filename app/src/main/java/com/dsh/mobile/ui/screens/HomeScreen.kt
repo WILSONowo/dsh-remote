@@ -110,7 +110,7 @@ fun HomeScreen(
     var sending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
     var presetMenu by remember { mutableStateOf(false) }
-    var archivedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var archivedIds by remember { mutableStateOf<Set<String>?>(null) }
     var workspaces by remember { mutableStateOf<List<WorkspaceView>>(emptyList()) }
     var archiveTarget by remember { mutableStateOf<SessionSummary?>(null) }
     // 长按会话弹出的操作菜单目标（sessionId；null = 无菜单打开）
@@ -127,7 +127,8 @@ fun HomeScreen(
     val pinnedIds by remember(computerScope) { settingsStore.pinnedSessionIds(computerScope) }.collectAsState(initial = emptySet())
 
     val sessions = remember(rawSessions, pinnedIds, archivedIds) {
-        sortSessionsWithPinned(rawSessions.filterNot { it.sessionId in archivedIds }, pinnedIds)
+        val archived = archivedIds ?: return@remember emptyList()
+        sortSessionsWithPinned(rawSessions.filterNot { it.sessionId in archived }, pinnedIds)
     }
 
     // —— 新对话工作区选择 ——
@@ -253,8 +254,8 @@ fun HomeScreen(
     val pendingCount by approvalCenter.pendingCount.collectAsState()
 
     /** 后台预取最近 3 个会话首屏进内存缓存：点开即消费（SessionChatState.load 取走），跳过网络等待 */
-    val recentHeads = remember(rawSessions) {
-        rawSessions.sortedByDescending { it.updatedAt }.take(3).filterNot { it.running }.map { it.sessionId to it.updatedAt }
+    val recentHeads = remember(sessions) {
+        sessions.sortedByDescending { it.updatedAt }.take(3).filterNot { it.running }.map { it.sessionId to it.updatedAt }
     }
     LaunchedEffect(accessReady, recentHeads) {
         if (!accessReady || recentHeads.isEmpty()) return@LaunchedEffect
@@ -308,6 +309,8 @@ fun HomeScreen(
 
     var loadingArchived by remember { mutableStateOf(false) }
     var refreshArchivedAgain by remember { mutableStateOf(false) }
+    var archiveError by remember { mutableStateOf<String?>(null) }
+    val waitingForList = sessions.isEmpty() && (!loadedList || (archivedIds == null && archiveError == null))
     fun refreshArchived() {
         if (!accessReady) return
         if (loadingArchived) {
@@ -320,11 +323,15 @@ fun HomeScreen(
                 do {
                     refreshArchivedAgain = false
                     val w = connection.workspaceList()
+                    if (refreshArchivedAgain) continue
+                    archiveError = null
                     workspaces = w.items
                     archivedIds = w.archivedSessionIds.toSet()
                 } while (refreshArchivedAgain)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
-                listError = "工作区加载失败：${e.message}"
+                archiveError = "工作区加载失败：${e.message}"
             } finally { loadingArchived = false }
         }
     }
@@ -521,7 +528,7 @@ fun HomeScreen(
                         scope.launch {
                             try {
                                 connection.archiveSession(target.sessionId)
-                                archivedIds = archivedIds + target.sessionId
+                                archivedIds = archivedIds?.plus(target.sessionId)
                                 archiveTarget = null
                                 refreshSessions()
                                 refreshArchived()
@@ -640,7 +647,7 @@ fun HomeScreen(
     if (accessReady && DshThemeStyle == ThemeStyle.CHATGPT) {
         Box {
             ChatGptHomeLayout(
-                loadingSessions = !loadedList && sessions.isEmpty(),
+                loadingSessions = waitingForList,
                 sessions = sessions,
                 taskEditor = taskEditor,
                 preset = preset,
@@ -673,7 +680,7 @@ fun HomeScreen(
     if (accessReady && DshThemeStyle == ThemeStyle.CLAUDE) {
         Box {
             ClaudeHomeLayout(
-                loadingSessions = !loadedList && sessions.isEmpty(),
+                loadingSessions = waitingForList,
                 sessions = sessions,
                 taskEditor = taskEditor,
                 pendingImages = pendingImages,
@@ -705,7 +712,7 @@ fun HomeScreen(
     if (accessReady && DshThemeStyle == ThemeStyle.DEEPLOOK) {
         Box {
             DeepLookHomeLayout(
-                loadingSessions = !loadedList && sessions.isEmpty(),
+                loadingSessions = waitingForList,
                 sessions = sessions,
                 taskEditor = taskEditor,
                 workspaces = workspaces,
@@ -746,7 +753,7 @@ fun HomeScreen(
                     }) {
                         Icon(Icons.Rounded.Search, if (stdSearchActive) "关闭搜索" else "搜索会话")
                     }
-                    IconButton(enabled = accessReady && !listLoading, onClick = { refreshSessions() }) {
+                    IconButton(enabled = accessReady && !listLoading, onClick = { refreshSessions(); refreshArchived() }) {
                         if (listLoading && sessions.isNotEmpty()) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                         else Icon(Icons.Default.Refresh, "刷新")
                     }
@@ -756,7 +763,7 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 8.dp)
                             .testTag("home_session_search"))
                 }
-                listError?.let {
+                (archiveError ?: listError)?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(horizontal = 16.dp))
                 }
@@ -894,7 +901,7 @@ fun HomeScreen(
                     modifier = Modifier.weight(1f).fillMaxWidth().testTag("home_recent_list"),
                     contentPadding = PaddingValues(bottom = 24.dp),
                 ) {
-                    if (!accessReady || (!loadedList && sessions.isEmpty())) {
+                    if (!accessReady || waitingForList) {
                         item(key = "connection_status") {
                             Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
                                 if (connecting || accessReady) RecentLoading()

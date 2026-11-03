@@ -50,6 +50,7 @@ class DshConnectionService : Service() {
     private val sessionActive = mutableMapOf<String, Boolean>()
     private val completionJobs = mutableMapOf<String, Job>()
     private val pending = mutableMapOf<Pair<String, String?>, Interaction>()
+    private val processingNonces = mutableSetOf<String>()
     private val pendingTag = "dsh-interaction"
 
     private fun removeInteraction(key: Pair<String, String?>) {
@@ -114,7 +115,16 @@ class DshConnectionService : Service() {
                 stopSelf(startId)
                 return START_NOT_STICKY
             }
-            scope.launch { processAction(intent) }
+            val nonce = intent.data?.pathSegments?.firstOrNull() ?: return START_STICKY
+            if (processingNonces.add(nonce)) {
+                scope.launch {
+                    try {
+                        processAction(intent)
+                    } finally {
+                        processingNonces.remove(nonce)
+                    }
+                }
+            }
             return START_STICKY
         }
         startWatching()

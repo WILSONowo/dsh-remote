@@ -93,7 +93,8 @@ fun AppNavigation(
     val entry by navController.currentBackStackEntryAsState()
     val route = entry?.destination?.route
     val homeScope = remember(activeProfile) { activeProfile.computerScope() }
-    val ready = connState is DshConnection.State.Connected &&
+    val connected = connState as? DshConnection.State.Connected
+    val ready = connected != null && connected.profileId == activeId && connected.generation == connection.generation &&
         activeProfile?.paired == true && connection.currentProfile()?.id == activeId && connection.currentProfile()?.paired == true
 
     fun openRoot(destination: Screen) {
@@ -116,18 +117,14 @@ fun AppNavigation(
         if (navController.currentDestination?.route != screen.route) openRoot(screen)
     }
     val onHome = route == Screen.Home.route
-    var homeVerified by remember(entry, activeId, connState) { mutableStateOf(false) }
     var hadPairing by remember(entry, activeId) { mutableStateOf(activeProfile?.paired == true) }
     LaunchedEffect(onHome, activeProfile?.id) {
         if (onHome && connState == DshConnection.State.Disconnected && activeProfile?.paired == true) {
             connection.connect(activeProfile)
         }
     }
-    LaunchedEffect(entry, activeId, ready, connState) {
-        if (onHome && ready) {
-            hadPairing = true
-            activeId?.let { homeVerified = connection.confirmAccess(it) }
-        }
+    LaunchedEffect(onHome, activeId, ready) {
+        if (onHome && ready) hadPairing = true
     }
     LaunchedEffect(connState, activeProfile?.paired, awaitingId, route) {
         val denied = connection.currentProfile()?.paired == false ||
@@ -189,7 +186,6 @@ fun AppNavigation(
                                 style = MaterialTheme.typography.labelLarge)
                             Text(when {
                                 switching || connState is DshConnection.State.Connecting -> "连接中…"
-                                ready && !homeVerified -> "正在验证"
                                 ready -> "已连接"
                                 connState is DshConnection.State.Error -> "连接失败"
                                 connection.currentProfile()?.paired == false -> "待配对"
@@ -255,12 +251,12 @@ fun AppNavigation(
                                         HomeScreen(
                                             pageHeight = pageHeight,
                                             draft = draft,
-                                            accessReady = homeVerified && ready && !switching,
-                                            connecting = switching || connState is DshConnection.State.Connecting || (ready && !homeVerified),
+                                            accessReady = ready && !switching,
+                                            connecting = switching || connState is DshConnection.State.Connecting,
                                             onConnect = { openRoot(Screen.Connect) },
                                             connection = connection,
                                             approvalCenter = approvalCenter,
-                                            onPending = { if (homeVerified && ready) navController.navigate(Screen.Pending.route) },
+                                            onPending = { if (ready) navController.navigate(Screen.Pending.route) },
                                             onSessionClick = { id -> openProtected(Screen.Session.createRoute(id)) },
                                             onSettings = { openRoot(Screen.Settings) },
                                             onUpgrade = { navController.navigate(Screen.Pro.route) },
@@ -277,7 +273,7 @@ fun AppNavigation(
                                 navArgument("focusSeq") { type = NavType.StringType; defaultValue = "" },
                             ),
                         ) {
-                            VerifiedPage(connection, activeId, ready, connState) {
+                            VerifiedPage(ready, connState) {
                                 SessionScreen(
                                     sessionId = it.arguments?.getString("sessionId") ?: "",
                                     connection = connection,
@@ -332,19 +328,11 @@ fun AppNavigation(
 /** Show the destination immediately. Start its data requests only after this computer confirms access. */
 @Composable
 private fun VerifiedPage(
-    connection: DshConnection,
-    profileId: String?,
     ready: Boolean,
     state: DshConnection.State,
     content: @Composable () -> Unit,
 ) {
-    var verified by remember(profileId, ready, state) { mutableStateOf(false) }
-    LaunchedEffect(profileId, ready, state) {
-        if (profileId != null && ready) {
-            verified = connection.confirmAccess(profileId)
-        }
-    }
-    if (verified && ready) content() else {
+    if (ready) content() else {
         Box(Modifier.fillMaxSize().testTag("session_page_loading"), contentAlignment = Alignment.Center) {
             if (state is DshConnection.State.Error) Text(state.message)
             else CircularProgressIndicator()
