@@ -94,9 +94,19 @@ fun ConnectScreen(
         if (result.resultCode == Activity.RESULT_OK) {
             val scanned = result.data?.getStringExtra("SCAN_RESULT")?.trim().orEmpty()
             if (scanned.isNotEmpty()) {
+                if (DirectLink.isDirectLink(scanned)) {
+                    // Direct QR carries the computer's key, so this LAN pairing is not trust-on-first-use.
+                    runCatching {
+                        val link = DirectLink.parse(scanned)
+                        link.profile(profiles.firstOrNull { it.connectionMode == "direct" && normalizeBaseUrl(it.url) == link.address })
+                    }.onSuccess { connectTo(it) }.onFailure {
+                        Toast.makeText(context, it.message ?: "直连二维码无效，请在电脑重新生成", Toast.LENGTH_LONG).show()
+                    }
+                    return@rememberLauncherForActivityResult
+                }
                 if (scanned.startsWith("dshremote:")) {
                     runCatching { PairingLink.parse(scanned) }.onSuccess { scanPreview = it }.onFailure {
-                        Toast.makeText(context, "连接信息无效或已过期，请在电脑重新生成二维码", Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, it.message ?: "连接信息无效或已过期，请在电脑重新生成二维码", Toast.LENGTH_LONG).show()
                     }
                     return@rememberLauncherForActivityResult
                 }
@@ -448,7 +458,7 @@ fun ConnectScreen(
                 confirmButton = { TextButton(onClick = {
                     runCatching { PairingLink.parse(pastedLink) }.onSuccess {
                         scanPreview = it; showPaste = false; pastedLink = ""
-                    }.onFailure { pasteError = "连接信息无效或已过期，请在电脑重新生成" }
+                    }.onFailure { pasteError = it.message ?: "连接信息无效或已过期，请在电脑重新生成" }
                 }) { Text("继续") } },
                 dismissButton = { TextButton(onClick = { showPaste = false; pastedLink = "" }) { Text("取消") } },
             )
@@ -482,6 +492,14 @@ fun ConnectScreen(
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         activeProfile?.deviceModel?.takeIf { it.isNotBlank() }?.let { Text("电脑：$it") }
+                        // Same code the computer shows next to the pairing code; a mismatch means someone is in between.
+                        val pin = activeProfile?.serverPin?.ifBlank { null }
+                            ?: connection.currentProfile()?.serverPin?.ifBlank { null }
+                            ?: activeProfile?.id?.let { ServerPinRegistry.observed(it) }
+                        if (!relayPairing && pin != null) Text(
+                            "安全码 ${SecureChannel.safetyCode(pin)}：请确认与电脑配对页面显示的一致，不一致时请取消。",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                         Text(
                             if (relayPairing) "请在电脑的 DeepSeek Harness「远程控制 → 添加 → 服务器连接」生成二维码，再扫码或粘贴临时连接信息。中转不再支持手填主机 ID 或六位码配对。"
                             else "请确认连接的电脑，并输入其 DeepSeek Harness「远程控制 → 添加 → 配对码直连」页面显示的 6 位配对码。",

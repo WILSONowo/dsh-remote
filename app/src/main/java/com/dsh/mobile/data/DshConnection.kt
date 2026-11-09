@@ -158,6 +158,12 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
                     if (version != null && VersionPolicy.evaluate(version) == VersionVerdict.OK && isCurrent(probe)) {
                         store.rememberHostVersion(profile, version)
                     }
+                    // Direct trust on first use: keep the key this computer just proved, so every later
+                    // connection (and the pairing that follows) must present the same one.
+                    if (profile.serverPin.isEmpty() && isCurrent(probe)) ServerPinRegistry.observed(profile.id)?.let { pin ->
+                        store.rememberServerPin(profile, pin)
+                        rememberObservedPin(profile.id, pin, probe)
+                    }
                     if (profile.paired && !verifyAccess(probe)) return@launch
                     ConnectionResult.Ok(version)
                 } catch (e: Exception) {
@@ -189,6 +195,13 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
                         break
                     }
                     is ConnectionResult.Fail -> {
+                        // A different computer key is never retried or silently accepted.
+                        val identity = generateSequence<Throwable>(result.e) { it.cause }
+                            .filterIsInstance<ServerIdentityChangedException>().firstOrNull()
+                        if (identity != null) {
+                            failPermanently(ConnectionErrorCode.TLS_CERT_FAILED, identity.message ?: "电脑身份已改变")
+                            break
+                        }
                         if (!RetryPolicy.isRecoverable(result.code)) {
                             failPermanently(result.code, result.e.message ?: result.code.name)
                             break
@@ -209,6 +222,14 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
     }
 
     @Synchronized private fun isCurrent(probe: AccessProbe) = generation == probe.generation
+
+    @Synchronized private fun rememberObservedPin(id: String, pin: String, probe: AccessProbe) {
+        if (generation == probe.generation && connectedProfile?.id == id && connectedProfile?.serverPin.isNullOrEmpty())
+            connectedProfile = connectedProfile?.copy(serverPin = pin)
+    }
+
+    /** Plain http(s) address of the outer hop (computer or relay) for reachability hints; never API traffic. */
+    fun reachabilityUrl(): String? = connectedProfile?.let { runCatching { it.reachabilityUrl() }.getOrNull() }
 
     private suspend fun verifyAccess(probe: AccessProbe): Boolean {
         if (!isCurrent(probe)) return false

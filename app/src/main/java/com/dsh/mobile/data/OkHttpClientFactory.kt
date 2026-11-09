@@ -72,8 +72,10 @@ object OkHttpClientFactory {
         // a freshly issued live credential with that stale snapshot.
         if (!cache.containsKey(profile.id))
             ChannelTokenRegistry.set(profile.id, profile.channelToken.ifBlank { null })
-        else if (cache[profile.id]?.profile?.connectionUrl() != profile.connectionUrl())
+        else if (cache[profile.id]?.profile?.connectionUrl() != profile.connectionUrl()) {
             ChannelTokenRegistry.set(profile.id, null)
+            ServerPinRegistry.clear(profile.id)
+        }
         cache[profile.id]?.takeIf { it.profile.copy(channelToken = profile.channelToken, paired = profile.paired) == profile }?.let { return it.unary to it.stream }
         val pair = ClientPair(
             profile = profile,
@@ -89,19 +91,44 @@ object OkHttpClientFactory {
         cache.remove(profileId)
     }
 
+    /**
+     * API client for one saved computer. Every connection is a pinned TLS session to the computer inside a WebSocket
+     * (SecureChannel); the profile's proxy, CA and self-signed settings apply only to that outer WebSocket hop.
+     */
     private fun newClient(profile: HostProfile, stream: Boolean): OkHttpClient {
         val endpoint = java.net.URI(profile.connectionUrl())
+        val outer = outerClient(profile)
+        return SecureChannel.client(outer, profile.transportUrl(), profile.serverPin.ifBlank { null }, ServerPinRegistry.slot(profile.id)) {
+            if (stream) {
+                connectTimeout(15, TimeUnit.SECONDS)
+                    .readTimeout(0, TimeUnit.MILLISECONDS)
+                    .pingInterval(20, TimeUnit.SECONDS)
+            } else {
+                connectTimeout(10, TimeUnit.SECONDS)
+                    .readTimeout(60, TimeUnit.SECONDS)
+                    .writeTimeout(15, TimeUnit.SECONDS)
+            }
+            // 设备 token：请求时从注册表动态取（配对下发后热生效），只发往本电脑的安全通道
+            addInterceptor { chain ->
+                val target = chain.request().url
+                val sameHost = target.host == endpoint.host && target.scheme == endpoint.scheme
+                val samePath = target.encodedPath.startsWith("/api/")
+                val token = if (sameHost && samePath) ChannelTokenRegistry.get(profile.id) else null
+                val req = if (token.isNullOrBlank()) chain.request()
+                else chain.request().newBuilder().header("Authorization", "Bearer $token").build()
+                chain.proceed(req)
+            }
+        }
+    }
+
+    /** Outer hop (direct computer port or relay). Also used by diagnostics for DNS/TCP/TLS checks. */
+    internal fun outerClient(profile: HostProfile): OkHttpClient {
         val builder = OkHttpClient.Builder().retryOnConnectionFailure(false)
             .followRedirects(false).followSslRedirects(false)
-        if (stream) {
-            builder.connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(0, TimeUnit.MILLISECONDS)
-                .pingInterval(20, TimeUnit.SECONDS)
-        } else {
-            builder.connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(60, TimeUnit.SECONDS)
-                .writeTimeout(15, TimeUnit.SECONDS)
-        }
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            // Keeps NAT bindings and proxies open; the relay's idle timer counts inner (TLS) bytes only.
+            .pingInterval(20, TimeUnit.SECONDS)
         val ca = profile.caCertUri
         if (profile.trustSelfSigned && profile.connectionMode == "direct") {
             val ctx = trustAllSslContext()
@@ -115,18 +142,6 @@ object OkHttpClientFactory {
         buildProxy(profile.proxy)?.let { builder.proxy(it) }
         profile.proxy?.takeIf { it.username.isNotBlank() }?.let { p ->
             builder.proxyAuthenticator(proxyAuthenticator(p.username, p.password))
-        }
-        // 远程通道 token：请求时从注册表动态取（配对下发后热生效；无 token 时不加头，
-        // 兼容未启用鉴权的旧 PC 端）
-        builder.addInterceptor { chain ->
-            val target = chain.request().url
-            val sameHost = target.host == endpoint.host && target.port == (if (endpoint.port >= 0) endpoint.port else if (endpoint.scheme == "https") 443 else 80)
-            val sameTransport = target.scheme == endpoint.scheme
-            val samePath = target.encodedPath.startsWith(endpoint.rawPath.trimEnd('/') + "/api/")
-            val token = if (sameHost && sameTransport && samePath) ChannelTokenRegistry.get(profile.id) else null
-            val req = if (token.isNullOrBlank()) chain.request()
-            else chain.request().newBuilder().header("Authorization", "Bearer $token").build()
-            chain.proceed(req)
         }
         return builder.build()
     }

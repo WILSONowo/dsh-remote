@@ -23,8 +23,14 @@ jobs:
         run: chmod +x gradlew
       - name: Test and assemble compact APK
         run: ./gradlew testDebugUnitTest assembleCompact --no-daemon --console=plain
+      # Attach SHA256SUMS to every Release next to the APK: the in-app updater refuses packages it cannot verify.
+      - name: Checksums
+        working-directory: app/build/outputs/apk/compact
+        run: sha256sum *.apk > SHA256SUMS && cat SHA256SUMS
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: app-compact-apk
-          path: app/build/outputs/apk/compact/*.apk
+          path: |
+            app/build/outputs/apk/compact/*.apk
+            app/build/outputs/apk/compact/SHA256SUMS

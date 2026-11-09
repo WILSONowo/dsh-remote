@@ -4,7 +4,7 @@ object ErrorMessages {
     fun reason(code: ConnectionErrorCode): String = when (code) {
         ConnectionErrorCode.DNS_UNREACHABLE -> "域名无法解析"
         ConnectionErrorCode.PORT_UNREACHABLE -> "端口不可达（连接被拒绝/超时）"
-        ConnectionErrorCode.TLS_CERT_FAILED -> "HTTPS 证书校验失败"
+        ConnectionErrorCode.TLS_CERT_FAILED -> "证书或电脑身份校验失败"
         ConnectionErrorCode.AUTH_FAILED -> "设备令牌或访问凭证无效（401/403）"
         ConnectionErrorCode.VERSION_MISMATCH -> "手机与电脑上的 DeepSeek Harness 版本不兼容"
         ConnectionErrorCode.PROXY_FAILED -> "代理不可达"
@@ -15,9 +15,9 @@ object ErrorMessages {
     fun advice(code: ConnectionErrorCode): String = when (code) {
         ConnectionErrorCode.DNS_UNREACHABLE -> "检查服务器地址中的域名；直连局域网电脑时也可填写其 IP 地址"
         ConnectionErrorCode.PORT_UNREACHABLE -> "直连：确认电脑上的 DeepSeek Harness 已启动，地址和端口正确；服务器中转：确认中转服务运行，手机可访问其地址和端口"
-        ConnectionErrorCode.TLS_CERT_FAILED -> "检查证书有效期及域名；使用自签名证书时，请在主机配置中导入 CA 证书。服务器中转必须校验证书，不能跳过"
+        ConnectionErrorCode.TLS_CERT_FAILED -> "服务器证书：检查有效期及域名，自签名证书请在主机配置中导入 CA，服务器中转不能跳过校验。电脑身份（安全码）不一致：如果电脑重装过插件，请删除这条记录后重新配对；否则可能有人在拦截连接，不要继续"
         ConnectionErrorCode.AUTH_FAILED -> "确认连接的是目标电脑。中转请重新扫码或粘贴电脑生成的临时连接信息，并在电脑确认；直连可使用配对码。若配置了额外的网关鉴权，请检查访问凭证"
-        ConnectionErrorCode.VERSION_MISMATCH -> "检查手机应用、电脑上的 DeepSeek Harness 与远程控制插件是否为兼容版本"
+        ConnectionErrorCode.VERSION_MISMATCH -> "检查手机应用、电脑上的 DeepSeek Harness 与远程控制插件是否为兼容版本。端到端加密需要远程控制插件 4.0、服务器后端 3.0 或以上"
         ConnectionErrorCode.PROXY_FAILED -> "检查代理地址/端口/账号，或关闭该主机的代理"
         ConnectionErrorCode.PROTOCOL_ERROR -> "直连地址应指向电脑的 DeepSeek Harness 服务；服务器中转请检查电脑插件的连接状态，或重新扫描电脑生成的二维码（电脑离线时会返回 503）。仍失败可导出日志排查"
         ConnectionErrorCode.UNKNOWN -> "导出日志排查"

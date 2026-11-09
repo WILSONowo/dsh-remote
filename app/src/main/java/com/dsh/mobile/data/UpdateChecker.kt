@@ -20,6 +20,8 @@ data class ReleaseAsset(
     val name: String = "",
     val size: Long = 0,
     @SerialName("browser_download_url") val browserDownloadUrl: String = "",
+    /** GitHub-computed "sha256:<hex>" for assets uploaded since mid-2025. */
+    val digest: String? = null,
 )
 
 /** GitHub Releases latest 响应子集 */
@@ -242,11 +244,34 @@ object UpdateChecker {
     }
 
     /**
+     * Expected SHA-256 of [asset]: GitHub's digest, else the release's SHA256SUMS entry. Null when neither is
+     * available, in which case the download is refused (fail closed).
+     */
+    suspend fun expectedSha256(info: ReleaseInfo, asset: ReleaseAsset): String? = withContext(Dispatchers.IO) {
+        UpdateIntegrity.fromDigest(asset.digest)?.let { return@withContext it }
+        val sums = info.assets.firstOrNull { it.name == UpdateIntegrity.SUMS_FILE } ?: return@withContext null
+        for (prefix in UpdateMirrors.apkDownloadMirrors(lastMirror)) {
+            val url = if (prefix.isEmpty()) sums.browserDownloadUrl else prefix + sums.browserDownloadUrl
+            val text = runCatching {
+                client.newCall(Request.Builder().url(url).header("User-Agent", USER_AGENT).build()).execute().use { resp ->
+                    val body = resp.body
+                    if (!resp.isSuccessful || body == null || body.contentLength() > 65_536) null
+                    else body.source().let { source -> source.request(65_537); if (source.buffer.size > 65_536) null else source.readUtf8() }
+                }
+            }.getOrNull() ?: continue
+            UpdateIntegrity.fromSums(text, asset.name)?.let { return@withContext it }
+        }
+        null
+    }
+
+    /**
      * 下载事件流：连接镜像 → 实时进度（含速度）→ 成功。
      * 仅在镜像真坏（停滞 30s / 宽限期后均速 <20KB/s / 网络错误）时发 failed 并自动切下一个；
      * 慢速但持续下载中不换源。全部失败以异常结束。collect 的协程上下文决定执行线程。
      */
-    fun downloadApkFlow(url: String, dest: File): Flow<DownloadEvent> = flow {
+    fun downloadApkFlow(url: String, dest: File, expectedSha256: String?): Flow<DownloadEvent> = flow {
+        // Fail closed: mirrors are third parties, so an unverifiable package is never offered for install.
+        if (expectedSha256 == null) throw IOException("缺少安装包校验值，已停止更新。请到 GitHub Releases 手动下载")
         var lastErr: IOException? = null
         val tmp = File(dest.parentFile, dest.name + ".part")
         UpdateMirrors.apkDownloadMirrors(lastMirror).forEachIndexed { index, prefix ->
@@ -264,6 +289,8 @@ object UpdateChecker {
                     )
                 }
                 if (tmp.length() > 0) {
+                    // A mismatch from one mirror moves on to the next source; the bad file is discarded.
+                    UpdateIntegrity.verify(tmp, expectedSha256)
                     tmp.renameTo(dest)
                     saveLastMirror(prefix)
                     emit(DownloadEvent(PHASE_DONE, index, name, target, 1f))
@@ -283,9 +310,9 @@ object UpdateChecker {
      * onProgress 回调 0..1（主线程安全：调用方自行切线程更新 UI）。
      * 全部失败抛 IOException（含最后一个错误）。
      */
-    suspend fun downloadApk(url: String, dest: File, onProgress: (Float) -> Unit) {
+    suspend fun downloadApk(url: String, dest: File, expectedSha256: String?, onProgress: (Float) -> Unit) {
         withContext(Dispatchers.IO) {
-            downloadApkFlow(url, dest).collect { ev ->
+            downloadApkFlow(url, dest, expectedSha256).collect { ev ->
                 if (ev.phase == PHASE_DOWNLOADING) onProgress(ev.progress)
             }
         }

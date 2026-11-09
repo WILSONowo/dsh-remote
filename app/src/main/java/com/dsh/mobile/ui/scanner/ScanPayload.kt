@@ -10,7 +10,7 @@ object ScanPayload {
             runCatching {
                 val uri = URI(raw)
                 when (uri.scheme) {
-                    "dshremote" -> uri.host == "pair" && uri.userInfo == null && uri.port == -1 && uri.path.isNullOrEmpty() && uri.query == null && !uri.rawFragment.isNullOrEmpty()
+                    "dshremote" -> uri.host in setOf("pair", "direct") && uri.userInfo == null && uri.port == -1 && uri.path.isNullOrEmpty() && uri.query == null && !uri.rawFragment.isNullOrEmpty()
                     "http", "https" -> !uri.host.isNullOrBlank() && uri.userInfo == null && uri.query == null && uri.fragment == null
                     else -> false
                 }

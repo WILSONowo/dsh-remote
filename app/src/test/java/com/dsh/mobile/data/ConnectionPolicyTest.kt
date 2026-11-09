@@ -106,4 +106,17 @@ class ConnectionPolicyTest {
         assertEquals(ConnectionErrorCode.PROTOCOL_ERROR, ErrorClassifier.fromHttpStatus(500))
         assertEquals(ConnectionErrorCode.PROTOCOL_ERROR, ErrorClassifier.fromHttpStatus(404))
     }
+
+    @Test
+    fun secureChannelRefusalsMapToActionableCodes() {
+        fun code(status: Int) = ErrorClassifier.fromException(SecureTransportException(status, "x"), connectPhase = true, hasProxy = false)
+        assertEquals(ConnectionErrorCode.VERSION_MISMATCH, code(404))
+        assertFalse(RetryPolicy.isRecoverable(code(404)))
+        assertEquals(ConnectionErrorCode.PORT_UNREACHABLE, code(503))
+        assertTrue(RetryPolicy.isRecoverable(code(503)))
+        assertEquals(ConnectionErrorCode.AUTH_FAILED, code(403))
+        assertEquals(ConnectionErrorCode.PROTOCOL_ERROR, code(429))
+        val changed = SSLHandshakeException("handshake").apply { initCause(ServerIdentityChangedException("a".repeat(64), "b".repeat(64))) }
+        assertEquals(ConnectionErrorCode.TLS_CERT_FAILED, ErrorClassifier.fromException(changed, connectPhase = true, hasProxy = false))
+    }
 }

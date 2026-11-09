@@ -8,6 +8,14 @@ class LanPairingTargetTest {
     private val attrs = mapOf("v" to "1", "session" to "a".repeat(32), "name" to "Synthetic computer", "tls" to "0")
     private fun ip(a: Int, b: Int, c: Int, d: Int) = InetAddress.getByAddress(byteArrayOf(a.toByte(), b.toByte(), c.toByte(), d.toByte()))
 
+    @Test fun advertisedKeyPinIsKeptOnlyWhenWellFormed() {
+        val ips = listOf(ip(192, 0, 2, 10))
+        assertEquals("c".repeat(64), lanPairingTarget(attrs + ("pin" to "c".repeat(64)), 7941, ips)!!.pin)
+        assertNull(lanPairingTarget(attrs + ("pin" to "C".repeat(64)), 7941, ips)!!.pin)
+        assertNull(lanPairingTarget(attrs + ("pin" to "c".repeat(63)), 7941, ips)!!.pin)
+        assertNull(lanPairingTarget(attrs, 7941, ips)!!.pin)
+    }
+
     @Test fun resolvesDynamicPortAndDeduplicatesMultipleInterfaces() {
         val target = lanPairingTarget(attrs + ("ipv4" to "192.0.2.10,192.0.2.11"), 17421, listOf(ip(192, 0, 2, 10)))!!
         assertEquals(listOf("http://192.0.2.10:17421", "http://192.0.2.11:17421"), target.urls)

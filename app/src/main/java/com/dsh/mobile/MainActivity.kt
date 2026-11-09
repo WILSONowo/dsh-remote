@@ -359,7 +359,8 @@ private fun UpdatePromptOverlay(context: android.content.Context) {
         val target = File(context.cacheDir, "update/" + asset.name)
         scope.launch {
             try {
-                UpdateChecker.downloadApkFlow(asset.browserDownloadUrl, target)
+                val expected = UpdateChecker.expectedSha256(r, asset)
+                UpdateChecker.downloadApkFlow(asset.browserDownloadUrl, target, expected)
                     .flowOn(Dispatchers.IO)
                     .collect { e ->
                         ev = e

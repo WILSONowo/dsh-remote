@@ -9,6 +9,12 @@
 
 电脑插件的 SDK 和后端联调见 [插件测试说明](https://github.com/WILSONowo/dsh-remote-access/blob/main/docs/testing.md)。
 
+## 端到端安全通道
+
+`SecureChannelTest`、`PairingLinkTest`、`RelayProfileTest` 与插件共用合成向量：`pairing-compact.json`（v3 服务器二维码与直连二维码）和 `secure-channel-vector.json`（插件生成的自签名证书、指纹与安全码）。修改二维码格式、指纹算法或证书生成时，在插件仓库重新生成这两个文件并同步到 `app/src/test/resources/`。
+
+外层传输适配器（`WebSocketTransportSocket`）需要真实的插件与后端，单元测试不覆盖。发布前用 JVM 客户端对本机回环的插件直连入口和后端 `/relay/v2/connect` 联调：首次信任记录指纹、配对码配对、3 MiB 往返、内层 WebSocket、连接池复用、错误指纹拒绝、旧后端 404。真机还需检查 Android（Conscrypt）上的握手、切换网络后重连，以及长时间后台后的事件流。
+
 ## Android 扫码真机检查
 
 扫码模型随 APK 内置。单元测试验证连接信息筛选，不代表相机识别效果。真机需检查直连和服务器二维码、远近距离、横竖屏、补光、点击对焦、多个二维码、首次权限拒绝后重试，以及切到后台再返回。使用合成二维码测试识别；只有显式指定测试服务器后才执行实际配对。不保存相机帧或打印配对内容。

@@ -13,14 +13,19 @@ import javax.net.ssl.SSLSocketFactory
 
 data class DiagStep(val name: String, val ok: Boolean, val detail: String?, val elapsedMs: Long)
 
+/**
+ * DNS / TCP / TLS check the outer hop (the computer's port or the relay). The last step opens the end-to-end
+ * channel itself, which verifies the computer's key, and asks for the host version through it.
+ */
 suspend fun runDiagnostics(profile: HostProfile): List<DiagStep> = withContext(Dispatchers.IO) {
-    // 防御性规范化：与连接/保存共用同一 URL 语义，避免 URI(url) 对无协议地址直接失败
-    val normalized = profile
-    val endpoint = profile.connectionUrl()
     val steps = mutableListOf<DiagStep>()
-    val uri = runCatching { URI(endpoint) }.getOrNull()
+    val outer = runCatching { profile.reachabilityUrl() }.getOrElse {
+        steps += DiagStep("连接设置", false, it.message, 0)
+        return@withContext steps
+    }
+    val uri = runCatching { URI(outer) }.getOrNull()
     val host = uri?.host ?: ""
-    val https = endpoint.startsWith("https://")
+    val https = outer.startsWith("https://")
     val port = uri?.port?.takeIf { it > 0 } ?: if (https) 443 else 80
 
     // 1. DNS
@@ -38,11 +43,10 @@ suspend fun runDiagnostics(profile: HostProfile): List<DiagStep> = withContext(D
         "已连接 $host:$port"
     }
 
-    // 3. TLS（仅 https）
+    // 3. Outer TLS (https direct address or relay server certificate)
     if (https) {
         steps += timed("TLS 握手") {
-            val (unary, _) = OkHttpClientFactory.build(normalized)
-            val sf = unary.sslSocketFactory
+            val sf = OkHttpClientFactory.outerClient(profile).sslSocketFactory
             ((sf as SSLSocketFactory).createSocket(host, port) as SSLSocket).use { s ->
                 s.startHandshake()
             }
@@ -50,22 +54,24 @@ suspend fun runDiagnostics(profile: HostProfile): List<DiagStep> = withContext(D
         }
     }
 
-    // 4. host.describe 版本探测
-    steps += timed("版本探测") {
-        val (unary, _) = OkHttpClientFactory.build(normalized)
+    // 4. End-to-end channel to the computer + host.describe inside it
+    steps += timed("端到端加密与版本探测") {
+        val (unary, _) = OkHttpClientFactory.build(profile)
         val rpcId = "diag-" + java.util.UUID.randomUUID()
         val body = """{"type":"client-request","rpcId":"$rpcId","method":"host.describe","payload":{}}"""
             .toRequestBody("application/json".toMediaType())
-        val req = Request.Builder().url(endpoint + "/api/host.describe").post(body).build()
+        val req = Request.Builder().url(profile.connectionUrl() + "/api/host.describe").post(body).build()
         unary.newCall(req).execute().use { resp ->
             val text = resp.body?.string() ?: ""
             if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
             val version = Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)
-            version?.let { "主机版本 $it" } ?: "版本字段缺失（视为未知）"
+            val pin = profile.serverPin.ifBlank { null } ?: ServerPinRegistry.observed(profile.id)
+            val safety = pin?.let { "安全码 ${SecureChannel.safetyCode(it)}" } ?: "已加密"
+            "$safety；" + (version?.let { "主机版本 $it" } ?: "版本字段缺失（视为未知）")
         }
     }
 
-    OkHttpClientFactory.release(normalized.id)
+    OkHttpClientFactory.release(profile.id)
     steps
 }
 

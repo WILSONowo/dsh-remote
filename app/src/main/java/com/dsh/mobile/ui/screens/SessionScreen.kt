@@ -1176,7 +1176,8 @@ fun SessionScreen(
             LaunchedEffect(notice) {
                 diag = withContext(Dispatchers.IO) {
                     val code = runCatching {
-                        val req = okhttp3.Request.Builder().url(connection.baseUrl()).head().build()
+                        // Probe the outer hop (computer port or relay); API traffic only exists inside the secure channel.
+                        val req = okhttp3.Request.Builder().url(connection.reachabilityUrl()!!).head().build()
                         okhttp3.OkHttpClient.Builder()
                             .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                             .build()

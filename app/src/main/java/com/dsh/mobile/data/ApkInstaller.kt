@@ -25,6 +25,7 @@ object ApkInstaller {
      */
     fun install(context: Context, apk: File): String? {
         if (!apk.exists() || apk.length() == 0L) return "安装包不存在或为空"
+        signerMismatch(context, apk)?.let { return it }
 
         // ── 策略 1/2：FileProvider → 系统安装器 ──
         val uri = runCatching {
@@ -50,6 +51,29 @@ object ApkInstaller {
 
         // ── 策略 3：PackageInstaller 会话安装（同签名自更新兜底）──
         return installViaSession(context, apk)
+    }
+
+    /**
+     * Rejects a package for another app or signed by an unrelated key before the system installer is shown.
+     * Only a definite mismatch is rejected: if signatures cannot be read here, Android's own same-signer rule
+     * for upgrades still applies.
+     */
+    private fun signerMismatch(context: Context, apk: File): String? {
+        val pm = context.packageManager
+        val flags = android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+        val archive = runCatching { pm.getPackageArchiveInfo(apk.absolutePath, flags) }.getOrNull() ?: return null
+        if (archive.packageName != context.packageName) return "安装包不是本应用（${archive.packageName}），已拒绝安装"
+        val installed = runCatching { pm.getPackageInfo(context.packageName, flags) }.getOrNull() ?: return null
+        val mine = installed.signingInfo?.let(::signerDigests).orEmpty()
+        val theirs = archive.signingInfo?.let(::signerDigests).orEmpty()
+        if (mine.isEmpty() || theirs.isEmpty()) return null
+        return if (mine.any { it in theirs }) null
+        else "安装包签名与当前应用不一致，可能被篡改，已拒绝安装。请到 GitHub Releases 手动下载并核对"
+    }
+
+    private fun signerDigests(info: android.content.pm.SigningInfo): Set<String> {
+        val certs = if (info.hasMultipleSigners()) info.apkContentsSigners else info.signingCertificateHistory
+        return certs.orEmpty().map { UpdateIntegrity.sha256Bytes(it.toByteArray()) }.toSet()
     }
 
     /** PackageInstaller 会话安装；成功返回 null，失败返回错误信息 */

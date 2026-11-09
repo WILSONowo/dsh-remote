@@ -56,6 +56,13 @@ object RetryPolicy {
 
 object ErrorClassifier {
     fun fromException(t: Throwable, connectPhase: Boolean, hasProxy: Boolean): ConnectionErrorCode {
+        // The outer hop (computer port or relay) answered the secure-channel upgrade with an HTTP status.
+        if (t is SecureTransportException) return when (t.status) {
+            404 -> ConnectionErrorCode.VERSION_MISMATCH  // plugin < 4.0 or backend < 3.0
+            401, 403 -> ConnectionErrorCode.AUTH_FAILED
+            503 -> ConnectionErrorCode.PORT_UNREACHABLE  // computer offline or remote access paused
+            else -> ConnectionErrorCode.PROTOCOL_ERROR
+        }
         if (t is UnknownHostException) return ConnectionErrorCode.DNS_UNREACHABLE
         if (t is ConnectException) {
             return if (hasProxy) ConnectionErrorCode.PROXY_FAILED else ConnectionErrorCode.PORT_UNREACHABLE

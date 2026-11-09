@@ -6,7 +6,16 @@
     "computerId": "00000000-0000-4000-8000-000000000001",
     "name": "示例电脑 · Lab",
     "ticket": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-    "expiresAt": 1800000120000
+    "expiresAt": 1800000120000,
+    "pin": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
   },
-  "link": "dshremote://pair#2.AAABoxheJMAAESIzRFVmd4iZqrvM3e7_AAAAAAAAQACAAAAAAAAAAQABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fABpodHRwczovL3JlbGF5LmV4YW1wbGUudGVzdAAT56S65L6L55S16ISRIMK3IExhYg"
+  "link": "dshremote://pair#3.AAABoxheJMAAESIzRFVmd4iZqrvM3e7_AAAAAAAAQACAAAAAAAAAAQABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8AGmh0dHBzOi8vcmVsYXkuZXhhbXBsZS50ZXN0ABPnpLrkvovnlLXohJEgwrcgTGFi",
+  "direct": {
+    "payload": {
+      "address": "http://192.0.2.10:8787",
+      "name": "示例电脑 · Lab",
+      "pin": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+    },
+    "link": "dshremote://direct#1.ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8AFmh0dHA6Ly8xOTIuMC4yLjEwOjg3ODcAE-ekuuS-i-eUteiEkSDCtyBMYWI"
+  }
 }

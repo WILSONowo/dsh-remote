@@ -1010,7 +1010,8 @@ private fun UpdateSection(
             val target = File(context.cacheDir, "update/" + asset.name)
             scope.launch {
                 try {
-                    UpdateChecker.downloadApk(asset.browserDownloadUrl, target) { p -> progress = p }
+                    val expected = info?.let { UpdateChecker.expectedSha256(it, asset) }
+                    UpdateChecker.downloadApk(asset.browserDownloadUrl, target, expected) { p -> progress = p }
                     apkFile = target
                     phase = "downloaded"
                 } catch (e: Exception) {

@@ -155,6 +155,17 @@ class SettingsStore(
         }
     }
 
+    /** Records the key a direct computer presented on first use. Never replaces an existing pin. */
+    suspend fun rememberServerPin(profile: HostProfile, pin: String) {
+        if (!SecureChannel.isPin(pin) || profile.connectionMode != "direct") return
+        context.dataStore.edit { prefs ->
+            val rows = ProfileCodec.decode(prefs[PROFILE_LIST_KEY] ?: "")
+            val row = rows.firstOrNull { it.id == profile.id } ?: return@edit
+            if (row.serverPin.isNotEmpty() || !sameComputerRecord(row, profile)) return@edit
+            prefs[PROFILE_LIST_KEY] = ProfileCodec.encode(rows.map { if (it.id == row.id) it.copy(serverPin = pin) else it })
+        }
+    }
+
     suspend fun markAttempt(profileId: String, errorCode: ConnectionErrorCode?) {
         context.dataStore.edit { prefs ->
             applyLegacyMigration(prefs)

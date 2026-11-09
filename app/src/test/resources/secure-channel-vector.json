@@ -1,0 +1,6 @@
+{
+  "note": "Synthetic test-only certificate from dsh-remote-access createSelfSignedCertificate; no private key kept.",
+  "cert": "-----BEGIN CERTIFICATE-----\nMIIBJjCBzqADAgECAhB9aiZ4jNqy8hfU67jIGp0wMAoGCCqGSM49BAMCMBUxEzAR\nBgNVBAMMCkRTSCBSZW1vdGUwIBcNMDAwMTAxMDAwMDAwWhgPOTk5OTEyMzEyMzU5\nNTlaMBUxEzARBgNVBAMMCkRTSCBSZW1vdGUwWTATBgcqhkjOPQIBBggqhkjOPQMB\nBwNCAATnqXpf8yKsIt+DueDcUYigA1lh1FL6wzVwkcYuQaRZuPCMdHkY37HYVF/N\nJ4MB0jW4YuZED/FiYE0hSnaTvD6pMAoGCCqGSM49BAMCA0cAMEQCIC7W2xuQ3kTG\nmbsz96qVcAR9zQYg0oGk/lj6lN/VSFYRAiBroPcqowlIP6OoEzCMARGnppMJSb6k\n8PJ+xFFhcFoJVg==\n-----END CERTIFICATE-----\n",
+  "pin": "757639b22b07d29b6f5171f74fbfd0e010dbf5e37b83d105b73e9347aecbe2d7",
+  "safetyCode": "7576-39B2-2B07"
+}

@@ -10,10 +10,14 @@ import java.net.Proxy
 class OkHttpClientFactoryTest {
 
     @Test
-    fun relayCredentialStaysWithinHostPathAndSurvivesStaleProfile() {
+    fun relayCredentialStaysWithinTheComputersSecureOriginAndSurvivesStaleProfile() {
         val profile = HostProfile(id = "token-scope-test", remark = "test", url = "",
-            connectionMode = "relay", computerId = "00000000-0000-4000-8000-000000000001", relayServerUrl = "https://relay.example", relayHostId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            connectionMode = "relay", computerId = "00000000-0000-4000-8000-000000000001", relayServerUrl = "https://relay.example",
+            relayHostId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", serverPin = "c".repeat(64))
+        val origin = profile.connectionUrl()
+        val other = profile.copy(relayHostId = "b".repeat(32)).connectionUrl()
         val client = OkHttpClientFactory.build(profile).first
+        assertTrue(client.x509TrustManager is PinnedTrustManager)
         OkHttpClientFactory.ChannelTokenRegistry.set(profile.id, "fresh-token")
         OkHttpClientFactory.build(profile) // old Compose snapshot must not erase the new token
         fun tokenAt(url: String): String? {
@@ -26,10 +30,11 @@ class OkHttpClientFactoryTest {
             probe.newCall(okhttp3.Request.Builder().url(url).build()).execute().close()
             return sent
         }
-        assertEquals("Bearer fresh-token", tokenAt("https://relay.example/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/api/session.list"))
-        assertNull(tokenAt("https://relay.example/h/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/api/session.list"))
-        assertNull(tokenAt("https://another.example/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/api/session.list"))
-        assertNull(tokenAt("http://relay.example/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/api/session.list"))
+        assertEquals("Bearer fresh-token", tokenAt("$origin/api/session.list"))
+        assertNull(tokenAt("$other/api/session.list"))
+        assertNull(tokenAt("https://relay.example/api/session.list"))
+        assertNull(tokenAt(origin.replace("https:", "http:") + "/api/session.list"))
+        assertNull(tokenAt("$origin/not-api"))
         assertTrue(!client.followRedirects)
         assertTrue(!client.retryOnConnectionFailure)
         OkHttpClientFactory.build(profile.copy(relayHostId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))

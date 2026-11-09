@@ -221,7 +221,9 @@ fun HostProfileScreen(profileId: String?, connection: DshConnection, onBack: () 
                     val previous = saved.firstOrNull { it.connectionMode == "direct" && normalizeBaseUrl(it.url) == address }
                     val profile = (previous ?: HostProfile(id = UUID.randomUUID().toString(), remark = "", url = address))
                         .copy(remark = remark.trim().ifBlank { previous?.remark.orEmpty() },
-                            deviceModel = previous?.deviceModel?.ifBlank { target.name } ?: target.name, autoConnect = true)
+                            deviceModel = previous?.deviceModel?.ifBlank { target.name } ?: target.name, autoConnect = true,
+                            // A recorded key always wins; the advertised one only seeds first use (shown as a safety code).
+                            serverPin = previous?.serverPin?.ifBlank { null } ?: target.pin.orEmpty())
                     connection.disconnect()
                     (context.applicationContext as? DshApplication)?.pairingCoordinator?.prepareDiscovery(profile, target.session)
                     saved.filter { it.autoConnect && it.id != profile.id }.forEach { settingsStore.upsertProfile(it.copy(autoConnect = false)) }

@@ -2,8 +2,11 @@ package com.dsh.mobile.data
 
 import java.net.InetAddress
 
-/** Untrusted, short-lived discovery data. Never a saved identity or an access credential. */
-data class LanPairingTarget(val session: String, val name: String, val urls: List<String>)
+/**
+ * Untrusted, short-lived discovery data. Never an access credential. [pin] (the computer's key hash from the TXT
+ * record) only seeds trust on first use for a new record; the safety code lets the user compare it with the computer.
+ */
+data class LanPairingTarget(val session: String, val name: String, val urls: List<String>, val pin: String? = null)
 
 fun lanPairingTarget(attributes: Map<String, String>, port: Int, addresses: List<InetAddress>): LanPairingTarget? {
     val session = attributes["session"].orEmpty()
@@ -24,7 +27,8 @@ fun lanPairingTarget(attributes: Map<String, String>, port: Int, addresses: List
             val literal = if (host.contains(':')) "[${host.replace("%", "%25")}]" else host
             "$scheme://$literal:$port"
         } }.distinct().take(8)
-    return urls.takeIf { it.isNotEmpty() }?.let { LanPairingTarget(session, name, it) }
+    val pin = attributes["pin"]?.takeIf { SecureChannel.isPin(it) }
+    return urls.takeIf { it.isNotEmpty() }?.let { LanPairingTarget(session, name, it, pin) }
 }
 
 fun mergeLanTargets(previous: LanPairingTarget?, next: LanPairingTarget): LanPairingTarget =

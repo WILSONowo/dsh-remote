@@ -48,14 +48,20 @@ data class HostProfile(
     val relayHostId: String = "",
     /** Last verified host.describe version for this computer, never the plugin version. */
     val lastHostVersion: String? = null,
+    /**
+     * SHA-256 of the computer's TLS public key (docs/e2e-secure-channel.md). From the QR for server and scanned
+     * direct records; recorded on first connection (trust on first use) for manually entered direct addresses.
+     */
+    val serverPin: String = "",
 )
 
-/** One endpoint for RPC, pairing, uploads and WS/SSE; no separately concatenated relay paths. */
-fun HostProfile.connectionUrl(): String {
+/** Plain http(s) address of the outer hop: the computer itself (direct) or the relay server. Never carries API data. */
+fun HostProfile.reachabilityUrl(): String {
     if (connectionMode == "direct") {
         val normalized = normalizeBaseUrl(url)
         val uri = java.net.URI(normalized)
         require(uri.scheme in listOf("http", "https") && !uri.host.isNullOrBlank() && uri.userInfo == null && uri.query == null && uri.fragment == null) { "请输入有效的 DeepSeek Harness 地址" }
+        require(serverPin.isEmpty() || SecureChannel.isPin(serverPin)) { "电脑身份记录无效，请删除后重新配对" }
         return normalized
     }
     require(connectionMode == "relay") { "未知连接模式" }
@@ -63,12 +69,29 @@ fun HostProfile.connectionUrl(): String {
     require(uri.scheme == "https" && !uri.host.isNullOrBlank() && uri.userInfo == null && uri.query == null && uri.fragment == null && uri.path in listOf("", "/")) { "中转服务器请填写 HTTPS 地址，不带路径或账号" }
     require(Regex("[a-f0-9]{32}").matches(relayHostId) && Regex("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}").matches(computerId)) { "旧版或无效的中转记录，请删除后扫描电脑生成的新二维码" }
     require(!trustSelfSigned) { "中转连接必须校验证书，可导入受信 CA" }
-    return relayServerUrl.trim().trimEnd('/') + "/h/" + relayHostId
+    // Trust through an untrusted relay must come from the QR, never from first use.
+    require(SecureChannel.isPin(serverPin)) { "这条服务器记录缺少端到端加密信息，请在电脑重新生成二维码后扫码" }
+    return relayServerUrl.trim().trimEnd('/')
 }
+
+/** Outer WebSocket that carries the pinned TLS stream: the computer's secure entry or the relay's byte splice. */
+fun HostProfile.transportUrl(): String {
+    val base = reachabilityUrl()
+    return if (connectionMode == "direct") base.replaceFirst(Regex("^http"), "ws") + "/api/remote-access/secure"
+    else base.replaceFirst(Regex("^https"), "wss") + "/relay/v2/connect/" + relayHostId
+}
+
+/**
+ * One endpoint for RPC, pairing, uploads and WS/SSE. It is a synthetic https origin that only resolves inside
+ * the secure channel (see OkHttpClientFactory); it changes whenever the transport changes.
+ */
+fun HostProfile.connectionUrl(): String = "https://" + SecureChannel.syntheticHost(transportUrl())
 
 fun resetPairingIfEndpointChanged(previous: HostProfile?, next: HostProfile): HostProfile =
     if (previous != null && runCatching { previous.connectionUrl() }.getOrNull() != runCatching { next.connectionUrl() }.getOrNull())
-        next.copy(paired = false, channelToken = "", deviceModel = "", deviceMac = "", computerId = "", lastHostVersion = null)
+        next.copy(paired = false, channelToken = "", deviceModel = "", deviceMac = "", computerId = "", lastHostVersion = null,
+            // A direct address edit may point at another computer: forget its key unless a fresh one came with the edit (QR).
+            serverPin = if (next.connectionMode == "relay" || next.serverPin != previous.serverPin) next.serverPin else "")
     else next
 
 /**
@@ -100,8 +123,8 @@ object ProfileCodec {
 private fun <T> ListSerializer(element: kotlinx.serialization.KSerializer<T>) =
     kotlinx.serialization.builtins.ListSerializer(element)
 
-/** Only transport, trust and pairing changes require a new connection. */
+/** Only transport, trust and pairing changes require a new connection. Recording a first-use pin is not one. */
 internal fun HostProfile.sameConnection(other: HostProfile) =
     copy(remark = other.remark, autoConnect = other.autoConnect, lastUsedAt = other.lastUsedAt,
         lastErrorCode = other.lastErrorCode, deviceModel = other.deviceModel,
-        lastHostVersion = other.lastHostVersion) == other
+        lastHostVersion = other.lastHostVersion, serverPin = if (serverPin.isEmpty()) other.serverPin else serverPin) == other
