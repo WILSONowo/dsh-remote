@@ -254,6 +254,7 @@ object DshEventTypes {
     const val TOOL_RESULT = "tool/result"
     const val TURN_START = "turn/start"
     const val TURN_END = "turn/end"
+    const val TODO_WRITE = "todo/write"
     const val SESSION_TITLE = "session/title"
     const val AGENT_ERROR = "agent/error"
     // Mux 帧

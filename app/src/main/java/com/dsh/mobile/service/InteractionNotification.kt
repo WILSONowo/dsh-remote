@@ -15,6 +15,7 @@ import java.util.UUID
 
 internal const val INTERACT = "com.dsh.mobile.NOTIFICATION_INTERACTION"
 internal const val REPLY_TEXT = "reply"
+internal const val STOP_SESSION = "com.dsh.mobile.NOTIFICATION_STOP_SESSION"
 
 internal data class Interaction(
     val session: String,

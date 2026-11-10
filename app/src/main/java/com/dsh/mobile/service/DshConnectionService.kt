@@ -2,6 +2,14 @@ package com.dsh.mobile.service
 
 import kotlinx.coroutines.flow.combine
 import com.dsh.mobile.data.shortSessionId
+import com.dsh.mobile.data.SessionEventWire
+import com.dsh.mobile.data.TurnReport
+import com.dsh.mobile.data.sessionTitleOf
+import com.dsh.mobile.data.shouldNotify
+import com.dsh.mobile.data.turnReportBody
+import com.dsh.mobile.data.turnReportHeadline
+import com.dsh.mobile.data.turnReportOf
+import kotlinx.coroutines.withTimeout
 import com.dsh.mobile.data.computerScope
 
 import android.app.Notification
@@ -51,6 +59,7 @@ class DshConnectionService : Service() {
     private val pending = mutableMapOf<Pair<String, String?>, Interaction>()
     private val processingNonces = mutableSetOf<String>()
     private val pendingTag = "dsh-interaction"
+    private val runningTag = "dsh-running"
 
     private fun removeInteraction(key: Pair<String, String?>) {
         val item = pending.remove(key) ?: return
@@ -109,6 +118,16 @@ class DshConnectionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == STOP_SESSION) {
+            val sessionId = intent.data?.lastPathSegment
+            val connection = watcher
+            if (sessionId == null || connection == null) {
+                if (watchJob == null) stopSelf(startId)
+                return START_NOT_STICKY
+            }
+            scope.launch { stopSession(connection, sessionId) }
+            return START_STICKY
+        }
         if (intent?.action == INTERACT) {
             if (watchJob == null) {
                 stopSelf(startId)
@@ -147,6 +166,7 @@ class DshConnectionService : Service() {
                 stateJob?.cancel()
                 watcher = null
                 clearInteractions()
+                sessionActive.keys.toList().forEach(::cancelRunning)
                 sessionActive.clear()
                 completionJobs.values.forEach { it.cancel() }
                 completionJobs.clear()
@@ -274,48 +294,129 @@ class DshConnectionService : Service() {
         }
     }
 
-    /** 运行态跟踪：进入运行清掉完成防抖；转空闲后 8 秒确认（避免任务间空隙误报）再通知完成 */
+    /**
+     * 运行态跟踪：进入运行时清掉完成防抖，并在后台显示「正在运行」常驻通知（带停止按钮）；
+     * 转空闲后 8 秒确认（避免任务间空隙误报），再读本轮历史发出结果报告。
+     */
     private fun updateActivity(sessionId: String, active: Boolean) {
         val prev = sessionActive[sessionId] ?: false
         sessionActive[sessionId] = active
         if (active) {
             completionJobs.remove(sessionId)?.cancel()
+            if (!prev) scope.launch { postRunning(sessionId) }
         } else if (prev) {
             val job = scope.launch {
                 delay(8_000)
-                if (sessionActive[sessionId] != true) {
-                    // 分渠道开关 + 前台判定在防抖到期瞬间读取（期间用户可能已打开 App）
-                    val settings = SettingsStore(this@DshConnectionService)
-                    if (!shouldNotifyCompletion(
-                            settings.backgroundNotify.first(),
-                            settings.notifyCompletion.first(),
-                            DshApplication.isAppInForeground,
-                        )
-                    ) return@launch
-                    postAlert(
-                        "DeepSeek Harness 任务完成",
-                        "会话 " + shortSessionId(sessionId) + " 的执行已结束",
-                        sessionId,
-                        channelId = DshApplication.CHANNEL_COMPLETION,
-                    )
-                }
+                if (sessionActive[sessionId] == true) return@launch
+                cancelRunning(sessionId)
+                // 分渠道开关 + 前台判定在防抖到期瞬间读取（期间用户可能已打开 App）
+                if (!completionAllowed()) return@launch
+                val report = watcher?.let { fetchTurnReport(it, sessionId) }
+                if (sessionActive[sessionId] == true || !completionAllowed()) return@launch
+                if (report != null && !report.shouldNotify) return@launch
+                val name = report?.title ?: cachedTitle(sessionId) ?: ("会话 " + shortSessionId(sessionId))
+                val headline = report?.let(::turnReportHeadline) ?: "任务完成"
+                postAlert(
+                    "$headline · $name",
+                    report?.let(::turnReportBody)?.ifBlank { null } ?: "执行已结束",
+                    sessionId,
+                    channelId = DshApplication.CHANNEL_COMPLETION,
+                    publicText = headline,
+                )
             }
             completionJobs[sessionId] = job
+        }
+    }
+
+    private suspend fun completionAllowed(): Boolean {
+        val settings = SettingsStore(this)
+        return shouldNotifyCompletion(
+            settings.backgroundNotify.first(),
+            settings.notifyCompletion.first(),
+            DshApplication.isAppInForeground,
+        )
+    }
+
+    private fun cachedTitle(sessionId: String): String? =
+        watcher?.directory?.sessions?.state?.value?.value
+            ?.firstOrNull { it.sessionId == sessionId }
+            ?.let(::sessionTitleOf)
+
+    /** 读最近几页历史，直到找到本轮的 turn/start（最多 4 页）；失败返回 null，退回简单提醒 */
+    private suspend fun fetchTurnReport(connection: DshConnection, sessionId: String): TurnReport? = try {
+        withTimeout(15_000) {
+            val events = ArrayList<SessionEventWire>()
+            var before: Long? = null
+            var report: TurnReport? = null
+            for (page in 0 until 4) {
+                val history = connection.history(sessionId, beforeSeq = before, maxMessages = 15)
+                events.addAll(0, history.events.map { it.event })
+                report = turnReportOf(events)
+                if (report == null || report.complete || !history.hasMore) break
+                before = history.events.firstOrNull()?.event?.seq ?: break
+            }
+            report
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        if (e is kotlinx.coroutines.TimeoutCancellationException) null else throw e
+    } catch (_: Exception) {
+        null
+    }
+
+    /** 后台运行中的会话：常驻、静默、带计时和「停止」按钮；锁屏只显示「正在运行」 */
+    private suspend fun postRunning(sessionId: String) {
+        if (!completionAllowed() || sessionActive[sessionId] != true) return
+        val name = cachedTitle(sessionId) ?: ("会话 " + shortSessionId(sessionId))
+        val stop = Intent(this, DshConnectionService::class.java).setAction(STOP_SESSION)
+            .setData(android.net.Uri.Builder().scheme("dsh-notification").authority("stop")
+                .appendPath(sessionId).build())
+        val stopAction = Notification.Action.Builder(
+            null, "停止",
+            PendingIntent.getService(this, ("stop/$sessionId").hashCode(), stop, PendingIntent.FLAG_IMMUTABLE),
+        ).apply { if (android.os.Build.VERSION.SDK_INT >= 31) setAuthenticationRequired(true) }.build()
+        val publicVersion = Notification.Builder(this, DshApplication.CHANNEL_ID)
+            .setContentTitle("DeepSeek Harness 正在运行")
+            .setSmallIcon(com.dsh.mobile.R.drawable.ic_notification_dsh)
+            .build()
+        val notification = Notification.Builder(this, DshApplication.CHANNEL_ID)
+            .setContentTitle("正在运行 · $name")
+            .setContentText("可在这里停止本轮")
+            .setSmallIcon(com.dsh.mobile.R.drawable.ic_notification_dsh)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(true)
+            .setWhen(System.currentTimeMillis())
+            .setUsesChronometer(true)
+            .setProgress(0, 0, true)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicVersion)
+            .setContentIntent(openSessionIntent(sessionId, null))
+            .addAction(stopAction)
+            .build()
+        notificationManager().notify("$runningTag/$sessionId", 0, notification)
+    }
+
+    private fun cancelRunning(sessionId: String) {
+        notificationManager().cancel("$runningTag/$sessionId", 0)
+    }
+
+    private suspend fun stopSession(connection: DshConnection, sessionId: String) {
+        if (getSystemService(android.app.KeyguardManager::class.java).isDeviceLocked) return
+        try {
+            connection.cancel(sessionId)
+            android.widget.Toast.makeText(this, "已请求停止，等待本轮结束", android.widget.Toast.LENGTH_SHORT).show()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.widget.Toast.makeText(this, "停止失败：" + (e.message ?: "连接异常"), android.widget.Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun notificationManager(): NotificationManager =
         getSystemService(NotificationManager::class.java)
 
-    private fun postAlert(
-        title: String,
-        text: String,
-        sessionId: String? = null,
-        channelId: String = DshApplication.CHANNEL_APPROVALS,
-        interaction: Interaction? = null,
-        actionsEnabled: Boolean = false,
-    ) {
-        val manager = notificationManager()
+    /** 点通知打开对应会话（有待办时直达待办） */
+    private fun openSessionIntent(sessionId: String?, interaction: Interaction?): PendingIntent {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             if (sessionId != null) {
@@ -326,6 +427,24 @@ class DshConnectionService : Service() {
                 putExtra("open_computer", watcher?.currentProfile().computerScope())
             }
         }
+        return PendingIntent.getActivity(
+            this, (watcher?.currentProfile().computerScope() + sessionId).hashCode() and Int.MAX_VALUE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private fun postAlert(
+        title: String,
+        text: String,
+        sessionId: String? = null,
+        channelId: String = DshApplication.CHANNEL_APPROVALS,
+        interaction: Interaction? = null,
+        actionsEnabled: Boolean = false,
+        /** 锁屏上代替正文显示的文字；null 表示正文可以在锁屏显示 */
+        publicText: String? = null,
+    ) {
+        val manager = notificationManager()
         val notification = Notification.Builder(this, channelId)
             .setContentTitle(title)
             .setContentText(text)
@@ -333,14 +452,19 @@ class DshConnectionService : Service() {
             .setStyle(Notification.BigTextStyle().bigText(text))
             .setAutoCancel(true)
             .setPriority(Notification.PRIORITY_HIGH)
-            .setContentIntent(
-                PendingIntent.getActivity(
-                    this, (watcher?.currentProfile().computerScope() + sessionId).hashCode() and Int.MAX_VALUE,
-                    intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-                )
-            )
-            .apply { if (actionsEnabled) interaction?.actions(this@DshConnectionService)?.forEach { addAction(it) } }
+            .setContentIntent(openSessionIntent(sessionId, interaction))
+            .apply {
+                if (actionsEnabled) interaction?.actions(this@DshConnectionService)?.forEach { addAction(it) }
+                if (publicText != null) {
+                    setVisibility(Notification.VISIBILITY_PRIVATE)
+                    setPublicVersion(
+                        Notification.Builder(this@DshConnectionService, channelId)
+                            .setContentTitle(publicText)
+                            .setSmallIcon(com.dsh.mobile.R.drawable.ic_notification_dsh)
+                            .build(),
+                    )
+                }
+            }
             .build()
         if (interaction != null) manager.notify("$pendingTag/${interaction.nonce}", 0, notification)
         else manager.notify(1000 + notificationSeq++, notification)
@@ -353,6 +477,7 @@ class DshConnectionService : Service() {
         watchJob?.cancel()
         watchJob = null
         clearInteractions()
+        sessionActive.keys.toList().forEach(::cancelRunning)
         scope.cancel()
         super.onDestroy()
     }
