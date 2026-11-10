@@ -9,6 +9,9 @@ import com.dsh.mobile.data.shouldNotify
 import com.dsh.mobile.data.turnReportBody
 import com.dsh.mobile.data.turnReportHeadline
 import com.dsh.mobile.data.turnReportOf
+import com.dsh.mobile.data.CommandRisk
+import com.dsh.mobile.data.RiskLevel
+import com.dsh.mobile.data.toolCallArguments
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import com.dsh.mobile.data.computerScope
@@ -313,10 +316,25 @@ class DshConnectionService : Service() {
                 val settings = SettingsStore(this)
                 if (!shouldNotifyApproval(settings.backgroundNotify.first(), settings.notifyApprovals.first(),
                         DshApplication.isAppInForeground)) return
-                val text = if (event is DshConnection.Event.ApprovalRequested)
-                    "工具「" + event.toolName + "」请求执行权限" + (event.reason?.let { "：" + it } ?: "")
-                    else item.question?.question.orEmpty()
-                postInteraction(item, text, !settings.biometricLockEnabled.first())
+                if (event is DshConnection.Event.ApprovalRequested) {
+                    // 审批事件不带命令：到最近的历史里查对应工具调用的参数，评估风险并显示要执行什么。
+                    // 查询限时，超时就按工具名评估；期间到达的「已处理」事件会在随后撤掉这条通知
+                    val arguments = event.callId?.let { callId ->
+                        watcher?.let { c ->
+                            runCatching { withTimeoutOrNull(1_500) { c.toolCallArguments(event.sessionId, callId) } }.getOrNull()
+                        }
+                    }
+                    val risk = CommandRisk.assess(event.toolName, event.reason, arguments)
+                    val text = buildString {
+                        append("工具「").append(event.toolName).append("」请求执行权限")
+                        event.reason?.let { append("：").append(it) }
+                        risk.subject?.let { append("\n").append(it) }
+                        if (risk.findings.isNotEmpty()) append("\n⚠ ").append(risk.findings.joinToString(" · "))
+                    }
+                    postInteraction(item.copy(highRisk = risk.level == RiskLevel.HIGH), text, !settings.biometricLockEnabled.first())
+                } else {
+                    postInteraction(item, item.question?.question.orEmpty(), !settings.biometricLockEnabled.first())
+                }
             }
             is DshConnection.Event.SessionEvent -> if (!DshApplication.isAppInForeground)
                 TokenUsageWatcher.onSessionEvent(event.sessionId, event.event)

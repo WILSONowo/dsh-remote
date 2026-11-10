@@ -31,6 +31,8 @@ fun PendingScreen(
     val items by center.items.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     var busy by remember { mutableStateOf(false) }
+    // 电脑或其他设备处理掉了这里显示着的待办：说一声，而不是让卡片无声消失
+    LaunchedEffect(center) { center.notices.collect { snackbar.showSnackbar(it) } }
     val sessions = connection.directory.sessions
     val snapshot by sessions.state.collectAsState()
     LaunchedEffect(sessions) { sessions.load() }
@@ -93,7 +95,7 @@ fun PendingScreen(
                                     scope.launch {
                                         busy = true
                                         val nonHigh = approvals.filter {
-                                            RiskClassifier.level(it.toolName, it.reason) != RiskLevel.HIGH
+                                            CommandRisk.assess(it.toolName, it.reason, it.arguments).level != RiskLevel.HIGH
                                         }
                                         val skipped = approvals.size - nonHigh.size
                                         val failures = mutableListOf<String>()
@@ -122,7 +124,8 @@ fun PendingScreen(
                         }
                     }
                     items(approvals, key = { "ap-" + it.sessionId + "-" + it.approvalId }) { a ->
-                        val risk = remember(a.approvalId) { RiskClassifier.level(a.toolName, a.reason) }
+                        val assessment = remember(a.approvalId, a.arguments) { CommandRisk.assess(a.toolName, a.reason, a.arguments) }
+                        val risk = assessment.level
                         var confirmDialog by remember(a.approvalId) { mutableStateOf(false) }
                         Card(Modifier.fillMaxWidth().padding(vertical = 6.dp), shape = DshShape.card) {
                             Column(Modifier.padding(14.dp)) {
@@ -150,6 +153,25 @@ fun PendingScreen(
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 2,
+                                    )
+                                }
+                                // 要执行的命令或要改的文件（从对应的工具调用里查到时显示）
+                                assessment.subject?.let {
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        it,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                        maxLines = 3,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    )
+                                }
+                                if (assessment.findings.isNotEmpty()) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        "⚠ " + assessment.findings.joinToString(" · "),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.error,
                                     )
                                 }
                                 Spacer(Modifier.height(8.dp))
@@ -184,7 +206,14 @@ fun PendingScreen(
                             AlertDialog(
                                 onDismissRequest = { confirmDialog = false },
                                 title = { Text("高危操作二次确认") },
-                                text = { Text("工具「${a.toolName}」${a.reason?.let { "\n原因：$it" } ?: ""}\n允许该操作执行一次？") },
+                                text = {
+                                    Text(
+                                        "工具「${a.toolName}」${a.reason?.let { "\n原因：$it" } ?: ""}" +
+                                            (assessment.subject?.let { "\n\n$it" } ?: "") +
+                                            (if (assessment.findings.isNotEmpty()) "\n\n⚠ " + assessment.findings.joinToString("、") else "") +
+                                            "\n\n允许该操作执行一次？",
+                                    )
+                                },
                                 confirmButton = {
                                     TextButton(onClick = {
                                         confirmDialog = false

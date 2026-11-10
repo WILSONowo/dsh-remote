@@ -18,6 +18,8 @@ sealed class PendingItem {
         val callId: String?,
         override val arrivedAt: Long,
         override val fromHistory: Boolean,
+        /** 对应工具调用的参数（JSON），用来评估风险、显示命令；查不到为 null */
+        val arguments: String? = null,
     ) : PendingItem()
 
     data class Question(
@@ -43,10 +45,16 @@ sealed class PendingItem {
  */
 fun scanHistoryEvents(sessionId: String, entries: List<HistoryEntry>): List<PendingItem> {
     val approvals = LinkedHashMap<String, PendingItem.Approval>()
+    val callArguments = HashMap<String, String>()
     var error: PendingItem.Error? = null
     for (entry in entries.sortedBy { it.event.seq }) {
         val ev = entry.event
         when (ev.type) {
+            DshEventTypes.TOOL_CALL -> {
+                val d = (ev.data as? JsonObject) ?: continue
+                val callId = (d["callId"] as? JsonPrimitive)?.contentOrNull ?: continue
+                (d["arguments"] as? JsonPrimitive)?.contentOrNull?.let { callArguments[callId] = it }
+            }
             "approval/asked" -> {
                 val d = (ev.data as? JsonObject) ?: continue
                 val id = (d["id"] as? JsonPrimitive)?.contentOrNull ?: continue
@@ -59,6 +67,7 @@ fun scanHistoryEvents(sessionId: String, entries: List<HistoryEntry>): List<Pend
                     callId = (d["callId"] as? JsonPrimitive)?.contentOrNull,
                     arrivedAt = ev.time,
                     fromHistory = true,
+                    arguments = (d["callId"] as? JsonPrimitive)?.contentOrNull?.let { callArguments[it] },
                 )
             }
             "approval/decided" -> {

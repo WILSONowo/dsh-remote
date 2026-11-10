@@ -102,4 +102,16 @@ class PendingItemTest {
         val sorted = sortPendingItems(listOf(a1, e1, e2, a2))
         assertEquals(listOf<PendingItem>(a2, a1, e2, e1), sorted)
     }
+
+    @Test
+    fun historyApprovalsCarryTheirToolArguments() {
+        val call = ev("tool/call", 1, data = buildJsonObject {
+            put("callId", "c1"); put("name", "bash"); put("arguments", """{"command":"rm -rf build"}""")
+        })
+        val ask = ev("approval/asked", 2, data = buildJsonObject {
+            put("id", "a1"); put("toolName", "bash"); put("callId", "c1")
+        })
+        val items = scanHistoryEvents("s1", listOf(entry(call), entry(ask)))
+        assertEquals("""{"command":"rm -rf build"}""", (items.single() as PendingItem.Approval).arguments)
+    }
 }

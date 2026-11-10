@@ -3,6 +3,7 @@ package com.dsh.mobile.data
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.serialization.json.put
@@ -253,5 +254,27 @@ class ApprovalCenterTest {
         state.value = DshConnection.State.Connected("http://x")
         // s0:a0 墓碑已被裁剪 → 历史回加；s200:a200 墓碑保留 → 不回加
         assertEquals(listOf("s0"), c.items.value.map { it.sessionId })
+    }
+
+    @Test
+    fun approvalsGetToolArgumentsAndRemoteResolutionIsAnnounced() = runTest(UnconfinedTestDispatcher()) {
+        val c = ApprovalCenter(
+            events = events, state = state,
+            answerApprovalFn = { _, _, _ -> }, answerQuestionsFn = { _, _ -> },
+            listSessionsFn = { emptyList() }, historyFn = { HistoryValue() }, scope = backgroundScope,
+            argumentsFn = { _, callId -> if (callId == "c1") """{"command":"rm -rf build"}""" else null },
+        )
+        val notices = mutableListOf<String>()
+        backgroundScope.launch { c.notices.collect { notices += it } }
+        events.emit(DshConnection.Event.ApprovalRequested("s1", "a1", "bash", null, "c1"))
+        assertEquals("""{"command":"rm -rf build"}""", (c.items.value.single() as PendingItem.Approval).arguments)
+        // 别处处理掉了这里还显示着的审批：提示一句
+        events.emit(DshConnection.Event.ApprovalResolved("s1", "a1", "cancelled"))
+        assertEquals(listOf("「bash」的审批已在别处处理或已取消"), notices)
+        // 在这里处理的：卡片先被移除，之后的「已处理」不再提示
+        events.emit(DshConnection.Event.ApprovalRequested("s1", "a2", "bash", null, null))
+        c.reject("s1", "a2")
+        events.emit(DshConnection.Event.ApprovalResolved("s1", "a2", "rejected"))
+        assertEquals(1, notices.size)
     }
 }

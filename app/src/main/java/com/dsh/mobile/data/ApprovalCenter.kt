@@ -28,6 +28,8 @@ class ApprovalCenter(
     private val historyFn: suspend (sessionId: String) -> HistoryValue,
     private val scope: CoroutineScope,
     private val targetKey: () -> String? = { null },
+    /** 查审批对应工具调用的参数（用于风险评估和显示命令）；查不到返回 null */
+    private val argumentsFn: suspend (sessionId: String, callId: String) -> String? = { _, _ -> null },
 ) {
     companion object {
         /** 历史恢复窗口：最近 N 个活跃会话（spec §5.2） */
@@ -50,7 +52,15 @@ class ApprovalCenter(
         historyFn = { connection.history(it) },
         scope = scope,
         targetKey = { connection.currentProfile()?.takeIf { it.paired }?.computerScope() },
+        argumentsFn = { sessionId, callId -> connection.toolCallArguments(sessionId, callId) },
     )
+
+    /**
+     * 别处（电脑或其他设备）处理掉了一条这里还显示着的待办：给用户一句说明，
+     * 而不是让卡片无声消失。自己在这里处理的会先被乐观移除，不会触发。
+     */
+    private val _notices = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val notices: kotlinx.coroutines.flow.SharedFlow<String> = _notices
 
     private val mutex = Mutex()
     private var currentTarget: String? = targetKey()
@@ -101,28 +111,46 @@ class ApprovalCenter(
 
     private suspend fun onEvent(e: DshConnection.Event) {
         when (e) {
-            is DshConnection.Event.ApprovalRequested -> mutate { l ->
-                resolvedTombstones -= "a:${e.sessionId}:${e.approvalId}"
-                l.removeAll { it is PendingItem.Approval && it.sessionId == e.sessionId && it.approvalId == e.approvalId }
-                l += PendingItem.Approval(
-                    e.sessionId, e.approvalId, e.toolName, e.reason, e.callId,
-                    System.currentTimeMillis(), fromHistory = false,
-                )
+            is DshConnection.Event.ApprovalRequested -> {
+                var known: String? = null
+                mutate { l ->
+                    resolvedTombstones -= "a:${e.sessionId}:${e.approvalId}"
+                    // 重连后重发的同一审批：保留已查到的参数
+                    known = l.filterIsInstance<PendingItem.Approval>()
+                        .firstOrNull { it.sessionId == e.sessionId && it.approvalId == e.approvalId }?.arguments
+                    l.removeAll { it is PendingItem.Approval && it.sessionId == e.sessionId && it.approvalId == e.approvalId }
+                    l += PendingItem.Approval(
+                        e.sessionId, e.approvalId, e.toolName, e.reason, e.callId,
+                        System.currentTimeMillis(), fromHistory = false, arguments = known,
+                    )
+                }
+                val callId = e.callId
+                if (known == null && callId != null) scope.launch { fillArguments(e.sessionId, e.approvalId, callId) }
             }
-            is DshConnection.Event.ApprovalResolved -> mutate { l ->
-                resolvedTombstones += "a:${e.sessionId}:${e.approvalId}"
-                if (resolvedTombstones.size > 200) resolvedTombstones = trimTombstones(resolvedTombstones)
-                l.removeAll { it is PendingItem.Approval && it.sessionId == e.sessionId && it.approvalId == e.approvalId }
+            is DshConnection.Event.ApprovalResolved -> {
+                var removed: PendingItem.Approval? = null
+                mutate { l ->
+                    resolvedTombstones += "a:${e.sessionId}:${e.approvalId}"
+                    if (resolvedTombstones.size > 200) resolvedTombstones = trimTombstones(resolvedTombstones)
+                    removed = l.filterIsInstance<PendingItem.Approval>()
+                        .firstOrNull { it.sessionId == e.sessionId && it.approvalId == e.approvalId }
+                    l.removeAll { it is PendingItem.Approval && it.sessionId == e.sessionId && it.approvalId == e.approvalId }
+                }
+                removed?.let { _notices.tryEmit(resolvedElsewhereNotice(it.toolName, e.outcome)) }
             }
             is DshConnection.Event.QuestionRequested -> mutate { l ->
                 resolvedTombstones -= "q:${e.sessionId}"
                 l.removeAll { it is PendingItem.Question && it.sessionId == e.sessionId }
                 l += PendingItem.Question(e.sessionId, e.questions, System.currentTimeMillis(), false)
             }
-            is DshConnection.Event.QuestionResolved -> mutate { l ->
-                resolvedTombstones += "q:${e.sessionId}"
-                if (resolvedTombstones.size > 200) resolvedTombstones = trimTombstones(resolvedTombstones)
-                l.removeAll { it is PendingItem.Question && it.sessionId == e.sessionId }
+            is DshConnection.Event.QuestionResolved -> {
+                var had = false
+                mutate { l ->
+                    resolvedTombstones += "q:${e.sessionId}"
+                    if (resolvedTombstones.size > 200) resolvedTombstones = trimTombstones(resolvedTombstones)
+                    had = l.removeAll { it is PendingItem.Question && it.sessionId == e.sessionId }
+                }
+                if (had) _notices.tryEmit(if (e.outcome == "cancelled") "一个问题已在别处回答或已取消" else "一个问题已在别处回答")
             }
             is DshConnection.Event.SessionEvent ->
                 if (e.event.type == "agent/error") mutate { l ->
@@ -137,6 +165,21 @@ class ApprovalCenter(
                     }
                 }
             else -> {}
+        }
+    }
+
+    /** 补上审批对应工具调用的参数（异步，查不到就保持 null，按工具名评估） */
+    private suspend fun fillArguments(sessionId: String, approvalId: String, callId: String) {
+        val args = try {
+            argumentsFn(sessionId, callId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        } ?: return
+        mutate { l ->
+            val i = l.indexOfFirst { it is PendingItem.Approval && it.sessionId == sessionId && it.approvalId == approvalId }
+            if (i >= 0) l[i] = (l[i] as PendingItem.Approval).copy(arguments = args)
         }
     }
 
@@ -251,4 +294,29 @@ internal fun trimTombstones(current: Set<String>, capacity: Int = 200): Set<Stri
     if (capacity <= 0) return emptySet()
     if (current.size <= capacity) return current
     return LinkedHashSet(current).drop(current.size - capacity).toSet()
+}
+
+/** 别处处理掉审批时给用户的说明；outcome 来自插件：allowed-once / rejected / cancelled */
+internal fun resolvedElsewhereNotice(toolName: String, outcome: String): String = when (outcome) {
+    "allowed-once", "allowed", "allowed-always" -> "「$toolName」已在别处允许"
+    "rejected" -> "「$toolName」已在别处拒绝"
+    else -> "「$toolName」的审批已在别处处理或已取消"
+}
+
+/** 在会话最近的历史里找某次工具调用的参数（审批事件本身不带参数） */
+suspend fun DshConnection.toolCallArguments(sessionId: String, callId: String): String? {
+    var before: Long? = null
+    repeat(2) {
+        val page = history(sessionId, beforeSeq = before, maxMessages = 3)
+        page.events.lastOrNull { e ->
+            e.event.type == DshEventTypes.TOOL_CALL &&
+                ((e.event.data as? kotlinx.serialization.json.JsonObject)?.get("callId") as? kotlinx.serialization.json.JsonPrimitive)
+                    ?.content == callId
+        }?.let { e ->
+            return ((e.event.data as kotlinx.serialization.json.JsonObject)["arguments"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+        }
+        if (!page.hasMore) return null
+        before = page.events.firstOrNull()?.event?.seq ?: return null
+    }
+    return null
 }
