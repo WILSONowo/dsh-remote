@@ -117,6 +117,7 @@ class MainActivity : FragmentActivity() {
 
         val app = application as DshApplication
         consumeDeepLink(intent)
+        publishShortcuts()
         ThemeRepository.init(applicationContext)
 
         setContent {
@@ -307,7 +308,36 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    /** 长按桌面图标的快捷方式：新任务、待办（动态注册，不依赖写死的包名） */
+    private fun publishShortcuts() {
+        fun shortcut(id: String, label: String, root: String) =
+            androidx.core.content.pm.ShortcutInfoCompat.Builder(this, id)
+                .setShortLabel(label)
+                .setIcon(androidx.core.graphics.drawable.IconCompat.createWithResource(this, R.mipmap.ic_launcher))
+                .setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_VIEW).putExtra("open_root", root))
+                .build()
+        runCatching {
+            androidx.core.content.pm.ShortcutManagerCompat.setDynamicShortcuts(
+                this,
+                listOf(shortcut("new_task", "新任务", "home"), shortcut("pending", "待办", "pending")),
+            )
+        }
+    }
+
     private fun consumeDeepLink(intent: Intent?) {
+        if (intent?.action == Intent.ACTION_SEND && intent.type?.startsWith("text/") == true) {
+            com.dsh.mobile.data.sharedText(
+                intent.getStringExtra(Intent.EXTRA_SUBJECT),
+                intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString(),
+            )?.let { DshApplication.pendingShare.value = it }
+            // 只处理一次：旋转屏幕等重建时 getIntent() 仍是这条分享
+            intent.action = Intent.ACTION_MAIN
+            intent.removeExtra(Intent.EXTRA_TEXT)
+        }
+        intent?.getStringExtra("open_root")?.takeIf { it == "home" || it == "pending" }?.let {
+            DshApplication.pendingRoot.value = it
+            intent.removeExtra("open_root")
+        }
         intent?.getStringExtra("open_session")?.takeIf { it.isNotBlank() }?.let {
             DshApplication.pendingSession.value = DshApplication.Companion.SessionLink(it,
                 intent.getStringExtra("open_profile"), intent.getStringExtra("open_computer"), intent.getBooleanExtra("open_pending", false))

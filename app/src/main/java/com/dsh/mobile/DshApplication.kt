@@ -117,5 +117,11 @@ class DshApplication : Application(), ConnectionOwner {
         /** 通知点击后要打开的会话（由 MainActivity/AppNavigation 消费） */
         data class SessionLink(val sessionId: String, val profileId: String?, val computer: String?, val openPending: Boolean = false)
         val pendingSession = kotlinx.coroutines.flow.MutableStateFlow<SessionLink?>(null)
+
+        /** 从其他 App 分享进来、还没放进首页输入框的文字 */
+        val pendingShare = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+
+        /** 桌面快捷方式要打开的页面：home（新任务）/ pending（待办） */
+        val pendingRoot = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     }
 }

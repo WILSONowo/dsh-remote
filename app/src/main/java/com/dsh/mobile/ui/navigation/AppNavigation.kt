@@ -162,6 +162,23 @@ fun AppNavigation(
         } else openRoot(Screen.Connect)
     }
 
+    // 分享进来的文字：等能进首页时打开首页，由首页放进「新任务」输入框
+    val share by DshApplication.pendingShare.collectAsState()
+    LaunchedEffect(share, canEnter) {
+        if (share != null && canEnter && route != Screen.Home.route) openRoot(Screen.Home)
+    }
+    // 桌面快捷方式：新任务 → 首页；待办 → 待办页（都要等连上并已配对）
+    val rootRequest by DshApplication.pendingRoot.collectAsState()
+    LaunchedEffect(rootRequest, ready) {
+        val request = rootRequest ?: return@LaunchedEffect
+        if (!ready) return@LaunchedEffect
+        DshApplication.pendingRoot.value = null
+        when (request) {
+            "home" -> openRoot(Screen.Home)
+            "pending" -> navController.navigate(Screen.Pending.route) { launchSingleTop = true }
+        }
+    }
+
     val configuration = LocalConfiguration.current
     val useRail = configuration.screenWidthDp >= 600 && configuration.screenWidthDp > configuration.screenHeightDp
     val rootScreen = route in listOf(Screen.Connect.route, Screen.Home.route, Screen.Settings.route)
@@ -248,6 +265,13 @@ fun AppNavigation(
                             BoxWithConstraints(Modifier.fillMaxSize()) {
                                 val pageHeight = maxHeight
                                 val draft = rememberSaveable(homeScope) { mutableStateOf("") }
+                                val shared by DshApplication.pendingShare.collectAsState()
+                                LaunchedEffect(shared) {
+                                    shared?.let {
+                                        draft.value = com.dsh.mobile.data.appendToDraft(draft.value, it)
+                                        DshApplication.pendingShare.value = null
+                                    }
+                                }
                                 Box(Modifier.fillMaxSize().imePadding()) {
                                     key(homeScope, connection.generation) {
                                         HomeScreen(
