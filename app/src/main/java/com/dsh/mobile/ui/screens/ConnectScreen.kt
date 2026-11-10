@@ -68,6 +68,19 @@ fun ConnectScreen(
     val sortedProfiles = remember(profiles) { profiles.sortedByDescending { it.lastUsedAt } }
     val activeProfile = profiles.firstOrNull { it.id == activeId }
 
+    // 设备记录的在线状态：页面可见时每 15 秒并发探测一次其余电脑（不建立加密通道，不发送凭证）
+    val probes = remember { mutableStateMapOf<String, ProbeResult>() }
+    val others = remember(sortedProfiles, activeId) { sortedProfiles.filter { it.id != activeId } }
+    LaunchedEffect(others) {
+        probes.keys.retainAll(others.map { it.id }.toSet())
+        while (true) {
+            kotlinx.coroutines.coroutineScope {
+                others.forEach { p -> launch { probes[p.id] = HostProbe.probe(p) } }
+            }
+            kotlinx.coroutines.delay(15_000)
+        }
+    }
+
     fun connectTo(profile: HostProfile, link: PairingLink? = null) {
         scope.launch {
             val target = profile.copy(autoConnect = true)
@@ -379,6 +392,20 @@ fun ConnectScreen(
                                         Text(p.lastHostVersion?.let { "版本 $it" } ?: "版本未知",
                                             modifier = Modifier.align(Alignment.CenterVertically),
                                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        val probe = probes[p.id]
+                                        val probeColor = when (probe?.presence) {
+                                            Presence.ONLINE -> DshSuccess
+                                            Presence.OFFLINE -> MaterialTheme.colorScheme.error
+                                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        }
+                                        Row(
+                                            modifier = Modifier.align(Alignment.CenterVertically),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Box(Modifier.size(6.dp).background(probeColor, DshShape.pill))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(HostProbe.label(probe), style = MaterialTheme.typography.bodySmall, color = probeColor)
+                                        }
                                     }
                                     if (isActive) {
                                         Spacer(Modifier.width(6.dp))
