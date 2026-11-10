@@ -190,6 +190,24 @@ class SessionExportTest {
         assertFalse(md.contains("## "))
     }
 
+    @Test
+    fun markdown_injectedContextIsNotExportedAsUser() {
+        val skill = json.parseToJsonElement(
+            """{"type":"user/message","seq":2,"time":1,"surfaceOp":"append","data":{"id":"m2",""" +
+                """"content":[{"type":"text","text":"SKILL BODY"}],"source":{"kind":"skill-invocation","name":"pdf"}}}""",
+        )
+        val replaced = json.parseToJsonElement(
+            """{"type":"user/message","seq":3,"time":1,"surfaceOp":{"startSeq":1,"endSeq":2},"data":{"id":"m3",""" +
+                """"content":[{"type":"text","text":"SUMMARY"}],"source":{"kind":"compact-checkpoint"}}}""",
+        )
+        val out = historyToMarkdown("t", listOf(userEvent("你好"), skill, replaced))
+        assertTrue(out.contains("你好"))
+        assertTrue(out.contains("已注入：技能：pdf"))
+        assertFalse(out.contains("SKILL BODY"))
+        assertFalse(out.contains("SUMMARY"))
+        assertEquals(1, Regex("## 👤 用户").findAll(out).count())
+    }
+
     // ── historyToJson ──
 
     @Test

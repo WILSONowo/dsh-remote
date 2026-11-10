@@ -54,7 +54,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
@@ -141,6 +146,9 @@ sealed interface ChatItem {
     ) : ChatItem
 
     data class Notice(override val key: String, val text: String, val isError: Boolean = false, override val seq: Long? = null) : ChatItem
+
+    /** 宿主注入的上下文（技能、项目说明、引用会话等）：与桌面版一致折叠成一行，不当作用户气泡 */
+    data class Context(override val key: String, val label: String, val text: String, override val seq: Long? = null) : ChatItem
 }
 
 /** 缓存互转：UI 条目 ↔ gzip 磁盘条目（磁盘只存 hasImages 占位，不存 base64） */
@@ -157,6 +165,7 @@ private fun ChatItem.toCached(): CachedItem = when (this) {
         kind = "tool", name = name, args = args, status = status, result = result, isError = isError, seq = seq,
     )
     is ChatItem.Notice -> CachedItem(kind = "notice", text = text, isError = isError, seq = seq)
+    is ChatItem.Context -> CachedItem(kind = "context", name = label, text = text, seq = seq)
 }
 
 private fun CachedItem.toChatItem(key: String): ChatItem = when (kind) {
@@ -166,6 +175,7 @@ private fun CachedItem.toChatItem(key: String): ChatItem = when (kind) {
     )
     "assistant" -> ChatItem.Assistant(key, text, streaming = streaming, thinkSeconds = thinkSeconds, thinkingText = thinkingText, seq = seq)
     "tool" -> ChatItem.Tool(key, callId = key, name = name, args = args, status = status, result = result, isError = isError, seq = seq)
+    "context" -> ChatItem.Context(key, label = name, text = text, seq = seq)
     else -> ChatItem.Notice(key, text, isError = isError, seq = seq)
 }
 
@@ -196,6 +206,27 @@ private fun userContentOf(content: JsonElement?): UserContent {
         }
     }
     return UserContent(text.toString(), images)
+}
+
+/** 注入上下文展开后最多显示的字数（技能正文等可能很长） */
+private const val CONTEXT_TEXT_CHARS = 4000
+
+/**
+ * user/message → 用户气泡 / 注入上下文行 / 不展示（替换副本），规则与桌面版一致（见 [classifyUserMessage]）。
+ * 空内容的用户消息返回 null。
+ */
+private fun inputItemOf(e: SessionEventWire, key: () -> String): ChatItem? {
+    val data = e.data as? JsonObject ?: return null
+    return when (val kind = classifyUserMessage(e)) {
+        InputMessageKind.Hidden -> null
+        InputMessageKind.User -> {
+            val uc = userContentOf(data["content"])
+            if (uc.text.isBlank() && uc.images.isEmpty()) null
+            else ChatItem.User(key(), uc.text, seq = e.seq, images = uc.images)
+        }
+        is InputMessageKind.Context ->
+            ChatItem.Context(key(), kind.label, userContentOf(data["content"]).text.take(CONTEXT_TEXT_CHARS), seq = e.seq)
+    }
 }
 
 private fun assistantTextOf(data: JsonElement): String {
@@ -448,10 +479,7 @@ class SessionChatState(
                     when (e.type) {
                         DshEventTypes.USER_MESSAGE -> {
                             flushChunks()
-                            val uc = userContentOf(e.data.jsonObject["content"])
-                            if (uc.text.isNotBlank() || uc.images.isNotEmpty()) {
-                                list.add(ChatItem.User(nextKey(), uc.text, seq = e.seq, images = uc.images))
-                            }
+                            inputItemOf(e) { nextKey() }?.let { list.add(it) }
                         }
                         DshEventTypes.ASSISTANT_MESSAGE -> {
                             // 完整消息到达：丢弃已收集的 chunk（其内容已包含在消息全文里）
@@ -554,12 +582,7 @@ class SessionChatState(
         h.events.forEach { entry ->
             val e = entry.event
             when (e.type) {
-                DshEventTypes.USER_MESSAGE -> {
-                    val uc = userContentOf(e.data.jsonObject["content"])
-                    if (uc.text.isNotBlank() || uc.images.isNotEmpty()) {
-                        out.add(ChatItem.User(nextKey(), uc.text, seq = e.seq, images = uc.images))
-                    }
-                }
+                DshEventTypes.USER_MESSAGE -> inputItemOf(e) { nextKey() }?.let { out.add(it) }
                 DshEventTypes.ASSISTANT_MESSAGE -> {
                     val t = assistantTextOf(e.data)
                     val think = reasoningBlockOf(e.data)
@@ -686,14 +709,15 @@ class SessionChatState(
         flushPendingChunk()
         val cur = _items.value.toMutableList()
         when (e.type) {
-            DshEventTypes.USER_MESSAGE -> {
-                val uc = userContentOf(e.data.jsonObject["content"])
-                if (uc.text.isNotBlank() || uc.images.isNotEmpty()) {
+            DshEventTypes.USER_MESSAGE -> when (val item = inputItemOf(e) { nextKey() }) {
+                is ChatItem.User -> {
                     // T6：按文本匹配本次 steer 发送（乐观标记；匹配即登记「插话」回复）
-                    val steer = if (uc.text.isNotBlank()) steerPending.remove(uc.text) else false
+                    val steer = if (item.text.isNotBlank()) steerPending.remove(item.text) else false
                     if (steer) steerReplyArmed = true
-                    cur.add(ChatItem.User(nextKey(), uc.text, seq = e.seq, images = uc.images, steerSent = steer))
+                    cur.add(item.copy(steerSent = steer))
                 }
+                null -> {}
+                else -> cur.add(item)
             }
 
             DshEventTypes.ASSISTANT_MESSAGE -> {
@@ -1003,15 +1027,38 @@ fun SessionScreen(
         }
     }
 
-    // 自动滚动到底部：仅在用户本来就停在底部时跟随（不抢用户上翻阅读），
-    // 用无动画 scrollToItem；流式时按最后一条文本长度跟随增量
-    val tailSig = items.lastOrNull()?.let { if (it is ChatItem.Assistant) it.text.length else 0 } ?: 0
-    LaunchedEffect(items.size, tailSig) {
-        if (items.isEmpty()) return@LaunchedEffect
-        val info = listState.layoutInfo
-        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-        val atBottom = info.totalItemsCount <= 0 || lastVisible >= info.totalItemsCount - 1
-        if (atBottom) listState.scrollToItem(items.size - 1)
+    // 跟随底部：用户停在底部时，任何新内容（新消息、流式增量、思考、工具结果）都滚到列表最底端；
+    // 用户上翻阅读时不打扰。「是否跟随」只由用户手势改变（程序滚动不经过嵌套滚动）：
+    // 往回翻 → 停止跟随；往前滑到底（有剩余滑动量或滑动结束时已到底）→ 恢复跟随。
+    // 不在内容变化之后再判断「是否在底部」：新内容已让列表变长，总会误判为不在底部而不滚动。
+    // 滚动目标是列表末尾的锚点（而不是最后一条消息的顶部），长回复流式输出时也能看到最新内容。
+    var followTail by remember(sessionId) { mutableStateOf(focusSeq == null) }
+    val followTailConnection = remember(listState) {
+        object : NestedScrollConnection {
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (consumed.y > 0f) followTail = false
+                else if (available.y < 0f) followTail = true
+                return Offset.Zero
+            }
+
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                if (!listState.canScrollForward) followTail = true
+                return Velocity.Zero
+            }
+        }
+    }
+    val tailIndex = (if (state.hasMore) 1 else 0) + (if (initialLoading && items.isEmpty()) 3 else 0) + items.size
+    LaunchedEffect(items) {
+        if (followTail && items.isNotEmpty() && !listState.isScrollInProgress) listState.scrollToItem(tailIndex)
+    }
+    // 键盘弹出等让可视区域变矮时保持贴底
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.layoutInfo.viewportSize.height }
+            .drop(1)
+            .collect {
+                val last = listState.layoutInfo.totalItemsCount - 1
+                if (followTail && last >= 0 && !listState.isScrollInProgress) listState.scrollToItem(last)
+            }
     }
 
     // focusSeq 定位：历史加载完成后，按事件 seq 直接映射到消息列表项，
@@ -1019,6 +1066,7 @@ fun SessionScreen(
     LaunchedEffect(historyReady, focusSeq) {
         val target = focusSeq ?: return@LaunchedEffect
         if (!historyReady) return@LaunchedEffect
+        followTail = false
         val idx = items.indexOfFirst { it.seq == target }
         if (idx < 0) {
             if (items.isNotEmpty()) listState.scrollToItem(0)
@@ -1039,6 +1087,9 @@ fun SessionScreen(
         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
         sending = true
         actionError = null
+        // 自己发的消息和随后的回复都要看到：发送即恢复跟随底部，并立即滚到底
+        followTail = true
+        scope.launch { listState.scrollToItem(tailIndex) }
         // 捕获本次发送模式：await 期间用户切走开关不影响已发起请求的语义
         val isSteer = steerMode
         if (isSteer) {
@@ -1246,7 +1297,8 @@ fun SessionScreen(
         LazyColumn(
             modifier = Modifier
                 .weight(1f)
-                .fillMaxWidth(),
+                .fillMaxWidth()
+                .nestedScroll(followTailConnection),
             state = listState,
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -1311,10 +1363,13 @@ fun SessionScreen(
                             is ChatItem.Assistant -> AssistantCard(item, Modifier.animateItem())
                             is ChatItem.Tool -> ToolCard(item, Modifier.animateItem())
                             is ChatItem.Notice -> NoticeRow(item, Modifier.animateItem())
+                            is ChatItem.Context -> ContextRow(item, Modifier.animateItem())
                         }
                     }
                 }
             }
+            // 末尾锚点：跟随底部时滚到这里，保证最后一条（即使很长）的末尾可见
+            item(key = "tail_anchor") { Spacer(Modifier.height(1.dp)) }
         }
 
         SnackbarHost(hostState = snackbarHostState, modifier = Modifier.fillMaxWidth())
@@ -2050,6 +2105,59 @@ private fun NoticeRow(item: ChatItem.Notice, modifier: Modifier = Modifier) {
             color = if (item.isError) MaterialTheme.colorScheme.error
             else MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+/** 注入上下文：默认一行标签，点开查看原文（与桌面版的折叠上下文行对应） */
+@Composable
+private fun ContextRow(item: ChatItem.Context, modifier: Modifier = Modifier) {
+    var expanded by rememberSaveable(item.key) { mutableStateOf(false) }
+    val hasText = item.text.isNotBlank()
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(modifier)
+            .clip(RoundedCornerShape(10.dp))
+            .then(if (hasText) Modifier.clickable { expanded = !expanded } else Modifier)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Outlined.Info,
+                null,
+                Modifier.size(14.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "已注入 · ${item.label}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (hasText) {
+                Icon(
+                    if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    if (expanded) "收起" else "展开",
+                    Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (expanded && hasText) {
+            Text(
+                item.text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .padding(top = 6.dp)
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                    .padding(8.dp),
+            )
+        }
     }
 }
 

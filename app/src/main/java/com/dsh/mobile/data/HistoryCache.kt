@@ -50,7 +50,12 @@ data class CachedHistory(
      * 旧格式缓存缺该字段 → null（退化为普通尾部缓存）。
      */
     val completeThroughSeq: Long? = null,
+    /** 解析规则版本：低于 [HISTORY_CACHE_FORMAT] 的缓存按旧规则生成，读取时丢弃（旧缓存缺该字段 → 1） */
+    val format: Int = 1,
 )
+
+/** 2：注入上下文不再作为用户消息缓存（旧缓存里可能混有系统内容） */
+const val HISTORY_CACHE_FORMAT = 2
 
 /**
  * 进程级内存热缓存：解码结果 LRU，避免返回会话/首页时重复读盘+解压+JSON 解码。
@@ -73,7 +78,7 @@ object HistoryMemoryCache {
     @Synchronized fun history(id: String): List<CachedItem>? = histories[id]?.items
     @Synchronized fun historyWithMeta(id: String): CachedHistory? = histories[id]
     @Synchronized fun putHistory(id: String, items: List<CachedItem>, completeThroughSeq: Long? = null) {
-        if (items.isNotEmpty()) histories[id] = CachedHistory(0, items, completeThroughSeq)
+        if (items.isNotEmpty()) histories[id] = CachedHistory(0, items, completeThroughSeq, HISTORY_CACHE_FORMAT)
     }
     @Synchronized fun sessionList(scope: String = "legacy"): List<SessionSummary>? = listCache[scope]
     @Synchronized fun putSessionList(items: List<SessionSummary>?, scope: String = "legacy") {
@@ -123,6 +128,10 @@ class HistoryCache internal constructor(private val cacheRoot: File, private val
                 json.decodeFromStream<CachedHistory>(it)
             }
         }.getOrNull() ?: return null
+        if (doc.format < HISTORY_CACHE_FORMAT) {
+            f.delete()
+            return null
+        }
         HistoryMemoryCache.putHistory(memoryKey(sessionId), doc.items, doc.completeThroughSeq)
         return doc
     }
@@ -141,7 +150,7 @@ class HistoryCache internal constructor(private val cacheRoot: File, private val
             val temp = File.createTempFile("history-", ".tmp", historyDir)
             try {
                 GZIPOutputStream(temp.outputStream().buffered()).use {
-                    json.encodeToStream(CachedHistory.serializer(), CachedHistory(System.currentTimeMillis(), capped, completeThroughSeq), it)
+                    json.encodeToStream(CachedHistory.serializer(), CachedHistory(System.currentTimeMillis(), capped, completeThroughSeq, HISTORY_CACHE_FORMAT), it)
                 }
                 if (temp.length() > 8L * 1024 * 1024) {
                     historyFile(sessionId).delete()

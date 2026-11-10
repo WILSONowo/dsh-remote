@@ -93,6 +93,28 @@ class HistoryCacheTest {
         assertEquals("", decoded.items[1].thinkingText)
     }
 
+    // ── 解析规则升级：旧规则生成的缓存（可能混有注入上下文）读取时丢弃 ──
+
+    @Test
+    fun cacheWrittenByOlderRulesIsDiscarded() {
+        val root = java.nio.file.Files.createTempDirectory("history-cache").toFile()
+        try {
+            val cache = HistoryCache(root, "legacy")
+            cache.saveHistory("s1", listOf(CachedItem(kind = "user", text = "问题", seq = 1)))
+            HistoryMemoryCache.clearHistory(cache.memoryKey("s1"))
+            assertEquals(1, cache.loadHistory("s1")?.size)
+
+            HistoryMemoryCache.clearHistory(cache.memoryKey("s1"))
+            val file = java.io.File(root, "history").listFiles()!!.single()
+            val legacy = """{"savedAt":1,"items":[{"kind":"user","text":"<system-reminder>","seq":1}]}"""
+            GZIPOutputStream(file.outputStream()).use { it.write(legacy.toByteArray(Charsets.UTF_8)) }
+            org.junit.Assert.assertNull(cache.loadHistory("s1"))
+            org.junit.Assert.assertFalse(file.exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     // ── 辅助：HistoryCache.saveHistory/loadHistory 同款 gzip 编解码 ──
 
     private fun gzipRoundTrip(history: CachedHistory): CachedHistory {

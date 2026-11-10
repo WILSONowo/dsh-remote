@@ -36,7 +36,12 @@ private fun appendEventSection(sb: StringBuilder, raw: JsonElement) {
     val type = obj["type"]?.jsonPrimitive?.contentOrNull ?: return
     val data = obj["data"] as? JsonObject ?: JsonObject(emptyMap())
     when (type) {
-        DshEventTypes.USER_MESSAGE -> appendUserSection(sb, data)
+        DshEventTypes.USER_MESSAGE -> when (val kind = classifyUserMessage(obj["surfaceOp"], data)) {
+            InputMessageKind.User -> appendUserSection(sb, data)
+            // 注入上下文只记一行来源，不把技能正文、项目说明等当作用户发言导出
+            is InputMessageKind.Context -> sb.append("\n> 📎 已注入：").append(kind.label).append('\n')
+            InputMessageKind.Hidden -> {}
+        }
         DshEventTypes.ASSISTANT_MESSAGE -> appendAssistantSection(sb, data)
         DshEventTypes.TOOL_CALL -> appendToolCallSection(sb, data)
         DshEventTypes.TOOL_RESULT -> appendToolResultSection(sb, data)
