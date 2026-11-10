@@ -103,53 +103,10 @@ private const val STEER_FLASH_MS = 2000L
 // 非流式超长消息折叠阈值：超过则默认只显示前 N 字 + 「展开全文」（省渲染/观感提速）
 private const val COLLAPSE_CHARS = 3000
 
+// 工具卡片展开后显示的参数原文上限
+private const val TOOL_ARGS_EXPANDED_CHARS = 2000
+
 // ──────────────────────────── 聊天条目模型与状态机 ────────────────────────────
-
-/** 用户消息里的图片内容块（mediaType + base64 data，DSH 协议 image 块） */
-data class UserImage(val mediaType: String, val base64: String)
-
-sealed interface ChatItem {
-    val key: String
-    /** 服务端消息序号：缓存/网络首屏合并去重、排序用 */
-    val seq: Long?
-
-    data class User(
-        override val key: String,
-        val text: String,
-        override val seq: Long? = null,
-        val images: List<UserImage> = emptyList(),
-        /** T6 插话乐观标记：本条消息以 steer 模式发送（纯乐观，服务端无回执，不落缓存） */
-        val steerSent: Boolean = false,
-    ) : ChatItem
-    data class Assistant(
-        override val key: String,
-        val text: String,
-        val streaming: Boolean = false,
-        val thinkSeconds: Long? = null,
-        /** S5：思考链文本——reasoning-delta 流式累积；assistant/message 的 reasoning 块兜底（不落磁盘缓存） */
-        val thinkingText: String = "",
-        override val seq: Long? = null,
-        /** T6 插话乐观标记：本条回复由插话触发（纯乐观，不落缓存） */
-        val steerSent: Boolean = false,
-    ) : ChatItem
-    data class Tool(
-        override val key: String,
-        val callId: String,
-        val name: String,
-        val args: String,
-        val status: String = "running",
-        val result: String? = null,
-        val isError: Boolean = false,
-        override val seq: Long? = null,
-        /** S5：工具耗时 ms——tool/call ↔ tool/result 的 time 差值（实时配对，历史重放为 null） */
-        val elapsedMs: Long? = null,
-    ) : ChatItem
-
-    data class Notice(override val key: String, val text: String, val isError: Boolean = false, override val seq: Long? = null) : ChatItem
-
-    /** 宿主注入的上下文（技能、项目说明、引用会话等）：与桌面版一致折叠成一行，不当作用户气泡 */
-    data class Context(override val key: String, val label: String, val text: String, override val seq: Long? = null) : ChatItem
-}
 
 /** 缓存互转：UI 条目 ↔ gzip 磁盘条目（磁盘只存 hasImages 占位，不存 base64） */
 private fun ChatItem.toCached(): CachedItem = when (this) {
@@ -844,6 +801,10 @@ fun SessionScreen(
     val initialLoading by state.initialLoading.collectAsState()
     val title by state.title.collectAsState()
     val running by state.running.collectAsState()
+    // 与桌面版一致：连续的思考和工具调用收进可折叠的过程分组，正文回复单独显示
+    val rows = remember(items, running) { groupChatItems(items, running) }
+    // 分组展开状态放在这里，搜索定位到分组内的消息时可以自动展开
+    val expandedGroups = remember(sessionId) { mutableStateMapOf<String, Boolean>() }
 
     // 本会话待办数量（审批 + 问答，异常不计入轻提示条）
     val centerItems by approvalCenter.items.collectAsState()
@@ -1047,9 +1008,9 @@ fun SessionScreen(
             }
         }
     }
-    val tailIndex = (if (state.hasMore) 1 else 0) + (if (initialLoading && items.isEmpty()) 3 else 0) + items.size
-    LaunchedEffect(items) {
-        if (followTail && items.isNotEmpty() && !listState.isScrollInProgress) listState.scrollToItem(tailIndex)
+    val tailIndex = (if (state.hasMore) 1 else 0) + (if (initialLoading && items.isEmpty()) 3 else 0) + rows.size
+    LaunchedEffect(rows) {
+        if (followTail && rows.isNotEmpty() && !listState.isScrollInProgress) listState.scrollToItem(tailIndex)
     }
     // 键盘弹出等让可视区域变矮时保持贴底
     LaunchedEffect(listState) {
@@ -1067,7 +1028,14 @@ fun SessionScreen(
         val target = focusSeq ?: return@LaunchedEffect
         if (!historyReady) return@LaunchedEffect
         followTail = false
-        val idx = items.indexOfFirst { it.seq == target }
+        val idx = rows.indexOfFirst { row ->
+            when (row) {
+                is ChatRow.Single -> row.item.seq == target
+                is ChatRow.Process -> row.members.any { it.seq == target }
+            }
+        }
+        // 目标在折叠的过程分组里：先展开，再定位
+        (rows.getOrNull(idx) as? ChatRow.Process)?.let { expandedGroups[it.key] = true }
         if (idx < 0) {
             if (items.isNotEmpty()) listState.scrollToItem(0)
             snackbarHostState.showSnackbar("目标位置不在已加载窗口")
@@ -1341,29 +1309,41 @@ fun SessionScreen(
                     SkeletonMessageBubble(index)
                 }
             }
-            items(items, key = { it.key }) { item ->
-                // 新条目渐入：新消息平滑出现，不跳变（Telegram 式轻量动效）
-                androidx.compose.runtime.key(item.key) {
-                    val highlighted = highlightedSeq != null && item.seq == highlightedSeq
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .then(
-                                if (highlighted) {
-                                    Modifier
-                                        .background(DshWarn.copy(alpha = 0.18f), RoundedCornerShape(12.dp))
-                                        .padding(6.dp)
-                                } else {
-                                    Modifier
-                                },
-                            ),
-                    ) {
-                        when (item) {
-                            is ChatItem.User -> UserBubble(item, Modifier.animateItem())
-                            is ChatItem.Assistant -> AssistantCard(item, Modifier.animateItem())
-                            is ChatItem.Tool -> ToolCard(item, Modifier.animateItem())
-                            is ChatItem.Notice -> NoticeRow(item, Modifier.animateItem())
-                            is ChatItem.Context -> ContextRow(item, Modifier.animateItem())
+            items(rows, key = { it.key }) { row ->
+                if (row is ChatRow.Process) {
+                    ProcessGroupCard(
+                        group = row,
+                        expanded = expandedGroups[row.key] == true,
+                        onToggle = { expandedGroups[row.key] = expandedGroups[row.key] != true },
+                        highlightedSeq = highlightedSeq,
+                        modifier = Modifier.animateItem(),
+                    )
+                } else {
+                    val single = row as ChatRow.Single
+                    val item = single.item
+                    // 新条目渐入：新消息平滑出现，不跳变（Telegram 式轻量动效）
+                    androidx.compose.runtime.key(item.key) {
+                        val highlighted = highlightedSeq != null && item.seq == highlightedSeq
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(
+                                    if (highlighted) {
+                                        Modifier
+                                            .background(DshWarn.copy(alpha = 0.18f), RoundedCornerShape(12.dp))
+                                            .padding(6.dp)
+                                    } else {
+                                        Modifier
+                                    },
+                                ),
+                        ) {
+                            when (item) {
+                                is ChatItem.User -> UserBubble(item, Modifier.animateItem())
+                                is ChatItem.Assistant -> AssistantCard(item, Modifier.animateItem(), hideThinking = single.hideThinking)
+                                is ChatItem.Tool -> ToolCard(item, Modifier.animateItem())
+                                is ChatItem.Notice -> NoticeRow(item, Modifier.animateItem())
+                                is ChatItem.Context -> ContextRow(item, Modifier.animateItem())
+                            }
                         }
                     }
                 }
@@ -1821,7 +1801,12 @@ private fun ThinkingFold(streaming: Boolean, text: String, modifier: Modifier = 
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun AssistantCard(item: ChatItem.Assistant, modifier: Modifier = Modifier) {
+private fun AssistantCard(
+    item: ChatItem.Assistant,
+    modifier: Modifier = Modifier,
+    /** 思考已经收进上方的过程分组，这里不再重复显示 */
+    hideThinking: Boolean = false,
+) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     // 超长消息折叠状态
@@ -1886,7 +1871,7 @@ private fun AssistantCard(item: ChatItem.Assistant, modifier: Modifier = Modifie
                     Spacer(Modifier.height(6.dp))
                 }
                 // S5 思考链：内容上方渲染「💭 已思考」折叠区（点击展开/收起思考文本；流式进行中显示「思考中…」）
-                if (item.thinkingText.isNotBlank()) {
+                if (item.thinkingText.isNotBlank() && !hideThinking) {
                     ThinkingFold(streaming = item.streaming, text = item.thinkingText)
                     Spacer(Modifier.height(6.dp))
                 }
@@ -1941,6 +1926,8 @@ private fun ToolCard(item: ChatItem.Tool, modifier: Modifier = Modifier) {
     var expanded by remember(item.key) { mutableStateOf(false) }
     val done = item.status == "done"
     val failed = item.status == "error"
+    val detail = remember(item.args) { toolDetailOf(item.args) }
+    val expandable = item.result != null || item.args.isNotBlank()
 
     Surface(
         shape = DshShape.small,
@@ -1948,7 +1935,7 @@ private fun ToolCard(item: ChatItem.Tool, modifier: Modifier = Modifier) {
         modifier = Modifier
             .fillMaxWidth()
             .then(modifier),
-        onClick = { if (item.result != null) expanded = !expanded },
+        onClick = { if (expandable) expanded = !expanded },
     ) {
         Column(Modifier.padding(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1999,7 +1986,7 @@ private fun ToolCard(item: ChatItem.Tool, modifier: Modifier = Modifier) {
                         MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (item.result != null) {
+                if (expandable) {
                     Spacer(Modifier.width(4.dp))
                     Icon(
                         if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
@@ -2011,14 +1998,25 @@ private fun ToolCard(item: ChatItem.Tool, modifier: Modifier = Modifier) {
             }
             if (item.args.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
+                // 一行摘要：命令、路径、查询等关键参数（与桌面版一致）；取不到再显示原始参数
                 Text(
-                    (if (DshThemeStyle == ThemeStyle.CODEX) "$ " else "") + item.args.take(160),
+                    (if (DshThemeStyle == ThemeStyle.CODEX) "$ " else "") + detail.ifEmpty { item.args.take(160) },
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (expanded && item.args.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    item.args.take(TOOL_ARGS_EXPANDED_CHARS),
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 12,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             if (expanded && item.result != null) {
@@ -2058,6 +2056,123 @@ private fun ToolStatusBadge(text: String, color: Color) {
             color = color,
             modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
         )
+    }
+}
+
+/** 过程分组的类别图标（null 表示思考） */
+private fun processIcon(activity: ToolActivity?): androidx.compose.ui.graphics.vector.ImageVector = when (activity) {
+    null -> Icons.Default.Psychology
+    ToolActivity.Read -> Icons.Default.Description
+    ToolActivity.ReadImage -> Icons.Default.Image
+    ToolActivity.Search -> Icons.Default.Search
+    ToolActivity.Write, ToolActivity.Edit -> Icons.Default.EditNote
+    ToolActivity.Commands -> Icons.Default.Terminal
+    ToolActivity.Code -> Icons.Default.Code
+    ToolActivity.WebSearch -> Icons.Default.TravelExplore
+    ToolActivity.WebFetch -> Icons.Default.Language
+    ToolActivity.Subagents -> Icons.Default.Groups
+    ToolActivity.Plan -> Icons.Default.Checklist
+    ToolActivity.Questions -> Icons.Default.QuestionAnswer
+    ToolActivity.Tools -> Icons.Default.Build
+}
+
+/**
+ * 一组思考和工具调用，与桌面版一样默认折叠成一行：
+ * 进行中显示「正在运行命令 · npm test」，结束后显示「已读取文件，执行了命令」。点开逐条查看。
+ */
+@Composable
+private fun ProcessGroupCard(
+    group: ChatRow.Process,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    highlightedSeq: Long?,
+    modifier: Modifier = Modifier,
+) {
+    val summary = remember(group) { processSummaryOf(group) }
+    val title = processTitleOf(group, summary)
+    val failures = group.members.count { it is ChatItem.Tool && it.isError }
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .clickable(onClick = onToggle)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Icon(
+                processIcon(processIconActivity(group, summary)),
+                null,
+                Modifier.size(16.dp),
+                tint = if (group.closed) muted else DshBrand,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                title,
+                style = MaterialTheme.typography.labelMedium,
+                color = muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (failures > 0) {
+                Spacer(Modifier.width(6.dp))
+                ToolStatusBadge("$failures 个失败", DshError)
+            }
+            if (!group.closed) {
+                Spacer(Modifier.width(8.dp))
+                CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = DshBrand)
+            }
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                if (expanded) "收起" else "展开",
+                Modifier.size(16.dp),
+                tint = muted,
+            )
+        }
+        if (expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 18.dp, top = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                group.members.forEach { member ->
+                    key(member.key) {
+                        ProcessMember(member, highlighted = highlightedSeq != null && member.seq == highlightedSeq)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 过程分组展开后的一项：工具卡片，或一段思考 */
+@Composable
+private fun ProcessMember(member: ChatItem, highlighted: Boolean) {
+    val highlight = if (highlighted) {
+        Modifier
+            .background(DshWarn.copy(alpha = 0.18f), RoundedCornerShape(10.dp))
+            .padding(4.dp)
+    } else {
+        Modifier
+    }
+    when (member) {
+        is ChatItem.Tool -> ToolCard(member, highlight)
+        is ChatItem.Assistant -> {
+            if (member.thinkingText.isNotBlank()) {
+                Text(
+                    // 流式中的长思考只显示尾部，避免每次增量都重排整段
+                    if (member.streaming) member.thinkingText.takeLast(STREAM_TAIL_CHARS) else member.thinkingText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                    modifier = highlight.fillMaxWidth(),
+                )
+            }
+        }
+        else -> {}
     }
 }
 
