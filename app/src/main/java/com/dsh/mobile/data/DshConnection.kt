@@ -36,7 +36,9 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
         data object Disconnected : State()
         data class Connecting(val baseUrl: String) : State()
         data class Connected(val baseUrl: String, val hostVersion: String? = null, val profileId: String? = null,
-            val generation: Long = 0L) : State()
+            val generation: Long = 0L,
+            /** 插件是否验证过电脑上的 DSH 版本；null 表示插件没说（旧插件或版本未知） */
+            val hostVerified: Boolean? = null) : State()
         data class Error(val message: String, val code: ConnectionErrorCode?, val profileId: String?) : State()
     }
 
@@ -165,7 +167,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
                         rememberObservedPin(profile.id, pin, probe)
                     }
                     if (profile.paired && !verifyAccess(probe)) return@launch
-                    ConnectionResult.Ok(version)
+                    ConnectionResult.Ok(version, runCatching { value.jsonObject["hostVerified"]?.jsonPrimitive?.booleanOrNull }.getOrNull())
                 } catch (e: Exception) {
                     val code = classifyConnectError(e)
                     ConnectionResult.Fail(e, code)
@@ -181,7 +183,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
                         onAttempt?.invoke(AttemptInfo(profile.id, null))
                         // UNKNOWN（占位/缺失/无法解析）时 hostVersion 置 null → UI 显示「版本未知」
                         val hostVersion = if (verdict == VersionVerdict.OK) result.version else null
-                        _state.value = State.Connected(normalized, hostVersion, profile.id, probe.generation)
+                        _state.value = State.Connected(normalized, hostVersion, profile.id, probe.generation, result.hostVerified)
                         // Unpaired devices can probe the host but cannot open authenticated event streams.
                         // Starting these before pairing races the dialog with an AUTH_FAILED state.
                         if (profile.paired) {
@@ -283,7 +285,7 @@ class DshConnection(private val appContext: Context, private val accessCheckInte
     }
 
     private sealed class ConnectionResult {
-        data class Ok(val version: String?) : ConnectionResult()
+        data class Ok(val version: String?, val hostVerified: Boolean? = null) : ConnectionResult()
         data class Fail(val e: Exception, val code: ConnectionErrorCode) : ConnectionResult()
     }
 

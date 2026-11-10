@@ -1,0 +1,194 @@
+{
+  "events": [
+    {
+      "event": {
+        "type": "session/title",
+        "seq": 1,
+        "time": 1000,
+        "data": {
+          "title": "修复登录"
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "turn/start",
+        "seq": 2,
+        "time": 1000,
+        "data": {
+          "turn": 1
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "user/message",
+        "seq": 3,
+        "time": 1001,
+        "surfaceOp": "append",
+        "data": {
+          "id": "m1",
+          "content": [
+            {
+              "type": "text",
+              "text": "帮我修一下登录"
+            }
+          ],
+          "source": {
+            "kind": "user"
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "user/message",
+        "seq": 4,
+        "time": 1001,
+        "surfaceOp": "append",
+        "data": {
+          "id": "m2",
+          "content": [
+            {
+              "type": "text",
+              "text": "SKILL BODY"
+            }
+          ],
+          "source": {
+            "kind": "skill-invocation",
+            "name": "pdf"
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tool/call",
+        "seq": 5,
+        "time": 1002,
+        "data": {
+          "turn": 1,
+          "step": 1,
+          "callId": "call-1",
+          "name": "bash",
+          "arguments": "{\"command\":\"rm -rf build\"}"
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "approval/asked",
+        "seq": 6,
+        "time": 1002,
+        "data": {
+          "id": "ap-1",
+          "toolName": "bash",
+          "callId": "call-1",
+          "reason": "run command"
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "approval/decided",
+        "seq": 7,
+        "time": 1003,
+        "data": {
+          "id": "ap-1",
+          "outcome": "allowed-once"
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "tool/result",
+        "seq": 8,
+        "time": 1004,
+        "data": {
+          "turn": 1,
+          "step": 1,
+          "message": {
+            "role": "tool",
+            "content": [
+              {
+                "type": "tool-result",
+                "toolCallId": "call-1",
+                "isError": false,
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "ok"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "todo/write",
+        "seq": 9,
+        "time": 1005,
+        "data": {
+          "todos": [
+            {
+              "content": "定位问题",
+              "status": "completed"
+            },
+            {
+              "content": "修复",
+              "status": "in_progress"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "assistant/message",
+        "seq": 10,
+        "time": 1006,
+        "data": {
+          "turn": 1,
+          "step": 2,
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "reasoning",
+                "text": "想一想"
+              },
+              {
+                "type": "text",
+                "text": "改好了"
+              }
+            ]
+          },
+          "stream": []
+        }
+      }
+    },
+    {
+      "event": {
+        "type": "turn/end",
+        "seq": 11,
+        "time": 193000,
+        "data": {
+          "turn": 1,
+          "reason": {
+            "kind": "completed"
+          }
+        }
+      }
+    }
+  ],
+  "hasMore": true,
+  "projections": {
+    "asOfSeq": 11,
+    "values": {
+      "title": "修复登录"
+    }
+  }
+}

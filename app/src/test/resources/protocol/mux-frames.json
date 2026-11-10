@@ -1,0 +1,193 @@
+[
+  {
+    "type": "approval/requested",
+    "sessionId": "s1",
+    "approvalId": "ap-2",
+    "toolName": "bash",
+    "callId": "call-2",
+    "reason": "run command"
+  },
+  {
+    "type": "question/requested",
+    "sessionId": "s1",
+    "questionRpcId": "<rpc>",
+    "questions": [
+      {
+        "id": "q1",
+        "question": "选哪个？",
+        "options": [
+          {
+            "label": "A"
+          },
+          {
+            "label": "B"
+          }
+        ],
+        "multiSelect": false
+      }
+    ]
+  },
+  {
+    "type": "question/resolved",
+    "sessionId": "s1",
+    "questionRpcId": "<rpc>",
+    "questions": [
+      {
+        "id": "q1",
+        "question": "选哪个？",
+        "options": [
+          {
+            "label": "A"
+          },
+          {
+            "label": "B"
+          }
+        ],
+        "multiSelect": false
+      }
+    ],
+    "outcome": "cancelled"
+  },
+  {
+    "type": "host/session-status",
+    "sessionId": "s1",
+    "status": "running"
+  },
+  {
+    "sessionId": "s2",
+    "updatedAt": 1,
+    "running": false,
+    "blank": true,
+    "type": "host/session-added"
+  },
+  {
+    "type": "host/session-removed",
+    "sessionId": "s3"
+  },
+  {
+    "type": "stream/error",
+    "sessionId": "s1",
+    "error": {
+      "code": "llm/error",
+      "message": "额度不足"
+    }
+  },
+  {
+    "type": "approval/resolved",
+    "sessionId": "s1",
+    "approvalId": "ap-2",
+    "toolName": "bash",
+    "callId": "call-2",
+    "reason": "run command",
+    "outcome": "allowed-once"
+  },
+  {
+    "type": "session/subscribed",
+    "sessionId": "s1",
+    "lastSeq": 11
+  },
+  {
+    "type": "session/event",
+    "sessionId": "s1",
+    "event": {
+      "type": "assistant/reset",
+      "seq": -1,
+      "time": 0,
+      "data": {
+        "text": "",
+        "reasoning": "",
+        "startedAfterSeq": -1
+      }
+    }
+  },
+  {
+    "type": "session/projection",
+    "sessionId": "s1",
+    "key": "title",
+    "value": "修复登录",
+    "seq": 11
+  },
+  {
+    "type": "session/event",
+    "sessionId": "s1",
+    "event": {
+      "type": "assistant/chunk",
+      "seq": -1,
+      "time": 2000,
+      "data": {
+        "chunk": {
+          "type": "text-delta",
+          "text": "继续"
+        }
+      }
+    }
+  },
+  {
+    "type": "session/event",
+    "sessionId": "s1",
+    "event": {
+      "type": "turn/start",
+      "seq": 12,
+      "time": 2000,
+      "data": {
+        "turn": 2
+      }
+    }
+  },
+  {
+    "type": "session/subscribed",
+    "sessionId": "s9",
+    "lastSeq": 11
+  },
+  {
+    "type": "session/event",
+    "sessionId": "s9",
+    "event": {
+      "type": "assistant/reset",
+      "seq": -1,
+      "time": 0,
+      "data": {
+        "text": "",
+        "reasoning": "",
+        "startedAfterSeq": -1
+      }
+    }
+  },
+  {
+    "type": "session/projection",
+    "sessionId": "s9",
+    "key": "title",
+    "value": "修复登录",
+    "seq": 11
+  },
+  {
+    "type": "session/event",
+    "sessionId": "s9",
+    "event": {
+      "type": "assistant/chunk",
+      "seq": -1,
+      "time": 2000,
+      "data": {
+        "chunk": {
+          "type": "text-delta",
+          "text": "继续"
+        }
+      }
+    }
+  },
+  {
+    "type": "session/event",
+    "sessionId": "s9",
+    "event": {
+      "type": "turn/start",
+      "seq": 12,
+      "time": 2000,
+      "data": {
+        "turn": 2
+      }
+    }
+  },
+  {
+    "type": "host/workspace-changed"
+  }
+]

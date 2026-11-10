@@ -270,7 +270,9 @@ fun ConnectScreen(
                                 ) {
                                     Text(deviceTitle(p), style = MaterialTheme.typography.titleMedium)
                                     Text(
-                                        (connected?.takeIf { it.profileId == p.id }?.hostVersion ?: p.lastHostVersion)?.let { "版本 $it" } ?: "版本未知",
+                                        ((connected?.takeIf { it.profileId == p.id }?.hostVersion ?: p.lastHostVersion)?.let { "版本 $it" } ?: "版本未知") +
+                                            // 插件按 protocol-contract.json 判断：电脑上的 DSH 比插件验证过的版本新，协议可能有变
+                                            (if (connected?.takeIf { it.profileId == p.id }?.hostVerified == false) "（插件未验证此版本）" else ""),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.align(Alignment.CenterVertically),
