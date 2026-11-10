@@ -49,6 +49,8 @@ import com.dsh.mobile.data.McpPromptServer
 import com.dsh.mobile.data.McpResource
 import com.dsh.mobile.data.McpResourceServer
 import com.dsh.mobile.data.McpServer
+import com.dsh.mobile.data.NotificationProblem
+import com.dsh.mobile.data.notificationProblems
 import com.dsh.mobile.data.OkHttpClientFactory
 import com.dsh.mobile.data.ReleaseInfo
 import com.dsh.mobile.data.sessionTitleOf
@@ -124,6 +126,7 @@ fun SettingsScreen(
     }
     val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { g ->
         notifGranted = g
+        if (g) com.dsh.mobile.DshApplication.ensureNotificationChannels(context)
     }
     val themePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -186,14 +189,34 @@ fun SettingsScreen(
         scope.launch { settingsStore.setNotifyCompletion(on) }
     }
 
-    /** 跳系统「通知渠道设置」页（可单独调审批/完成渠道的铃声、勿扰等） */
-    fun openChannelSettings() {
-        runCatching {
-            context.startActivity(
-                Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
-                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-            )
+    /** 跳系统通知设置：给了渠道就打开该渠道（铃声、横幅、勿扰），否则打开本应用的通知设置 */
+    fun openNotificationSettings(channelId: String?) {
+        val intent = if (channelId != null) {
+            Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                .putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
+        } else {
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
         }
+        runCatching { context.startActivity(intent) }
+    }
+
+    fun openChannelSettings() = openNotificationSettings(null)
+
+    // 通知诊断：每次回到本页重新读系统里的实际设置（用户可能刚在系统设置里改过）
+    var notifProblems by remember { mutableStateOf<List<NotificationProblem>>(emptyList()) }
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+        notifGranted = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(
+            context, Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        com.dsh.mobile.DshApplication.ensureNotificationChannels(context)
+        notifProblems = notificationProblems(
+            permissionGranted = notifGranted,
+            appNotificationsEnabled = androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled(),
+            channels = com.dsh.mobile.DshApplication.channelStates(context),
+        )
+        onPauseOrDispose { }
     }
 
     fun persist(next: AppearanceConfig) {
@@ -425,6 +448,25 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             color = if (notifGranted) DshSuccess else MaterialTheme.colorScheme.error)
                         if (!notifGranted) TextButton(onClick = { notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("授权") }
+                        // 渠道诊断：权限开着但系统把渠道改成静音/不弹横幅时，指出具体哪一项
+                        if (notifGranted) {
+                            if (notifProblems.isEmpty()) {
+                                Text("提醒渠道：横幅和提示音正常",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 6.dp))
+                            } else {
+                                notifProblems.forEach { problem ->
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                                        Text(problem.message,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.weight(1f))
+                                        TextButton(onClick = { openNotificationSettings(problem.channelId) }) { Text("去设置") }
+                                    }
+                                }
+                            }
+                        }
                     }
                     SettingsRow("通知渠道设置", ::openChannelSettings)
                 }

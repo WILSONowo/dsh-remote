@@ -26,6 +26,8 @@ internal data class Interaction(
     val answers: List<DshConnection.QuestionAnswer> = emptyList(),
     val selected: List<String> = emptyList(),
     val nonce: String = UUID.randomUUID().toString(),
+    /** 通知正文：重连后原地更新通知时沿用 */
+    val text: String = "",
 ) {
     val question get() = questions.getOrNull(answers.size)
     val key get() = session to approval

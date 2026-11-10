@@ -10,6 +10,7 @@ import com.dsh.mobile.data.turnReportBody
 import com.dsh.mobile.data.turnReportHeadline
 import com.dsh.mobile.data.turnReportOf
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import com.dsh.mobile.data.computerScope
 
 import android.app.Notification
@@ -61,22 +62,85 @@ class DshConnectionService : Service() {
     private val pendingTag = "dsh-interaction"
     private val runningTag = "dsh-running"
 
+    /**
+     * 断线时还没处理的待办：通知先留着。重连后网关会把仍在等待的请求重发一遍，
+     * 重发到的原地换上新的 rpc、不再响铃；重连 5 秒后仍没重发的，说明已在别处处理，才撤掉。
+     */
+    private val staleKeys = mutableSetOf<Pair<String, String?>>()
+    private var staleJob: Job? = null
+
+    /** 断线期间点下的审批决定：同一审批重连后重发时自动提交（审批 ID 跨连接不变），过期则提示去待办处理 */
+    private data class Decision(val outcome: String, val expiresAt: Long)
+    private val decisions = mutableMapOf<Pair<String, String>, Decision>()
+    private val decisionJobs = mutableMapOf<Pair<String, String>, Job>()
+
     private fun removeInteraction(key: Pair<String, String?>) {
+        staleKeys.remove(key)
         val item = pending.remove(key) ?: return
         notificationManager().cancel("$pendingTag/${item.nonce}", 0)
         WidgetState.pushPending(this, pending.size)
     }
 
     private fun clearInteractions() {
+        staleJob?.cancel()
+        staleJob = null
         pending.keys.toList().forEach(::removeInteraction)
+        decisionJobs.values.forEach { it.cancel() }
+        decisionJobs.clear()
+        decisions.clear()
+    }
+
+    private fun markStale() {
+        if (pending.isEmpty()) return
+        staleKeys += pending.keys
+        if (staleJob?.isActive == true) return
+        val connection = watcher ?: return clearInteractions()
+        staleJob = scope.launch {
+            withTimeoutOrNull(STALE_RECONNECT_MS) { connection.state.first { it is DshConnection.State.Connected } }
+            delay(STALE_GRACE_MS)
+            staleKeys.toList().forEach(::removeInteraction)
+            staleKeys.clear()
+        }
+    }
+
+    /** 记下审批决定，等重连后重发时提交；超时没等到就提醒用户去待办处理 */
+    private fun deferDecision(item: Interaction, outcome: String, expiresAt: Long = System.currentTimeMillis() + DECISION_TTL_MS) {
+        val approval = item.approval ?: return
+        val key = item.session to approval
+        removeInteraction(item.key)
+        decisions[key] = Decision(outcome, expiresAt)
+        decisionJobs.remove(key)?.cancel()
+        decisionJobs[key] = scope.launch {
+            delay((expiresAt - System.currentTimeMillis()).coerceAtLeast(0))
+            decisionJobs.remove(key)
+            if (decisions.remove(key) != null) {
+                postAlert("审批没有送达", "连接一直没有恢复，请打开 App 在待办里重新处理", item.session)
+            }
+        }
+    }
+
+    private suspend fun submitDecision(connection: DshConnection, item: Interaction, decision: Decision) {
+        val approval = item.approval ?: return
+        val key = item.session to approval
+        decisions.remove(key)
+        decisionJobs.remove(key)?.cancel()
+        removeInteraction(item.key)
+        try {
+            connection.answerApproval(item.session, approval, decision.outcome, item.rpc)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            if (decision.expiresAt > System.currentTimeMillis()) deferDecision(item, decision.outcome, decision.expiresAt)
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        DshApplication.ensureNotificationChannels(this)
         val manager = notificationManager()
-        manager.activeNotifications.filter { it.tag?.startsWith("$pendingTag/") == true }
+        manager.activeNotifications.filter { it.tag?.startsWith("$pendingTag/") == true || it.tag?.startsWith("$runningTag/") == true }
             .forEach { manager.cancel(it.tag, it.id) }
         startAsForeground()
     }
@@ -183,7 +247,7 @@ class DshConnectionService : Service() {
                 }
                 stateJob = launch {
                     connection.state.collect { st ->
-                        if (st !is DshConnection.State.Connected) clearInteractions()
+                        if (st !is DshConnection.State.Connected) markStale()
                         val text = when (st) {
                             is DshConnection.State.Connected -> "已连接 " + st.baseUrl
                             is DshConnection.State.Connecting -> "连接中…"
@@ -210,16 +274,41 @@ class DshConnectionService : Service() {
 
     private suspend fun handle(event: DshConnection.Event) {
         when (event) {
-            is DshConnection.Event.ApprovalResolved -> removeInteraction(event.sessionId to event.approvalId)
+            is DshConnection.Event.ApprovalResolved -> {
+                val key = event.sessionId to event.approvalId
+                decisions.remove(key)
+                decisionJobs.remove(key)?.cancel()
+                removeInteraction(key)
+            }
             is DshConnection.Event.QuestionResolved -> {
                 val key = event.sessionId to null
                 if (event.questionRpcId.isEmpty() || pending[key]?.rpc == event.questionRpcId) removeInteraction(key)
             }
-            DshConnection.Event.InteractionsInvalidated -> clearInteractions()
+            DshConnection.Event.InteractionsInvalidated -> markStale()
             is DshConnection.Event.SessionRemoved -> pending.keys.filter { it.first == event.sessionId }.forEach(::removeInteraction)
             is DshConnection.Event.ApprovalRequested, is DshConnection.Event.QuestionRequested -> {
                 val item = Interaction.from(event) ?: return
-                if (pending[item.key]?.rpc == item.rpc) return
+                // 断线期间已经点过的审批：重发到了就直接提交
+                if (event is DshConnection.Event.ApprovalRequested) {
+                    val decision = decisions[event.sessionId to event.approvalId]
+                    val connection = watcher
+                    if (decision != null && connection != null) {
+                        submitDecision(connection, item, decision)
+                        return
+                    }
+                }
+                val existing = pending[item.key]
+                if (existing?.rpc == item.rpc) return
+                if (existing != null && item.key in staleKeys && existing.questions == item.questions) {
+                    // 重连后重发的同一请求：换上新 rpc，原通知原地更新，不再响铃；问答保留已答的进度
+                    staleKeys.remove(item.key)
+                    val refreshed = existing.copy(rpc = item.rpc)
+                    pending[item.key] = refreshed
+                    val settings = SettingsStore(this)
+                    postAlert(interactionTitle(refreshed), refreshed.text, refreshed.session, interaction = refreshed,
+                        actionsEnabled = !settings.biometricLockEnabled.first(), silent = true)
+                    return
+                }
                 removeInteraction(item.key)
                 val settings = SettingsStore(this)
                 if (!shouldNotifyApproval(settings.backgroundNotify.first(), settings.notifyApprovals.first(),
@@ -242,10 +331,13 @@ class DshConnectionService : Service() {
         }
     }
 
+    private fun interactionTitle(item: Interaction) =
+        if (item.approval != null) "DeepSeek Harness 需要你的审批" else "DeepSeek Harness 需要你的确认"
+
     private fun postInteraction(item: Interaction, text: String, actionsEnabled: Boolean) {
-        pending[item.key] = item
-        postAlert(if (item.approval != null) "DeepSeek Harness 需要你的审批" else "DeepSeek Harness 需要你的确认",
-            text, item.session, interaction = item, actionsEnabled = actionsEnabled)
+        val stored = item.copy(text = text)
+        pending[stored.key] = stored
+        postAlert(interactionTitle(stored), text, stored.session, interaction = stored, actionsEnabled = actionsEnabled)
         WidgetState.pushPending(this, pending.size)
     }
 
@@ -259,12 +351,23 @@ class DshConnectionService : Service() {
         val enabled = settings.backgroundNotify.first() && settings.notifyApprovals.first() &&
             !settings.biometricLockEnabled.first() && settings.activeProfileId.first() == profile.id
         if (pending[item.key] !== item || watcher !== connection) return
-        if (!enabled || connection.state.value !is DshConnection.State.Connected) {
+        if (!enabled) {
             removeInteraction(item.key)
             return
         }
         if (getSystemService(android.app.KeyguardManager::class.java).isDeviceLocked) return
         val operation = path[1]
+        val disconnected = connection.state.value !is DshConnection.State.Connected || item.key in staleKeys
+        if (disconnected) {
+            // 断线中：审批先记下，重连后自动提交；问答需要逐题作答，等连上再答
+            if (item.approval != null && (operation == "reject" || (operation == "allow" && !item.highRisk))) {
+                deferDecision(item, if (operation == "allow") "allowed-once" else "rejected")
+                android.widget.Toast.makeText(this, "已记下你的选择，重新连接后自动提交", android.widget.Toast.LENGTH_SHORT).show()
+            } else {
+                android.widget.Toast.makeText(this, "连接已断开，重新连接后再回答", android.widget.Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
         val answered = when (operation) {
             "allow" -> if (item.approval != null && !item.highRisk) null else return
             "reject" -> if (item.approval != null) null else return
@@ -290,7 +393,14 @@ class DshConnectionService : Service() {
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (_: Exception) {
-            android.widget.Toast.makeText(this, "无法确认处理结果，请查看待办", android.widget.Toast.LENGTH_SHORT).show()
+            if (item.approval != null) {
+                // 可能是连接刚好断了：记下决定，重连后同一审批重发时自动提交；
+                // 若其实已送达，桌面端会发来「已处理」，记下的决定随之作废
+                deferDecision(item, if (operation == "allow") "allowed-once" else "rejected")
+                android.widget.Toast.makeText(this, "暂时没送达，重新连接后自动提交", android.widget.Toast.LENGTH_SHORT).show()
+            } else {
+                postAlert("回答没有送达", "请打开 App 在待办里重新回答", item.session)
+            }
         }
     }
 
@@ -443,6 +553,8 @@ class DshConnectionService : Service() {
         actionsEnabled: Boolean = false,
         /** 锁屏上代替正文显示的文字；null 表示正文可以在锁屏显示 */
         publicText: String? = null,
+        /** 原地更新已有通知时不再响铃 */
+        silent: Boolean = false,
     ) {
         val manager = notificationManager()
         val notification = Notification.Builder(this, channelId)
@@ -452,6 +564,7 @@ class DshConnectionService : Service() {
             .setStyle(Notification.BigTextStyle().bigText(text))
             .setAutoCancel(true)
             .setPriority(Notification.PRIORITY_HIGH)
+            .setOnlyAlertOnce(silent)
             .setContentIntent(openSessionIntent(sessionId, interaction))
             .apply {
                 if (actionsEnabled) interaction?.actions(this@DshConnectionService)?.forEach { addAction(it) }
@@ -482,3 +595,10 @@ class DshConnectionService : Service() {
         super.onDestroy()
     }
 }
+
+/** 断线后最多等多久重新连上；超过就把留着的待办通知撤掉 */
+private const val STALE_RECONNECT_MS = 120_000L
+/** 重连后等网关重发仍在等待的请求的时间 */
+private const val STALE_GRACE_MS = 5_000L
+/** 断线期间点下的审批决定保留多久 */
+private const val DECISION_TTL_MS = 5 * 60_000L

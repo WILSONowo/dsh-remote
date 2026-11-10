@@ -148,7 +148,7 @@ class MainActivity : FragmentActivity() {
             // Android 13+ 通知运行时权限（缺权限时通知静默不显示）
             val notifLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestPermission(),
-            ) {}
+            ) { granted -> if (granted) DshApplication.ensureNotificationChannels(context) }
             LaunchedEffect(Unit) {
                 if (Build.VERSION.SDK_INT >= 33 &&
                     ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)

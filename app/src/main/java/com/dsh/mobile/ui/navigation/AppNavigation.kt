@@ -78,7 +78,9 @@ fun AppNavigation(
     var computerMenu by remember { mutableStateOf(false) }
     var switching by remember { mutableStateOf(false) }
     var notificationAsked by rememberSaveable { mutableStateOf(false) }
-    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) com.dsh.mobile.DshApplication.ensureNotificationChannels(context)
+    }
     LaunchedEffect(connState, activeProfile?.paired) {
         if (connState !is DshConnection.State.Connected || connection.currentProfile()?.paired != true) return@LaunchedEffect
         if (store.backgroundNotify.first()) {

@@ -150,4 +150,34 @@ class NotificationPolicyTest {
             assertEquals("bg=$bg ch=$ch fg=$fg", expected, shouldNotifyCompletion(bg, ch, fg))
         }
     }
+
+    // ---- notificationProblems：渠道诊断 ----
+
+    private fun channel(importance: Int?, sound: Boolean = true, required: Int = 4) =
+        ChannelState("approvals_v2", "审批与确认", importance, sound, required)
+
+    @Test
+    fun problems_permissionAndAppSwitchComeFirst() {
+        val p = notificationProblems(false, false, listOf(channel(0)))
+        assertEquals(1, p.size)
+        assertTrue(p[0].message.contains("没有通知权限"))
+        assertEquals(null, p[0].channelId)
+        assertTrue(notificationProblems(true, false, listOf(channel(0)))[0].message.contains("关闭了本应用"))
+    }
+
+    @Test
+    fun problems_pointAtTheChannelToFix() {
+        assertEquals("「审批与确认」已被关闭", notificationProblems(true, true, listOf(channel(0)))[0].message)
+        val low = notificationProblems(true, true, listOf(channel(3)))[0]
+        assertTrue(low.message.contains("不会弹出横幅"))
+        assertEquals("approvals_v2", low.channelId)
+        assertTrue(notificationProblems(true, true, listOf(channel(2, required = 3)))[0].message.contains("不会响铃"))
+        assertTrue(notificationProblems(true, true, listOf(channel(4, sound = false)))[0].message.contains("没有提示音"))
+        assertTrue(notificationProblems(true, true, listOf(channel(null)))[0].message.contains("还没建立"))
+    }
+
+    @Test
+    fun problems_noneWhenChannelsAreHealthy() {
+        assertTrue(notificationProblems(true, true, listOf(channel(4), channel(3, required = 3))).isEmpty())
+    }
 }
