@@ -266,7 +266,7 @@ class ApprovalCenterTest {
         )
         val notices = mutableListOf<String>()
         backgroundScope.launch { c.notices.collect { notices += it } }
-        events.emit(DshConnection.Event.ApprovalRequested("s1", "a1", "bash", null, "c1"))
+        events.emit(DshConnection.Event.ApprovalRequested("s1", "a1", "bash", callId = "c1", reason = null))
         assertEquals("""{"command":"rm -rf build"}""", (c.items.value.single() as PendingItem.Approval).arguments)
         // 别处处理掉了这里还显示着的审批：提示一句
         events.emit(DshConnection.Event.ApprovalResolved("s1", "a1", "cancelled"))

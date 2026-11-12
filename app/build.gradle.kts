@@ -18,9 +18,9 @@ val hasReleaseSigning = !releaseStoreFile.isNullOrBlank()
 
 // 版本号统管：由根 gradle.properties 提供（避免散落硬编码，CI 可按 tag 覆盖）
 val dsvVersionName =
-    (project.findProperty("DSH_VERSION_NAME") as String?)?.takeIf { it.isNotBlank() } ?: "4.0.0"
+    (project.findProperty("DSH_VERSION_NAME") as String?)?.takeIf { it.isNotBlank() } ?: "4.1.0"
 val dsvVersionCode =
-    ((project.findProperty("DSH_VERSION_CODE") as String?)?.takeIf { it.isNotBlank() } ?: "74").toInt()
+    ((project.findProperty("DSH_VERSION_CODE") as String?)?.takeIf { it.isNotBlank() } ?: "75").toInt()
 
 android {
     namespace = "com.dsh.mobile"
@@ -83,6 +83,8 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = true
         unitTests.all {
+            // Robolectric's Conscrypt reads the loopback peer address during the TLS handshake.
+            it.jvmArgs("--add-opens=java.base/java.net=ALL-UNNAMED")
             it.systemProperty("robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2")
             it.maxHeapSize = "2g"
         }
@@ -122,5 +124,7 @@ dependencies {
     testImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     testImplementation(libs.junit)
+    testImplementation("com.squareup.okhttp3:mockwebserver:${libs.versions.okhttp.get()}")
+    testImplementation("com.squareup.okhttp3:okhttp-tls:${libs.versions.okhttp.get()}")
     testImplementation(libs.kotlinx.coroutines.test)
 }

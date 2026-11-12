@@ -26,8 +26,8 @@ import org.robolectric.annotation.GraphicsMode
 import okio.buffer
 import okio.source
 import org.json.JSONObject
-import java.net.ServerSocket
-import java.net.InetAddress
+import com.dsh.mobile.data.SecureHostFixture
+
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 
@@ -169,7 +169,8 @@ class NavigationUiTest {
         val accessChecks = java.util.concurrent.atomic.AtomicInteger()
         val release = CountDownLatch(1)
         val executor = Executors.newCachedThreadPool { runnable -> Thread(runnable).apply { isDaemon = true } }
-        val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        val fixture = SecureHostFixture()
+        val server = fixture.requests
         executor.execute {
             while (!server.isClosed) {
                 val socket = runCatching { server.accept() }.getOrNull() ?: break
@@ -234,7 +235,7 @@ class NavigationUiTest {
                 store.setBackgroundNotify(false)
                 store.setAutoModel(firstTask == "adaptive")
                 listOf("a", "b").forEach { id ->
-                    store.upsertProfile(HostProfile("paired-$id", "Computer $id", "http://127.0.0.1:${server.localPort}", paired = true))
+                    store.upsertProfile(HostProfile("paired-$id", "Computer $id", fixture.url, paired = true))
                 }
             }
             val style = mutableStateOf(ThemeStyle.STANDARD)
@@ -525,7 +526,7 @@ class NavigationUiTest {
             workspaceReply.get().countDown()
             accessReply.countDown()
             release.countDown()
-            server.close()
+            fixture.close()
             executor.shutdownNow()
         }
     }

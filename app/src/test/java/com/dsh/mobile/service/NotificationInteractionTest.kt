@@ -11,11 +11,11 @@ import com.dsh.mobile.DshApplication
 import com.dsh.mobile.data.HostProfile
 import com.dsh.mobile.data.SettingsStore
 import com.dsh.mobile.ui.NavigationFixtureApplication
-import java.net.ServerSocket
+import com.dsh.mobile.data.SecureHostFixture
 import okio.source
 import okio.buffer
 import java.io.OutputStream
-import java.net.InetAddress
+
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -34,7 +34,8 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34], application = NavigationFixtureApplication::class)
 class NotificationInteractionTest {
     @Test fun notificationActionsAnswerOnlyTheirOriginalLiveRequest() {
-        val server = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+        val fixture = SecureHostFixture()
+        val server = fixture.requests
         val workers = Executors.newCachedThreadPool()
         val closeStreams = CountDownLatch(1)
         val mux = AtomicReference<OutputStream>()
@@ -85,7 +86,7 @@ class NotificationInteractionTest {
         for (id in listOf(DshApplication.CHANNEL_ID, DshApplication.CHANNEL_APPROVALS))
             manager.createNotificationChannel(NotificationChannel(id, id, NotificationManager.IMPORTANCE_HIGH))
         val settings = SettingsStore(service)
-        val profile = HostProfile("notify-a", "Computer A", "http://127.0.0.1:${server.localPort}", paired = true)
+        val profile = HostProfile("notify-a", "Computer A", fixture.url, paired = true)
         fun waitFor(condition: () -> Boolean) {
             val deadline = System.nanoTime() + 5_000_000_000
             do {
@@ -164,7 +165,7 @@ class NotificationInteractionTest {
             approval("expired", "lookup")
             val expired = alertWith("lookup").actions.first()
             click(expired)
-            waitFor { org.robolectric.shadows.ShadowToast.getTextOfLatestToast() == "无法确认处理结果，请查看待办" }
+            waitFor { org.robolectric.shadows.ShadowToast.getTextOfLatestToast() == "暂时没送达，重新连接后自动提交" }
             click(expired)
             approval("resolved", "inspect")
             val stale = alertWith("inspect").actions.first()
@@ -183,17 +184,22 @@ class NotificationInteractionTest {
             assertSame(previousMux, mux.get())
             approval("disconnect", "fetch")
             val disconnected = alertWith("fetch").actions.first()
-            mux.get().close()
-            waitFor { alerts().isEmpty() }
+            val interruptedMux = mux.get()
+            interruptedMux.close()
+            waitFor { mux.get() !== interruptedMux }
+            assertTrue(alerts().isNotEmpty())
             click(disconnected)
+            waitFor { org.robolectric.shadows.ShadowToast.getTextOfLatestToast() == "已记下你的选择，重新连接后自动提交" }
+            frame("resumed", """type":"approval/requested","approvalId":"disconnect","toolName":"fetch" """)
+            waitFor { replies.size == 6 }
             controller.destroy()
             click(switched)
             shadowOf(Looper.getMainLooper()).idle()
-            assertEquals(listOf("first", "danger", "new", "batch", "expired"), replies.map { it.getString("rpcId") })
+            assertEquals(listOf("first", "danger", "new", "batch", "expired", "resumed"), replies.map { it.getString("rpcId") })
         } finally {
             (service.application as com.dsh.mobile.ConnectionOwner).connection.disconnect()
             closeStreams.countDown()
-            server.close()
+            fixture.close()
             workers.shutdownNow()
         }
     }
